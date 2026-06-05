@@ -152,6 +152,10 @@ Auf einer Maschine mit Node, JDK 17+ und Android SDK (`ANDROID_SDK_ROOT` gesetzt
 adb install -r frontend/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Wichtig fuer das Build-Tooling: Verwende derzeit ein kompatibles JDK wie 17 oder
+21. Ein zu neues JDK kann mit Gradle/AGP in Fehler wie `Unsupported class file
+major version 69` laufen; das entspricht Java 25.
+
 Optional kann der Build interaktiv nach `CF-Access-Client-Id` und
 `CF-Access-Client-Secret` fragen oder diese aus `CF_ACCESS_CLIENT_ID` und
 `CF_ACCESS_CLIENT_SECRET` übernehmen. Dann werden die Cloudflare-Access-Credentials
