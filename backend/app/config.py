@@ -87,6 +87,9 @@ class AgentSpec(BaseModel):
     prompt_via: Literal["arg", "stdin"] = "arg"
     stream_format: Literal["claude-json", "raw", "lines"] = "raw"
     env: dict[str, str] = Field(default_factory=dict)
+    # Environment variables to REMOVE before spawning (e.g. PYTHONPATH/PYTHONHOME
+    # that would leak the backend's venv into a Python-based agent CLI).
+    unset_env: list[str] = Field(default_factory=list)
     cwd: str = "{project_dir}"
     timeout_seconds: Optional[int] = None
     enabled: bool = True
@@ -126,10 +129,14 @@ def default_agents() -> dict[str, AgentSpec]:
         "hermes": AgentSpec(
             key="hermes",
             display_name="Hermes",
-            # NOTE: adjust this to the real Hermes CLI invocation on your server.
-            command=["hermes", "{prompt}"],
+            # `chat -q`: single non-interactive query that STREAMS intermediate
+            # steps (tool previews) live. --yolo bypasses approvals, --accept-hooks
+            # runs headless. AGENTS.md is auto-injected from the CWD.
+            command=["hermes", "chat", "-q", "{prompt}", "--yolo", "--accept-hooks"],
             prompt_via="arg",
             stream_format="raw",
+            env={"HERMES_ACCEPT_HOOKS": "1", "NO_COLOR": "1"},
+            unset_env=["PYTHONPATH", "PYTHONHOME"],
         ),
     }
 

@@ -254,7 +254,9 @@ class TaskManager:
     def _summary_line(self, task_id: str) -> str:
         with session_scope() as db:
             task = db.get(Task, task_id)
-            text = (task.result_summary or task.prompt or "update").strip()
+            # The user's prompt makes a cleaner, agent-agnostic commit subject
+            # than an output fragment (esp. for raw-streaming agents like Hermes).
+            text = (task.prompt or task.result_summary or "update").strip()
         first = text.splitlines()[0] if text.splitlines() else "update"
         return first[:69] + "..." if len(first) > 72 else first
 

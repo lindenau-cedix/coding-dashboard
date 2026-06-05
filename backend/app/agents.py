@@ -4,11 +4,16 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import AgentSpec
+
+# Strip ANSI escape sequences (colors, cursor moves, spinners) so raw agent
+# output renders cleanly in the plain-text web console.
+_ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))")
 
 OutputCallback = Callable[[str], Awaitable[None]]
 
@@ -41,6 +46,8 @@ def _build_env(spec: AgentSpec) -> dict[str, str]:
             parts.append(p)
     env["PATH"] = os.pathsep.join(parts)
     env.update(spec.env)
+    for key in spec.unset_env:
+        env.pop(key, None)
     return env
 
 
@@ -66,7 +73,7 @@ class _RawParser:
     is_error = False
 
     def feed(self, line: str) -> str:
-        return line
+        return _ANSI_RE.sub("", line)
 
     def summary(self) -> str:
         return ""

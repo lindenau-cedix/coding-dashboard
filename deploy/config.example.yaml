@@ -45,15 +45,26 @@ agents:
 
   hermes:
     display_name: "Hermes"
-    # >>> WICHTIG: An die echte Hermes-CLI anpassen! <<<
-    # Beispiel falls Hermes den Prompt als Argument nimmt:
+    # `hermes chat -q "<prompt>"`: einzelne, nicht-interaktive Query, die
+    # Zwischenschritte (Tool-Previews) LIVE streamt. --yolo überspringt Approvals,
+    # --accept-hooks läuft headless. AGENTS.md wird automatisch aus dem CWD geladen.
     command:
       - "hermes"
+      - "chat"
+      - "-q"
       - "{prompt}"
+      - "--yolo"
+      - "--accept-hooks"
     prompt_via: arg
     stream_format: raw
     enabled: true
-    # Falls Hermes den Prompt stattdessen über stdin erwartet:
-    #   prompt_via: stdin
-    #   command: ["hermes", "run", "--cwd", "{project_dir}"]
-    # Falls Hermes ebenfalls strukturiertes JSON streamt, ggf. stream_format anpassen.
+    env:
+      HERMES_ACCEPT_HOOKS: "1"   # Shell-Hooks headless akzeptieren
+      NO_COLOR: "1"              # Farbcodes unterdrücken (saubere Web-Konsole)
+    # Verhindert, dass PYTHONPATH/PYTHONHOME des Backend-venv die (Python-)Hermes-
+    # CLI stören (entspricht dem hermes-Wrapper, der diese Variablen leert).
+    unset_env:
+      - "PYTHONPATH"
+      - "PYTHONHOME"
+    # Alternative (nur Endergebnis, kein Live-Stream, am leisesten):
+    #   command: ["hermes", "-z", "{prompt}"]

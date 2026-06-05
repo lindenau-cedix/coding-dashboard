@@ -161,11 +161,17 @@ agents:
 
   hermes:
     display_name: "Hermes"
-    # >>> Bei Bedarf an die echte Hermes-CLI anpassen (Argumente / prompt_via / stream_format) <<<
-    command: ["$HERMES_BIN", "{prompt}"]
+    # hermes chat -q: einzelne nicht-interaktive Query, streamt Zwischenschritte live;
+    # --yolo (Approvals aus), --accept-hooks (headless), AGENTS.md aus CWD.
+    # Leise Alternative ohne Live-Stream: command ["$HERMES_BIN", "-z", "{prompt}"]
+    command: ["$HERMES_BIN", "chat", "-q", "{prompt}", "--yolo", "--accept-hooks"]
     prompt_via: arg
     stream_format: raw
     enabled: true
+    env:
+      HERMES_ACCEPT_HOOKS: "1"
+      NO_COLOR: "1"
+    unset_env: ["PYTHONPATH", "PYTHONHOME"]
 YAML
   chown root:"$SERVICE_USER" "$CONFIG_YAML"; chmod 640 "$CONFIG_YAML"
 fi

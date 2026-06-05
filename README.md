@@ -109,25 +109,36 @@ sudo ./deploy/uninstall.sh   # entfernen
 
 ---
 
-## ⚙️ Hermes konfigurieren (wichtig!)
+## ⚙️ Agent-Konfiguration (`config.yaml`)
 
-Claudes Aufruf ist vorkonfiguriert. **Den Hermes-Aufruf musst du an deine
-Installation anpassen**, da dessen CLI-Syntax hier nicht bekannt ist:
+**Beide Agenten sind fertig vorkonfiguriert** – Claude über `claude -p … stream-json`,
+Hermes über `chat -q` (mit Live-Streaming der Zwischenschritte):
 
 ```yaml
-# /etc/coding-dashboard/config.yaml
 agents:
+  claude:
+    command: ["claude", "-p", "{prompt}", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"]
+    stream_format: claude-json
   hermes:
-    display_name: "Hermes"
-    command: ["/pfad/zu/hermes", "{prompt}"]   # <-- anpassen
-    prompt_via: arg            # oder "stdin", falls Hermes den Prompt über stdin liest
-    stream_format: raw         # oder "claude-json", falls Hermes JSON streamt
-    enabled: true
+    command: ["hermes", "chat", "-q", "{prompt}", "--yolo", "--accept-hooks"]
+    stream_format: raw
+    env: { HERMES_ACCEPT_HOOKS: "1", NO_COLOR: "1" }
+    unset_env: ["PYTHONPATH", "PYTHONHOME"]   # Backend-venv nicht in Hermes leaken
 ```
 
-Platzhalter: `{prompt}` (Aufgabe inkl. AGENTS.md-Instruktion), `{project_dir}`
-(lokaler Repo-Pfad; der Agent wird ohnehin **im** Projektverzeichnis ausgeführt).
-Danach: `sudo systemctl restart coding-dashboard`.
+Warum so bei Hermes:
+- **`chat -q`** ist eine einzelne, nicht-interaktive Query, die **Zwischenschritte
+  (Tool-Previews) live streamt**; **`AGENTS.md` aus dem CWD** (= Projektverzeichnis)
+  wird automatisch injiziert.
+- **`--yolo`** überspringt Approvals (autonom), **`--accept-hooks`** läuft headless.
+- `NO_COLOR=1` + ANSI-Filter im Backend → saubere Web-Konsole.
+- `unset_env` spiegelt den `hermes`-Wrapper, der `PYTHONPATH`/`PYTHONHOME` leert.
+
+Platzhalter: `{prompt}` (Aufgabe inkl. AGENTS.md-Instruktion), `{project_dir}`.
+Der absolute `hermes`/`claude`-Pfad wird vom Installer automatisch eingetragen.
+
+Leiser (nur **Endergebnis**, kein Live-Stream): `command: ["hermes", "-z", "{prompt}"]`.
+Nach Änderungen: `sudo systemctl restart coding-dashboard`.
 
 ---
 

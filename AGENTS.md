@@ -43,8 +43,11 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   Danach `git_ops`: `add -A` → commit (falls Änderungen) → push (immer). Ergebnis +
   Commit-Hash + Push-Status in DB.
 - **Agent-Config:** `config.yaml`. Platzhalter `{prompt}`, `{project_dir}`.
-  `stream_format: claude-json|raw`, `prompt_via: arg|stdin`. Claude vorkonfiguriert;
-  **Hermes-Kommando muss der Betreiber setzen.**
+  `stream_format: claude-json|raw`, `prompt_via: arg|stdin`, `env`, `unset_env`.
+  Claude: `claude -p … stream-json`. Hermes: `hermes chat -q {prompt} --yolo
+  --accept-hooks` (nicht-interaktiv, streamt Zwischenschritte, lädt AGENTS.md aus
+  CWD; dazu `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1` und
+  `unset_env: [PYTHONPATH, PYTHONHOME]`). Raw-Output wird im Runner ANSI-gefiltert.
 - **Serialisierung:** pro Projekt ein `asyncio.Lock` (kein Git-Race); verschiedene
   Projekte laufen parallel. Laufende Tasks werden bei Neustart als `interrupted` markiert.
 
@@ -62,4 +65,5 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
   nächsten Publish erkannt).
 - Android: Launcher-Icons/Splash (Capacitor-Defaults bis dahin).
-- Echte Hermes-CLI-Syntax in `config.yaml` eintragen.
+- Hermes nutzt `chat -q` (Live-Stream). Leise Alternative ohne Zwischenschritte:
+  `command: ["hermes", "-z", "{prompt}"]`.
