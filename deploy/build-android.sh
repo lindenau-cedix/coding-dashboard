@@ -16,6 +16,14 @@ set -euo pipefail
 info() { printf '\033[36m==> %s\033[0m\n' "$*"; }
 err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
+prompt_secret() {
+  local prompt=$1
+  local value
+  read -r -s -p "$prompt" value
+  echo >&2
+  printf '%s' "$value"
+}
+
 API_BASE=${1:-}
 if [[ -z $API_BASE ]]; then
   err "Backend-URL fehlt.  Beispiel: $0 https://dashboard.example.com"
@@ -33,9 +41,35 @@ if [[ -z ${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}} ]]; then
   exit 1
 fi
 
+CF_ACCESS_CLIENT_ID=${CF_ACCESS_CLIENT_ID:-}
+CF_ACCESS_CLIENT_SECRET=${CF_ACCESS_CLIENT_SECRET:-}
+
+if [[ -t 0 && -z $CF_ACCESS_CLIENT_ID && -z $CF_ACCESS_CLIENT_SECRET ]]; then
+  info "Optional: Cloudflare Access Service Token fuer den Android-Build hinterlegen"
+  read -r -p "CF-Access-Client-Id (leer = kein Cloudflare Access im APK-Build): " CF_ACCESS_CLIENT_ID
+  if [[ -n $CF_ACCESS_CLIENT_ID ]]; then
+    CF_ACCESS_CLIENT_SECRET=$(prompt_secret "CF-Access-Client-Secret: ")
+  fi
+fi
+
+if [[ -n $CF_ACCESS_CLIENT_ID && -z $CF_ACCESS_CLIENT_SECRET ]]; then
+  err "CF_ACCESS_CLIENT_SECRET fehlt."
+  exit 1
+fi
+if [[ -z $CF_ACCESS_CLIENT_ID && -n $CF_ACCESS_CLIENT_SECRET ]]; then
+  err "CF_ACCESS_CLIENT_ID fehlt."
+  exit 1
+fi
+
 info "Web-Assets bauen (VITE_API_BASE=$API_BASE)"
 npm install
-VITE_API_BASE="$API_BASE" npm run build
+if [[ -n $CF_ACCESS_CLIENT_ID ]]; then
+  info "Cloudflare Access Service Token wird in den Android-Build eingebettet"
+fi
+VITE_API_BASE="$API_BASE" \
+VITE_CF_ACCESS_CLIENT_ID="$CF_ACCESS_CLIENT_ID" \
+VITE_CF_ACCESS_CLIENT_SECRET="$CF_ACCESS_CLIENT_SECRET" \
+npm run build
 
 if [[ ! -d android ]]; then
   info "Capacitor-Android-Projekt anlegen"
