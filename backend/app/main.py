@@ -34,12 +34,24 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 
+    cors_origins = settings.cors_list or ["*"]
+    cors_kwargs: dict[str, object] = {
+        "allow_credentials": True,
+        "allow_methods": ["*"],
+        "allow_headers": ["*"],
+    }
+    if "*" in cors_origins:
+        # Credentialed CORS cannot use Access-Control-Allow-Origin: *.
+        # Reflect the concrete Origin instead, including Capacitor's
+        # https://localhost Android WebView origin.
+        cors_kwargs["allow_origins"] = []
+        cors_kwargs["allow_origin_regex"] = ".*"
+    else:
+        cors_kwargs["allow_origins"] = cors_origins
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_list or ["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        **cors_kwargs,
     )
 
     app.include_router(auth_router.router, prefix="/api")

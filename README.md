@@ -174,6 +174,12 @@ WebSockets akzeptiert. Bei einer reinen `Service Auth`-Policy verlangt
 Cloudflare das Service-Token laut Doku bei jedem Request erneut, was Browser-
 WebSockets nicht per Custom-Header leisten koennen.
 
+Fuer Android/WebView muss Cloudflare Access ausserdem `OPTIONS`-Preflights
+durchlassen oder selbst korrekt beantworten. In Access unter Advanced settings >
+CORS kann `Bypass OPTIONS requests to origin` aktiviert werden. Das Backend
+spiegelt bei `CD_CORS_ORIGINS=*` die konkrete Origin, damit credentialed CORS
+mit der Capacitor-Origin `https://localhost` funktioniert.
+
 ---
 
 ## Lokale Entwicklung
