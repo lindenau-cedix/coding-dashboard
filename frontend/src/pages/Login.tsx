@@ -87,7 +87,9 @@ export default function Login() {
               className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
             />
             <p className="text-xs text-slate-500">
-              In der Android-App hier die öffentliche Adresse deines Servers eintragen.
+              In der Android-App hier die oeffentliche Adresse deines Servers eintragen.
+              Falls der APK-Build ein Cloudflare-Service-Token eingebettet hat, gilt
+              dieses nur fuer die beim Build konfigurierte URL.
             </p>
           </div>
         )}

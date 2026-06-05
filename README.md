@@ -152,10 +152,23 @@ Auf einer Maschine mit Node, JDK 17+ und Android SDK (`ANDROID_SDK_ROOT` gesetzt
 adb install -r frontend/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Die öffentliche Backend-URL wird fest eingebaut (`VITE_API_BASE`); sie lässt sich
+Optional kann der Build interaktiv nach `CF-Access-Client-Id` und
+`CF-Access-Client-Secret` fragen oder diese aus `CF_ACCESS_CLIENT_ID` und
+`CF_ACCESS_CLIENT_SECRET` übernehmen. Dann werden die Cloudflare-Access-Credentials
+fest in die APK eingebaut und nur an genau die beim Build gesetzte Backend-URL
+gesendet.
+
+Die oeffentliche Backend-URL wird fest eingebaut (`VITE_API_BASE`); sie lässt sich
 in der App unter „Server-Einstellungen" auf dem Login-Screen auch zur Laufzeit
 ändern. **Nutze HTTPS** – Android blockt sonst Klartext (sonst `cleartext: true`
 in `frontend/capacitor.config.ts`).
+
+Wenn das Backend per Cloudflare Access geschuetzt ist, muss die Access-App
+mindestens eine `Allow`-Policy besitzen, damit Cloudflare nach dem initialen
+Service-Token-Request eine `CF_Authorization`-Cookie fuer Folge-Requests und
+WebSockets akzeptiert. Bei einer reinen `Service Auth`-Policy verlangt
+Cloudflare das Service-Token laut Doku bei jedem Request erneut, was Browser-
+WebSockets nicht per Custom-Header leisten koennen.
 
 ---
 

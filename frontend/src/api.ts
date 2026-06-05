@@ -7,12 +7,32 @@ import type {
 
 const API_BASE_KEY = "cd_api_base";
 const TOKEN_KEY = "cd_token";
+const BUILT_API_BASE = normalizeBase(import.meta.env.VITE_API_BASE);
+const CF_ACCESS_CLIENT_ID = import.meta.env.VITE_CF_ACCESS_CLIENT_ID?.trim() || "";
+const CF_ACCESS_CLIENT_SECRET =
+  import.meta.env.VITE_CF_ACCESS_CLIENT_SECRET?.trim() || "";
+
+let cloudflareBootstrapBase = "";
+let cloudflareBootstrapPromise: Promise<void> | null = null;
+
+function normalizeBase(value: string | undefined | null): string {
+  return (value ?? "").trim().replace(/\/+$/, "");
+}
+
+function getCloudflareAccessHeaders(): Record<string, string> {
+  const apiBase = getApiBase();
+  if (!apiBase || apiBase !== BUILT_API_BASE) return {};
+  if (!CF_ACCESS_CLIENT_ID || !CF_ACCESS_CLIENT_SECRET) return {};
+  return {
+    "CF-Access-Client-Id": CF_ACCESS_CLIENT_ID,
+    "CF-Access-Client-Secret": CF_ACCESS_CLIENT_SECRET,
+  };
+}
 
 export function getApiBase(): string {
   const stored = localStorage.getItem(API_BASE_KEY);
-  if (stored) return stored.replace(/\/+$/, "");
-  const env = import.meta.env.VITE_API_BASE;
-  if (env) return env.replace(/\/+$/, "");
+  if (stored) return normalizeBase(stored);
+  if (BUILT_API_BASE) return BUILT_API_BASE;
   return ""; // same origin
 }
 
@@ -47,12 +67,44 @@ export class ApiError extends Error {
   }
 }
 
+export async function ensureCloudflareAccess(): Promise<void> {
+  const apiBase = getApiBase();
+  const headers = getCloudflareAccessHeaders();
+  if (!apiBase || !Object.keys(headers).length) return;
+
+  if (cloudflareBootstrapPromise && cloudflareBootstrapBase === apiBase) {
+    await cloudflareBootstrapPromise;
+    return;
+  }
+
+  cloudflareBootstrapBase = apiBase;
+  cloudflareBootstrapPromise = (async () => {
+    try {
+      await fetch(`${apiBase}/api/auth/me`, {
+        method: "GET",
+        headers,
+        credentials: "include",
+      });
+    } catch {
+      throw new ApiError(0, "Netzwerkfehler – Backend nicht erreichbar.");
+    }
+  })();
+
+  try {
+    await cloudflareBootstrapPromise;
+  } catch (error) {
+    cloudflareBootstrapBase = "";
+    cloudflareBootstrapPromise = null;
+    throw error;
+  }
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = getCloudflareAccessHeaders();
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -62,6 +114,7 @@ async function request<T>(
     res = await fetch(`${getApiBase()}/api${path}`, {
       method,
       headers,
+      credentials: "include",
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {

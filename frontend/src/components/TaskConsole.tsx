@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, getToken, wsUrl } from "../api";
+import { api, ensureCloudflareAccess, getToken, wsUrl } from "../api";
 import type { Task, TaskStatus, WsMessage } from "../types";
 import { Button, StatusBadge } from "./ui";
 
@@ -19,40 +19,57 @@ export default function TaskConsole({
   useEffect(() => {
     setLines("");
     setStatus("queued");
-    const token = getToken() ?? "";
-    const ws = new WebSocket(
-      wsUrl(`/api/ws/tasks/${taskId}?token=${encodeURIComponent(token)}`),
-    );
+    let ws: WebSocket | null = null;
     let manuallyClosed = false;
 
-    ws.onmessage = (ev) => {
-      let msg: WsMessage;
+    void (async () => {
       try {
-        msg = JSON.parse(ev.data);
-      } catch {
+        await ensureCloudflareAccess();
+      } catch (err) {
+        setLines((prev) =>
+          prev +
+          `\n[Fehler] ${err instanceof Error ? err.message : "Cloudflare Access fehlgeschlagen"}\n`,
+        );
         return;
       }
-      if (msg.type === "output" || msg.type === "git") {
-        const data = (msg as { data: string }).data;
-        setLines((prev) => prev + data);
-      } else if (msg.type === "status") {
-        setStatus((msg as { status: TaskStatus }).status);
-      } else if (msg.type === "done") {
-        const task = (msg as { task: Task }).task;
-        setStatus(task.status);
-        onDoneRef.current?.(task);
-      } else if (msg.type === "error") {
-        const m = (msg as { message: string }).message;
-        setLines((prev) => prev + `\n[Fehler] ${m}\n`);
-      }
-    };
+
+      if (manuallyClosed) return;
+      const token = getToken() ?? "";
+      ws = new WebSocket(
+        wsUrl(`/api/ws/tasks/${taskId}?token=${encodeURIComponent(token)}`),
+      );
+
+      ws.onmessage = (ev) => {
+        let msg: WsMessage;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (msg.type === "output" || msg.type === "git") {
+          const data = (msg as { data: string }).data;
+          setLines((prev) => prev + data);
+        } else if (msg.type === "status") {
+          setStatus((msg as { status: TaskStatus }).status);
+        } else if (msg.type === "done") {
+          const task = (msg as { task: Task }).task;
+          setStatus(task.status);
+          onDoneRef.current?.(task);
+        } else if (msg.type === "error") {
+          const m = (msg as { message: string }).message;
+          setLines((prev) => prev + `\n[Fehler] ${m}\n`);
+        }
+      };
+      ws.onerror = () => {
+        setLines((prev) => prev + "\n[Fehler] WebSocket-Verbindung fehlgeschlagen.\n");
+      };
+    })();
 
     return () => {
       manuallyClosed = true;
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close();
       }
-      void manuallyClosed;
     };
   }, [taskId]);
 
