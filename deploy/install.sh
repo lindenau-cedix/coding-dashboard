@@ -227,6 +227,9 @@ CD_DEFAULT_BRANCH=main
 CD_AGENTS_CONFIG_PATH=$CONFIG_YAML
 CD_FRONTEND_DIST=$APP_DIR/frontend/dist
 
+# "*" spiegelt die konkrete Origin, damit Cloudflare-Access-Cookies mit
+# credentials:include funktionieren. Strenger:
+# CD_CORS_ORIGINS=https://localhost,https://$DOMAIN
 CD_CORS_ORIGINS=*
 CD_HOST=127.0.0.1
 CD_PORT=$PORT

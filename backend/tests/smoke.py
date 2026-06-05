@@ -173,6 +173,28 @@ def test_api_and_task() -> None:
     with TestClient(app) as client:
         check("health", client.get("/api/health").json().get("status") == "ok")
 
+        preflight = client.options(
+            "/api/auth/login",
+            headers={
+                "Origin": "https://localhost",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": (
+                    "content-type,cf-access-client-id,cf-access-client-secret"
+                ),
+            },
+        )
+        check("cors preflight -> 200", preflight.status_code == 200, str(preflight.status_code))
+        check(
+            "cors reflects android origin",
+            preflight.headers.get("access-control-allow-origin") == "https://localhost",
+            str(preflight.headers),
+        )
+        check(
+            "cors allows credentials",
+            preflight.headers.get("access-control-allow-credentials") == "true",
+            str(preflight.headers),
+        )
+
         bad = client.post("/api/auth/login", json={"username": "admin", "password": "x"})
         check("login wrong -> 401", bad.status_code == 401, str(bad.status_code))
 
