@@ -1,0 +1,29 @@
+# systemd unit for the Coding Dashboard backend.
+# Placeholders (__UPPER__) are substituted by deploy/install.sh.
+# Runs as the user that has `claude` and `hermes` authenticated, so the agents
+# find their credentials in that user's $HOME.
+[Unit]
+Description=Coding Dashboard backend (FastAPI/uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__APP_DIR__/backend
+EnvironmentFile=__CONFIG_DIR__/coding-dashboard.env
+ExecStart=__APP_DIR__/backend/.venv/bin/uvicorn app.main:app --host ${CD_HOST} --port ${CD_PORT}
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=30
+# Long-running agent tasks: do not kill on idle.
+# Some hardening (relaxed because agents legitimately read/write project files
+# under the data dir and the user's home for credentials):
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

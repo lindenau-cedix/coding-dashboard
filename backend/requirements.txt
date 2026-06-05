@@ -1,0 +1,10 @@
+# Coding Dashboard - Backend dependencies
+# Tested against Python 3.10 - 3.12 (Ubuntu system python).
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2
+SQLAlchemy>=2.0,<3.0
+httpx>=0.27
+PyJWT>=2.8
+PyYAML>=6.0
