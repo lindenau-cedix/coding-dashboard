@@ -100,6 +100,14 @@ else
   npx cap sync android
 fi
 
+# App-Icon/Logo aus frontend/assets/ generieren. Muss NACH 'cap add/sync'
+# laufen, weil android/ nicht eingecheckt wird und dort jedes Mal neu entsteht.
+# Quelle: frontend/assets/icon-only.png, icon-foreground.png, icon-background.png.
+if [[ -f assets/icon-foreground.png ]]; then
+  info "App-Icons aus assets/ generieren"
+  npx @capacitor/assets generate --android
+fi
+
 info "APK bauen (assembleDebug)"
 cd android
 chmod +x ./gradlew 2>/dev/null || true

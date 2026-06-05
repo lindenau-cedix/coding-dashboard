@@ -57,8 +57,13 @@ Commit & Push und vollständiger Historie. Erreichbar über **Web** und
 - Ubuntu mit `sudo`
 - `claude` (Claude Code) **und** `hermes` installiert **und eingeloggt** für den
   User, unter dem der Service laufen soll (er nutzt deren Credentials in `$HOME`).
-- Ein **GitHub Personal Access Token** mit `repo`-Scope
-  (fein-granular: *Contents* + *Administration* read/write; für „Repo löschen" zusätzlich *delete*).
+- Ein **GitHub Personal Access Token**:
+  - **Klassisch:** `repo`-Scope (zum Löschen von Repos zusätzlich `delete_repo`).
+  - **Fein-granular:** *Contents* read/write **und** *Administration* read/write mit
+    Repository-Zugriff **„All repositories"** – zum Anlegen neuer Repos zwingend
+    („Only select repositories" genügt dafür nicht; *Administration: write* deckt
+    Anlegen und Löschen ab). Fehlt das Recht, schlägt „Projekt erstellen" mit
+    *„Resource not accessible by personal access token"* fehl.
 - Optional, aber empfohlen: Node.js + npm auf dem Server (für den Frontend-Build).
   Fehlt npm, baue das Frontend vorab woanders (siehe unten) – das `dist` wird dann mitkopiert.
 
@@ -151,6 +156,14 @@ Auf einer Maschine mit Node, JDK 17+ und Android SDK (`ANDROID_SDK_ROOT` gesetzt
 # → frontend/android/app/build/outputs/apk/debug/app-debug.apk
 adb install -r frontend/android/app/build/outputs/apk/debug/app-debug.apk
 ```
+
+**App-Icon/Logo:** Das Launcher-Icon wird beim Build aus `frontend/assets/`
+erzeugt (`icon-only.png` = Legacy, `icon-foreground.png` + `icon-background.png` =
+Adaptive Icon); `build-android.sh` ruft dafür `@capacitor/assets` auf. Weil
+`frontend/android/` nicht eingecheckt ist und bei jedem Build neu entsteht, ist
+`frontend/assets/` die dauerhafte Quelle. Zum Ändern das Quell-PNG ersetzen
+(Vorlage/Master: `logo_android.png` im Repo-Wurzelverzeichnis, siehe
+`frontend/assets/README.md`) und neu bauen.
 
 Wichtig fuer das Build-Tooling: Verwende derzeit ein kompatibles JDK wie 17 oder
 21. Ein zu neues JDK kann mit Gradle/AGP in Fehler wie `Unsupported class file

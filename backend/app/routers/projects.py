@@ -91,7 +91,22 @@ async def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> 
             repo = await github_client.get_repo(full)
     except github_client.GitHubError as exc:
         code = exc.status_code if 400 <= exc.status_code < 500 else 502
-        raise HTTPException(code, f"GitHub: {exc.message}")
+        detail = f"GitHub: {exc.message}"
+        if exc.status_code in (401, 403):
+            if body.mode == "create":
+                detail += (
+                    " - Der GitHub-Token darf keine Repositories anlegen. Benoetigt wird "
+                    "'repo'-Scope (klassischer Token) bzw. fein-granular die Berechtigung "
+                    "'Administration: Read and write' fuer den passenden Owner mit Zugriff "
+                    "auf 'All repositories'. Token mit diesen Rechten neu erstellen und "
+                    "CD_GITHUB_TOKEN aktualisieren."
+                )
+            else:
+                detail += (
+                    " - Der GitHub-Token hat keinen Zugriff auf dieses Repository "
+                    "(fein-granular: 'Contents: Read' und Zugriff auf das Repo noetig)."
+                )
+        raise HTTPException(code, detail)
 
     full_name = repo.get("full_name", "")
     clone_url = repo.get("clone_url", "")
