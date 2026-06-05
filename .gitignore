@@ -31,3 +31,7 @@ frontend/ios/
 .idea/
 .vscode/
 *.swp
+
+# --- Claude ---
+.claude/
+.claude/*
