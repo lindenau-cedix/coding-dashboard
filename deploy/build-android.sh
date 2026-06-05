@@ -16,6 +16,11 @@ set -euo pipefail
 info() { printf '\033[36m==> %s\033[0m\n' "$*"; }
 err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
+java_major_version() {
+  java -XshowSettings:properties -version 2>&1 \
+    | awk -F'= ' '/java\.class\.version =/ { print int($2 - 44); exit }'
+}
+
 prompt_secret() {
   local prompt=$1
   local value
@@ -38,6 +43,22 @@ command -v npm >/dev/null 2>&1 || { err "npm fehlt."; exit 1; }
 command -v java >/dev/null 2>&1 || { err "JDK (java) fehlt."; exit 1; }
 if [[ -z ${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}} ]]; then
   err "ANDROID_SDK_ROOT/ANDROID_HOME nicht gesetzt – Android SDK erforderlich."
+  exit 1
+fi
+
+JAVA_MAJOR=$(java_major_version)
+if [[ -z ${JAVA_MAJOR:-} ]]; then
+  err "Konnte die Java-Version nicht ermitteln."
+  exit 1
+fi
+if (( JAVA_MAJOR < 17 )); then
+  err "Java $JAVA_MAJOR ist zu alt. Fuer diesen Android-Build wird mindestens JDK 17 benoetigt."
+  exit 1
+fi
+if (( JAVA_MAJOR > 24 )); then
+  err "Java $JAVA_MAJOR wird von diesem Android-Tooling noch nicht unterstuetzt."
+  err "Bitte den Build mit JDK 17 oder JDK 21 starten, z.B.:"
+  err "  JAVA_HOME=/pfad/zu/jdk-21 PATH=/pfad/zu/jdk-21/bin:\$PATH $0 $API_BASE"
   exit 1
 fi
 
