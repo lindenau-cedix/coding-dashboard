@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import get_settings
@@ -23,6 +23,25 @@ class Base(DeclarativeBase):
     pass
 
 
+# New model columns added after a DB already exists.  create_all() never
+# ALTERs existing tables and we run without Alembic, so add them by hand here.
+# Each entry is idempotent (checked against PRAGMA table_info).
+_SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
+    "tasks": {"mode": "VARCHAR(16) NOT NULL DEFAULT 'task'"},
+}
+
+
+def _ensure_sqlite_columns() -> None:
+    if not _url.startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        for table, cols in _SQLITE_COLUMN_ADDITIONS.items():
+            existing = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))}
+            for name, ddl in cols.items():
+                if name not in existing:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
 def init_db() -> None:
     """Create the data directory and all tables."""
     _settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -30,6 +49,7 @@ def init_db() -> None:
     from . import models  # noqa: F401  (register mappers)
 
     Base.metadata.create_all(bind=engine)
+    _ensure_sqlite_columns()
 
 
 def get_db() -> Iterator[Session]:

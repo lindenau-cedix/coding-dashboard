@@ -37,13 +37,21 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 ```
 
 ## Kernabläufe
-- **Task:** `POST /api/projects/{id}/tasks` → `TaskManager.submit` → asyncio-Task.
-  Prompt = User-Prompt + `context_instruction` (AGENTS.md-Pflege). Output streamt
-  über WS `/api/ws/tasks/{id}` (mit Replay aus Buffer/DB für späte/erneute Joins).
-  Danach `git_ops`: `add -A` → commit (falls Änderungen) → push (immer). Ergebnis +
-  Commit-Hash + Push-Status in DB.
+- **Task:** `POST /api/projects/{id}/tasks` (Body: `agent`, `prompt`, `mode`) →
+  `TaskManager.submit` → asyncio-Task. Prompt = User-Prompt + `context_instruction`
+  (AGENTS.md-Pflege). Output streamt über WS `/api/ws/tasks/{id}` (mit Replay aus
+  Buffer/DB für späte/erneute Joins). Danach `git_ops`: `add -A` → commit (falls
+  Änderungen) → push (immer). Ergebnis + Commit-Hash + Push-Status in DB.
+- **Ziel-Modus (`mode="goal"`):** Statt einer Aufgabe gibt man ein Ziel an. Das
+  Backend ruft den Agenten über dessen `goal_command`-Template auf (Claude:
+  `/goal {prompt}`); der komplette Verlauf bis zum Ziel zählt als ein Task. Alles
+  Weitere (Streaming, AGENTS.md-Pflege, Commit, Push, Historie) ist identisch.
+  Prompt-Bau zentral in `task_runner.build_agent_prompt()`. Nur Agenten mit
+  gesetztem `goal_command` bieten den Modus an (`AgentInfo.supports_goal`); das UI
+  blendet den Umschalter dann ein und filtert die Agentenliste entsprechend.
 - **Agent-Config:** `config.yaml`. Platzhalter `{prompt}`, `{project_dir}`.
-  `stream_format: claude-json|raw`, `prompt_via: arg|stdin`, `env`, `unset_env`.
+  `stream_format: claude-json|raw`, `prompt_via: arg|stdin`, `env`, `unset_env`,
+  `goal_command` (optional, aktiviert Ziel-Modus).
   Claude: `claude -p … stream-json`. Hermes: `hermes chat -q {prompt} --yolo
   --accept-hooks` (nicht-interaktiv, streamt Zwischenschritte, lädt AGENTS.md aus
   CWD; dazu `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1` und
@@ -53,7 +61,9 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 
 ## Konventionen
 - Secrets nur via env (`CD_*`). GitHub-Token nie persistieren.
-- DB-Migrationsfrei: `create_all` (kein Alembic). Schemaänderung → ggf. DB neu/ergänzen.
+- DB-Migrationsfrei: `create_all` (kein Alembic). Neue Spalten für bestehende
+  SQLite-DBs additiv in `database._SQLITE_COLUMN_ADDITIONS` eintragen (idempotentes
+  `ALTER TABLE ADD COLUMN`, läuft nach `create_all` in `init_db`).
 - Backend-Endpunkte, die `asyncio.create_task` nutzen, müssen `async def` sein.
 
 ## Tests

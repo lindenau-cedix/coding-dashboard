@@ -2,7 +2,10 @@ export interface Agent {
   key: string;
   display_name: string;
   enabled: boolean;
+  supports_goal: boolean;
 }
+
+export type TaskMode = "task" | "goal";
 
 export interface Project {
   id: string;
@@ -32,6 +35,7 @@ export interface Task {
   project_id: string;
   agent: string;
   prompt: string;
+  mode: TaskMode;
   status: TaskStatus;
   exit_code: number | null;
   result_summary: string;

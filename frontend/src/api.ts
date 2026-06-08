@@ -3,6 +3,7 @@ import type {
   Project,
   ProjectCreatePayload,
   Task,
+  TaskMode,
 } from "./types";
 
 const API_BASE_KEY = "cd_api_base";
@@ -163,8 +164,12 @@ export const api = {
 
   listTasks: (projectId: string) =>
     request<Task[]>("GET", `/projects/${projectId}/tasks`),
-  createTask: (projectId: string, agent: string, prompt: string) =>
-    request<Task>("POST", `/projects/${projectId}/tasks`, { agent, prompt }),
+  createTask: (
+    projectId: string,
+    agent: string,
+    prompt: string,
+    mode: TaskMode = "task",
+  ) => request<Task>("POST", `/projects/${projectId}/tasks`, { agent, prompt, mode }),
   getTask: (id: string) => request<Task>("GET", `/tasks/${id}`),
   stopTask: (id: string) =>
     request<{ stopped: boolean }>("POST", `/tasks/${id}/stop`),

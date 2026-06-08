@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
 import TaskConsole from "../components/TaskConsole";
 import { Button, ErrorText, Spinner, StatusBadge, formatDate } from "../components/ui";
-import type { Agent, Project, Task } from "../types";
+import type { Agent, Project, Task, TaskMode } from "../types";
 
 export default function ProjectDetail() {
   const { id = "" } = useParams();
@@ -14,6 +14,7 @@ export default function ProjectDetail() {
   const [loading, setLoading] = useState(true);
 
   const [agent, setAgent] = useState("");
+  const [mode, setMode] = useState<TaskMode>("task");
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -29,6 +30,25 @@ export default function ProjectDetail() {
     for (const a of agents) m[a.key] = a.display_name;
     return m;
   }, [agents]);
+
+  const goalSupported = useMemo(() => agents.some((a) => a.supports_goal), [agents]);
+  // In goal mode only agents that support it are selectable.
+  const selectableAgents = useMemo(
+    () => (mode === "goal" ? agents.filter((a) => a.supports_goal) : agents),
+    [agents, mode],
+  );
+
+  function changeMode(next: TaskMode) {
+    setMode(next);
+    if (next === "goal") {
+      const current = agents.find((a) => a.key === agent);
+      if (!current || !current.supports_goal) {
+        const first = agents.find((a) => a.supports_goal && a.enabled)
+          ?? agents.find((a) => a.supports_goal);
+        if (first) setAgent(first.key);
+      }
+    }
+  }
 
   async function refreshTasks() {
     setTasks(await api.listTasks(id));
@@ -68,7 +88,7 @@ export default function ProjectDetail() {
     setSubmitting(true);
     setError("");
     try {
-      const task = await api.createTask(id, agent, prompt.trim());
+      const task = await api.createTask(id, agent, prompt.trim(), mode);
       setActiveTaskId(task.id);
       setPrompt("");
       await refreshTasks();
@@ -155,7 +175,30 @@ export default function ProjectDetail() {
         onSubmit={submit}
         className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900 p-5"
       >
-        <h2 className="font-medium text-slate-200">Neue Aufgabe</h2>
+        <h2 className="font-medium text-slate-200">
+          {mode === "goal" ? "Neues Ziel" : "Neue Aufgabe"}
+        </h2>
+        {goalSupported && (
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-slate-400">Modus:</label>
+            <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
+              {(["task", "goal"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => changeMode(m)}
+                  className={`px-3 py-1.5 text-sm transition ${
+                    mode === m
+                      ? "bg-cyan-600 text-white"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  {m === "goal" ? "Ziel (/goal)" : "Aufgabe"}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-2">
           <label className="text-sm text-slate-400">Agent:</label>
           <select
@@ -163,7 +206,7 @@ export default function ProjectDetail() {
             onChange={(e) => setAgent(e.target.value)}
             className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
           >
-            {agents.map((a) => (
+            {selectableAgents.map((a) => (
               <option key={a.key} value={a.key} disabled={!a.enabled}>
                 {a.display_name}
                 {a.enabled ? "" : " (deaktiviert)"}
@@ -175,15 +218,25 @@ export default function ProjectDetail() {
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           rows={4}
-          placeholder="Beschreibe die Aufgabe, die der Agent im Projekt erledigen soll…"
+          placeholder={
+            mode === "goal"
+              ? "Beschreibe das Ziel – der Agent arbeitet im /goal-Modus, bis es erreicht ist…"
+              : "Beschreibe die Aufgabe, die der Agent im Projekt erledigen soll…"
+          }
           className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
         />
         <div className="flex items-center justify-between">
           <p className="text-xs text-slate-500">
-            Nach Abschluss werden Änderungen automatisch committet & gepusht.
+            {mode === "goal"
+              ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
+              : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
           </p>
           <Button type="submit" disabled={submitting || !agent || !prompt.trim()}>
-            {submitting ? "Startet…" : "Aufgabe starten"}
+            {submitting
+              ? "Startet…"
+              : mode === "goal"
+                ? "Ziel starten"
+                : "Aufgabe starten"}
           </Button>
         </div>
       </form>
@@ -234,6 +287,11 @@ export default function ProjectDetail() {
                   <span className="text-sm font-medium text-slate-200">
                     {agentName[t.agent] ?? t.agent}
                   </span>
+                  {t.mode === "goal" && (
+                    <span className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-xs font-medium text-cyan-300">
+                      Ziel
+                    </span>
+                  )}
                   <span className="flex-1 truncate text-sm text-slate-400">
                     {t.prompt}
                   </span>
@@ -244,7 +302,9 @@ export default function ProjectDetail() {
                 {expanded === t.id && (
                   <div className="space-y-3 border-t border-slate-800 p-4">
                     <div>
-                      <div className="text-xs uppercase tracking-wide text-slate-500">Aufgabe</div>
+                      <div className="text-xs uppercase tracking-wide text-slate-500">
+                        {t.mode === "goal" ? "Ziel" : "Aufgabe"}
+                      </div>
                       <p className="mt-1 whitespace-pre-wrap text-sm text-slate-300">{t.prompt}</p>
                     </div>
 

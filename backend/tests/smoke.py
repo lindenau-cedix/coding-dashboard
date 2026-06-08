@@ -136,6 +136,29 @@ async def _noop() -> None:
     return None
 
 
+def test_goal_mode() -> None:
+    from app.task_runner import build_agent_prompt
+
+    claude = AgentSpec(
+        key="claude",
+        display_name="Claude Code",
+        command=["claude"],
+        goal_command="/goal {prompt}",
+    )
+    plain = AgentSpec(key="x", display_name="X", command=["x"])  # no goal_command
+
+    ctx = "CTX"
+    goal = build_agent_prompt(claude, "ship the feature", "goal", ctx)
+    task = build_agent_prompt(claude, "ship the feature", "task", ctx)
+    nogoal = build_agent_prompt(plain, "ship the feature", "goal", ctx)
+
+    check("goal mode wraps with /goal", goal.startswith("/goal ship the feature"), goal)
+    check("goal mode keeps context", ctx in goal, goal)
+    check("task mode leaves prompt as-is", task.startswith("ship the feature"), task)
+    check("agent without goal_command falls back", nogoal.startswith("ship the feature"), nogoal)
+    check("supports_goal reflects goal_command", bool(claude.goal_command) and not plain.goal_command)
+
+
 def test_git_cycle() -> None:
     remote = TMP / "remote.git"
     work = TMP / "work"
@@ -266,6 +289,7 @@ def main() -> int:
         test_security()
         test_parser()
         test_agent_runner()
+        test_goal_mode()
         test_git_cycle()
         test_api_and_task()
     finally:

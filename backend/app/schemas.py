@@ -22,6 +22,7 @@ class AgentInfo(BaseModel):
     key: str
     display_name: str
     enabled: bool
+    supports_goal: bool = False
 
 
 class ProjectCreate(BaseModel):
@@ -55,6 +56,7 @@ class ProjectDetail(ProjectOut):
 class TaskCreate(BaseModel):
     agent: str
     prompt: str = Field(min_length=1)
+    mode: Literal["task", "goal"] = "task"
 
 
 class TaskOut(BaseModel):
@@ -64,6 +66,7 @@ class TaskOut(BaseModel):
     project_id: str
     agent: str
     prompt: str
+    mode: str
     status: str
     exit_code: Optional[int]
     result_summary: str

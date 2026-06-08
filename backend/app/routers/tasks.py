@@ -18,7 +18,12 @@ router = APIRouter(tags=["tasks"], dependencies=[Depends(get_current_user)])
 def list_agents() -> list[AgentInfo]:
     cfg = get_agents_config()
     return [
-        AgentInfo(key=a.key, display_name=a.display_name, enabled=a.enabled)
+        AgentInfo(
+            key=a.key,
+            display_name=a.display_name,
+            enabled=a.enabled,
+            supports_goal=bool(a.goal_command),
+        )
         for a in cfg.agents.values()
     ]
 
@@ -49,8 +54,18 @@ async def create_task(
     spec = cfg.agents.get(body.agent)
     if spec is None or not spec.enabled:
         raise HTTPException(400, f"Unbekannter oder deaktivierter Agent: {body.agent}")
+    if body.mode == "goal" and not spec.goal_command:
+        raise HTTPException(
+            400, f"Agent {spec.display_name} unterstützt keinen Goal-Modus."
+        )
 
-    task = Task(project_id=project_id, agent=body.agent, prompt=body.prompt, status="queued")
+    task = Task(
+        project_id=project_id,
+        agent=body.agent,
+        prompt=body.prompt,
+        mode=body.mode,
+        status="queued",
+    )
     db.add(task)
     db.commit()
     db.refresh(task)

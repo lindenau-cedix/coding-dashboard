@@ -86,6 +86,11 @@ class AgentSpec(BaseModel):
     command: list[str]
     prompt_via: Literal["arg", "stdin"] = "arg"
     stream_format: Literal["claude-json", "raw", "lines"] = "raw"
+    # If set, this agent supports "goal mode": instead of a one-off task prompt
+    # the user states a goal and the agent works until it is reached.  The
+    # template wraps the user's goal text before it is sent (``{prompt}`` is the
+    # goal).  ``None`` => the agent has no goal mode.
+    goal_command: Optional[str] = None
     env: dict[str, str] = Field(default_factory=dict)
     # Environment variables to REMOVE before spawning (e.g. PYTHONPATH/PYTHONHOME
     # that would leak the backend's venv into a Python-based agent CLI).
@@ -125,6 +130,7 @@ def default_agents() -> dict[str, AgentSpec]:
             ],
             prompt_via="arg",
             stream_format="claude-json",
+            goal_command="/goal {prompt}",
         ),
         "hermes": AgentSpec(
             key="hermes",

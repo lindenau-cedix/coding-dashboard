@@ -11,6 +11,10 @@
 # prompt_via : "arg"  -> {prompt} wird in die Argumente eingesetzt
 #              "stdin" -> Prompt wird auf stdin geschrieben (kein {prompt} nötig)
 # stream_format : "claude-json" (Claudes --output-format stream-json) | "raw"
+# goal_command : optional. Template für den "Ziel"-Modus (/goal). Ist es gesetzt,
+#                kann man dem Agenten statt einer Aufgabe ein Ziel geben; der
+#                gesamte Verlauf bis zum Ziel zählt als ein Task. {prompt} ist das
+#                Ziel. Fehlt das Feld, bietet der Agent keinen Ziel-Modus an.
 # =============================================================================
 
 # Instruktion, die JEDER Aufgabe angehängt wird, damit Claude und Hermes über
@@ -40,6 +44,8 @@ agents:
       - "--dangerously-skip-permissions"
     prompt_via: arg
     stream_format: claude-json
+    # Aktiviert den "Ziel"-Modus: das Dashboard ruft Claude mit "/goal <Ziel>" auf.
+    goal_command: "/goal {prompt}"
     enabled: true
     # timeout_seconds: 3600
 

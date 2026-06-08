@@ -53,6 +53,8 @@ class Task(Base):
     )
     agent: Mapped[str] = mapped_column(String(64))
     prompt: Mapped[str] = mapped_column(Text)
+    # "task" (one-off prompt) | "goal" (agent works until the goal is reached)
+    mode: Mapped[str] = mapped_column(String(16), default="task")
 
     # queued | running | success | failed | error | interrupted | cancelled
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)

@@ -29,6 +29,21 @@ def task_to_dict(task: Task) -> dict:
     return TaskOut.model_validate(task).model_dump(mode="json")
 
 
+def build_agent_prompt(spec, prompt: str, mode: str, context_instruction: str) -> str:
+    """Compose the text handed to the agent CLI.
+
+    In goal mode the user's goal is wrapped with the agent's ``goal_command``
+    template (e.g. Claude's ``/goal {prompt}``) so the agent works until the
+    goal is reached; otherwise the prompt is used as-is.  The shared context
+    instruction (AGENTS.md upkeep, no self-commit) is appended either way.
+    """
+    if mode == "goal" and getattr(spec, "goal_command", None):
+        base = spec.goal_command.replace("{prompt}", prompt)
+    else:
+        base = prompt
+    return f"{base}\n\n---\n{context_instruction}"
+
+
 class TaskChannel:
     """In-memory pub/sub buffer for one task's live output."""
 
@@ -146,6 +161,7 @@ class TaskManager:
                 raise RuntimeError("Task oder Projekt nicht gefunden")
             agent_key = task.agent
             prompt = task.prompt
+            mode = task.mode
             project_dir = project.local_path
             branch = project.default_branch or settings.default_branch
             task.branch = branch
@@ -173,7 +189,11 @@ class TaskManager:
             self._mark(task_id, status="running", started=True)
             ch.publish({"type": "status", "status": "running"})
 
-            full_prompt = f"{prompt}\n\n---\n{agents.context_instruction}"
+            # Goal mode hands the agent the goal via its goal_command template
+            # (e.g. Claude's "/goal {prompt}") and lets it work until reached.
+            # Everything else (streaming, AGENTS.md upkeep, commit, push) is
+            # identical to a normal task.
+            full_prompt = build_agent_prompt(spec, prompt, mode, agents.context_instruction)
 
             async def on_output(chunk: str) -> None:
                 ch.publish({"type": "output", "data": chunk})
