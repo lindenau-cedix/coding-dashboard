@@ -159,6 +159,28 @@ def test_goal_mode() -> None:
     check("supports_goal reflects goal_command", bool(claude.goal_command) and not plain.goal_command)
 
 
+def test_config_backfill() -> None:
+    """A config.yaml that defines a built-in agent but omits newer optional
+    fields (e.g. goal_command) must inherit them from the built-in defaults, so
+    existing installer-generated configs gain new features after a restart."""
+    from app.config import load_agents_config
+
+    cfg_path = TMP / "backfill.yaml"
+    cfg_path.write_text(
+        "agents:\n"
+        "  claude:\n"
+        '    display_name: "Claude Code"\n'
+        '    command: ["claude", "-p", "{prompt}"]\n'
+        "    stream_format: claude-json\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    cfg = load_agents_config(cfg_path)
+    claude = cfg.agents["claude"]
+    check("backfill: goal_command inherited", claude.goal_command == "/goal {prompt}", claude.goal_command)
+    check("backfill: explicit command kept", claude.command == ["claude", "-p", "{prompt}"], claude.command)
+
+
 def test_git_cycle() -> None:
     remote = TMP / "remote.git"
     work = TMP / "work"
@@ -290,6 +312,7 @@ def main() -> int:
         test_parser()
         test_agent_runner()
         test_goal_mode()
+        test_config_backfill()
         test_git_cycle()
         test_api_and_task()
     finally:

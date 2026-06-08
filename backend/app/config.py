@@ -158,9 +158,18 @@ def load_agents_config(path: Path) -> AgentsConfig:
 
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     agents_raw = data.get("agents") or {}
+    builtin = default_agents()
     agents: dict[str, AgentSpec] = {}
     for key, spec in agents_raw.items():
         spec = dict(spec or {})
+        # For built-in agents, backfill fields the config.yaml does not set from
+        # the built-in defaults. This keeps existing (installer-generated) configs
+        # forward-compatible: new optional fields like ``goal_command`` light up
+        # on the next restart without requiring users to hand-edit config.yaml.
+        if key in builtin:
+            merged = builtin[key].model_dump()
+            merged.update(spec)
+            spec = merged
         spec["key"] = key
         spec.setdefault("display_name", key.capitalize())
         agents[key] = AgentSpec(**spec)

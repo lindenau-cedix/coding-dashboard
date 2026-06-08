@@ -51,7 +51,13 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   blendet den Umschalter dann ein und filtert die Agentenliste entsprechend.
 - **Agent-Config:** `config.yaml`. Platzhalter `{prompt}`, `{project_dir}`.
   `stream_format: claude-json|raw`, `prompt_via: arg|stdin`, `env`, `unset_env`,
-  `goal_command` (optional, aktiviert Ziel-Modus).
+  `goal_command` (optional, aktiviert Ziel-Modus). **Backfill:** Für eingebaute
+  Agenten (`claude`, `hermes`) füllt `load_agents_config` fehlende Felder aus
+  `default_agents()` auf; die `config.yaml` überschreibt nur explizit gesetzte
+  Felder. So erhalten bestehende (installer-generierte) Configs neue optionale
+  Felder wie `goal_command` automatisch beim nächsten Neustart — ohne
+  `/etc/coding-dashboard/config.yaml` von Hand editieren zu müssen (`update.sh`
+  lässt eine bestehende Config bewusst unangetastet).
   Claude: `claude -p … stream-json`. Hermes: `hermes chat -q {prompt} --yolo
   --accept-hooks` (nicht-interaktiv, streamt Zwischenschritte, lädt AGENTS.md aus
   CWD; dazu `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1` und
