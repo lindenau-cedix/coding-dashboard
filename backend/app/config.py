@@ -220,6 +220,16 @@ def load_agents_config(path: Path) -> AgentsConfig:
         # on the next restart without requiring users to hand-edit config.yaml.
         if key in builtin:
             merged = builtin[key].model_dump()
+            # command is a list: if the YAML spec has a shorter command than the
+            # built-in, the extra elements (e.g. --use-auth-token) must be
+            # APPENDED to the spec's command, not prepended (which would dup
+            # the base CLI).  A full YAML command (same length) replaces outright.
+            if (
+                "command" in spec
+                and isinstance(spec["command"], list)
+                and len(merged["command"]) > len(spec["command"])
+            ):
+                spec["command"] = spec["command"] + merged["command"][len(spec["command"]) :]
             merged.update(spec)
             spec = merged
         spec["key"] = key
