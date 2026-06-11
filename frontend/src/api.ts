@@ -3,6 +3,7 @@ import type {
   Project,
   ProjectCreatePayload,
   Task,
+  TaskImagePayload,
   TaskMode,
 } from "./types";
 
@@ -171,6 +172,7 @@ export const api = {
     mode: TaskMode = "task",
     model = "",
     effort = "",
+    images: TaskImagePayload[] = [],
   ) =>
     request<Task>("POST", `/projects/${projectId}/tasks`, {
       agent,
@@ -178,6 +180,7 @@ export const api = {
       mode,
       model,
       effort,
+      images,
     }),
   getTask: (id: string) => request<Task>("GET", `/tasks/${id}`),
   stopTask: (id: string) =>
@@ -185,6 +188,30 @@ export const api = {
   pullProject: (id: string) =>
     request<{ ok: boolean; branch: string; output: string }>("POST", `/projects/${id}/pull`),
 };
+
+/**
+ * Fetch a task image with auth headers (plain <img src> cannot send the
+ * Bearer token) and return an object URL. Caller revokes it when done.
+ */
+export async function fetchTaskImage(
+  taskId: string,
+  name: string,
+): Promise<string> {
+  const headers: Record<string, string> = getCloudflareAccessHeaders();
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  let res: Response;
+  try {
+    res = await fetch(
+      `${getApiBase()}/api/tasks/${taskId}/images/${encodeURIComponent(name)}`,
+      { headers, credentials: "include" },
+    );
+  } catch {
+    throw new ApiError(0, "Netzwerkfehler – Backend nicht erreichbar.");
+  }
+  if (!res.ok) throw new ApiError(res.status, "Bild konnte nicht geladen werden.");
+  return URL.createObjectURL(await res.blob());
+}
 
 export function commitUrl(project: Project, hash: string): string | null {
   if (!project.github_url || !hash) return null;

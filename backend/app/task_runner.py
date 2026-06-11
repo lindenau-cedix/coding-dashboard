@@ -8,13 +8,15 @@ the WebSocket endpoint subscribes to (with full replay for late joiners).
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import traceback
 from collections import OrderedDict
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import git_ops
+from . import git_ops, uploads
 from .agents import run_agent
 from .config import get_agents_config, get_settings
 from .database import session_scope
@@ -30,18 +32,35 @@ def task_to_dict(task: Task) -> dict:
     return TaskOut.model_validate(task).model_dump(mode="json")
 
 
-def build_agent_prompt(spec, prompt: str, mode: str, context_instruction: str) -> str:
+def build_agent_prompt(
+    spec,
+    prompt: str,
+    mode: str,
+    context_instruction: str,
+    image_paths: Sequence[str] = (),
+) -> str:
     """Compose the text handed to the agent CLI.
 
     In goal mode the user's goal is wrapped with the agent's ``goal_command``
     template (e.g. Claude's ``/goal {prompt}``) so the agent works until the
-    goal is reached; otherwise the prompt is used as-is.  The shared context
-    instruction (AGENTS.md upkeep, no self-commit) is appended either way.
+    goal is reached; otherwise the prompt is used as-is.  Attached images are
+    referenced as local file paths the agent opens with its own read tool
+    (they live outside the repo, so the auto-commit never picks them up).
+    The shared context instruction (AGENTS.md upkeep, no self-commit) is
+    appended either way.
     """
     if mode == "goal" and getattr(spec, "goal_command", None):
         base = spec.goal_command.replace("{prompt}", prompt)
     else:
         base = prompt
+    if image_paths:
+        listing = "\n".join(f"- {p}" for p in image_paths)
+        base += (
+            "\n\nAngehängte Bilder (lokale Dateien — öffne sie mit deinem"
+            " Datei-/Bild-Lese-Tool und beziehe ihren Inhalt in die Aufgabe ein;"
+            " sie liegen außerhalb des Repos und dürfen nicht hineinkopiert"
+            " werden):\n" + listing
+        )
     return f"{base}\n\n---\n{context_instruction}"
 
 
@@ -165,6 +184,7 @@ class TaskManager:
             mode = task.mode
             model = task.model
             effort = task.effort
+            image_names = json.loads(task.images) if task.images else []
             project_dir = project.local_path
             branch = project.default_branch or settings.default_branch
             task.branch = branch
@@ -196,7 +216,14 @@ class TaskManager:
             # (e.g. Claude's "/goal {prompt}") and lets it work until reached.
             # Everything else (streaming, AGENTS.md upkeep, commit, push) is
             # identical to a normal task.
-            full_prompt = build_agent_prompt(spec, prompt, mode, agents.context_instruction)
+            image_paths = uploads.image_paths(task_id, image_names)
+            if image_paths:
+                ch.publish(
+                    {"type": "output", "data": f"[bilder] {len(image_paths)} Bild(er) angehängt\n"}
+                )
+            full_prompt = build_agent_prompt(
+                spec, prompt, mode, agents.context_instruction, image_paths=image_paths
+            )
 
             async def on_output(chunk: str) -> None:
                 ch.publish({"type": "output", "data": chunk})

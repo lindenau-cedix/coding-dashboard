@@ -1,10 +1,11 @@
 """Pydantic request/response schemas."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -56,6 +57,13 @@ class ProjectDetail(ProjectOut):
     clone_url: str
 
 
+class TaskImagePayload(BaseModel):
+    """One uploaded image: original filename + base64 content (or data-URL)."""
+
+    name: str = ""
+    data: str = Field(min_length=1)
+
+
 class TaskCreate(BaseModel):
     agent: str
     prompt: str = Field(min_length=1)
@@ -63,6 +71,9 @@ class TaskCreate(BaseModel):
     # "" = use the agent's/CLI's default model resp. effort.
     model: str = ""
     effort: str = ""
+    # Optional image attachments; stored server-side and handed to the agent
+    # as local file paths appended to the prompt.
+    images: list[TaskImagePayload] = Field(default_factory=list)
 
 
 class TaskOut(BaseModel):
@@ -75,6 +86,8 @@ class TaskOut(BaseModel):
     mode: str
     model: str = ""
     effort: str = ""
+    # Filenames of the attached images (DB stores them as a JSON string).
+    images: list[str] = []
     status: str
     exit_code: Optional[int]
     result_summary: str
@@ -87,6 +100,13 @@ class TaskOut(BaseModel):
     created_at: datetime
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
+
+    @field_validator("images", mode="before")
+    @classmethod
+    def _images_from_json(cls, v: object) -> object:
+        if isinstance(v, str):
+            return json.loads(v) if v.strip() else []
+        return v or []
 
 
 class TaskDetail(TaskOut):

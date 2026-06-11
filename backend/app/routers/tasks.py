@@ -1,9 +1,13 @@
 """Task routes: submit work to an agent, list history, inspect results."""
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from .. import uploads
 from ..auth import get_current_user
 from ..config import get_agents_config
 from ..database import get_db
@@ -68,6 +72,12 @@ async def create_task(
         raise HTTPException(
             400, f"Agent {spec.display_name} unterstützt Effort '{body.effort}' nicht."
         )
+    # Decode/validate the attachments BEFORE creating the task row so a bad
+    # upload rejects the whole request without leaving artifacts behind.
+    try:
+        decoded_images = uploads.decode_images(body.images)
+    except uploads.ImageError as exc:
+        raise HTTPException(400, str(exc))
 
     task = Task(
         project_id=project_id,
@@ -81,6 +91,11 @@ async def create_task(
     db.add(task)
     db.commit()
     db.refresh(task)
+    if decoded_images:
+        names = uploads.save_images(task.id, decoded_images)
+        task.images = json.dumps(names)
+        db.commit()
+        db.refresh(task)
     manager.submit(task.id, project_id)
     return task
 
@@ -91,6 +106,21 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> Task:
     if task is None:
         raise HTTPException(404, "Task nicht gefunden.")
     return task
+
+
+@router.get("/tasks/{task_id}/images/{name}")
+def get_task_image(task_id: str, name: str, db: Session = Depends(get_db)) -> FileResponse:
+    task = db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(404, "Task nicht gefunden.")
+    # Only names recorded on the task are served — no path traversal possible.
+    names = json.loads(task.images) if task.images else []
+    if name not in names:
+        raise HTTPException(404, "Bild nicht gefunden.")
+    path = uploads.task_image_dir(task_id) / name
+    if not path.exists():
+        raise HTTPException(404, "Bilddatei nicht (mehr) vorhanden.")
+    return FileResponse(path, media_type=uploads.media_type(name))
 
 
 @router.post("/tasks/{task_id}/stop")

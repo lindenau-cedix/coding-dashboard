@@ -58,6 +58,8 @@ class Task(Base):
     # Optional per-task model/effort selection ("" = agent/CLI default).
     model: Mapped[str] = mapped_column(String(128), default="")
     effort: Mapped[str] = mapped_column(String(32), default="")
+    # JSON list of attached image filenames (stored under data_dir/task_images/{id}/).
+    images: Mapped[str] = mapped_column(Text, default="")
 
     # queued | running | success | failed | error | interrupted | cancelled
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)

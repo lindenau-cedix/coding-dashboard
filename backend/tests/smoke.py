@@ -257,6 +257,49 @@ def test_goal_mode() -> None:
     check("supports_goal reflects goal_command", bool(claude.goal_command) and not plain.goal_command)
 
 
+def test_images() -> None:
+    """Upload validation + prompt augmentation for task image attachments."""
+    from app import uploads
+    from app.schemas import TaskImagePayload
+    from app.task_runner import build_agent_prompt
+
+    spec = AgentSpec(key="x", display_name="X", command=["x"])
+    with_imgs = build_agent_prompt(spec, "fix it", "task", "CTX", image_paths=["/tmp/a.png"])
+    check("prompt lists image path", "/tmp/a.png" in with_imgs, with_imgs)
+    check("prompt has image instruction", "Angehängte Bilder" in with_imgs, with_imgs)
+    without = build_agent_prompt(spec, "fix it", "task", "CTX")
+    check("no image block without images", "Angehängte Bilder" not in without, without)
+
+    png_b64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+        "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    decoded = uploads.decode_images(
+        [
+            TaskImagePayload(name="shot.png", data=f"data:image/png;base64,{png_b64}"),
+            TaskImagePayload(name="../evil/shot.png", data=png_b64),
+        ]
+    )
+    check("data-url decoded", decoded[0][0] == "shot.png" and decoded[0][1][:4] == b"\x89PNG")
+    check("path components stripped, name deduped", decoded[1][0] == "shot-2.png", decoded[1][0])
+
+    names = uploads.save_images("smoke-task", decoded)
+    paths = uploads.image_paths("smoke-task", names)
+    check("images saved", len(paths) == 2 and all(Path(p).exists() for p in paths), str(paths))
+    uploads.delete_images("smoke-task")
+    check("images deleted", not uploads.task_image_dir("smoke-task").exists())
+
+    for bad, why in [
+        (TaskImagePayload(name="x.exe", data=png_b64), "bad extension"),
+        (TaskImagePayload(name="x.png", data="not-base64!!"), "bad base64"),
+    ]:
+        try:
+            uploads.decode_images([bad])
+            check(f"image rejected ({why})", False)
+        except uploads.ImageError:
+            check(f"image rejected ({why})", True)
+
+
 def test_config_backfill() -> None:
     """A config.yaml that defines a built-in agent but omits newer optional
     fields (e.g. goal_command) must inherit them from the built-in defaults, so
@@ -282,7 +325,22 @@ def test_config_backfill() -> None:
     claude = cfg.agents["claude"]
     codex = cfg.agents["codex"]
     check("backfill: goal_command inherited", claude.goal_command == "/goal {prompt}", claude.goal_command)
-    check("backfill: explicit command kept", claude.command == ["claude", "-p", "{prompt}"], claude.command)
+    # A YAML command SHORTER than the builtin gets the missing builtin tail
+    # appended (so old installer configs keep gaining required flags).
+    check(
+        "backfill: shorter command completed from builtin",
+        claude.command
+        == [
+            "claude",
+            "-p",
+            "{prompt}",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+        ],
+        str(claude.command),
+    )
     check("backfill: codex added to legacy config", codex.command[:2] == ["codex", "exec"], str(codex.command))
     check("backfill: codex prompt via stdin", codex.prompt_via == "stdin", codex.prompt_via)
     check("backfill: claude model choices", "opus" in claude.model_choices, str(claude.model_choices))
@@ -446,6 +504,51 @@ def test_api_and_task() -> None:
         )
         check("invalid model -> 400", bad_model.status_code == 400, str(bad_model.status_code))
 
+        # Task with an image attachment: stored outside the repo, served via
+        # the image endpoint, never committed.
+        png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+            "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        r_img = client.post(
+            f"/api/projects/{pid}/tasks",
+            headers=H,
+            json={
+                "agent": "fake",
+                "prompt": "schau dir das bild an",
+                "images": [{"name": "screenshot.png", "data": f"data:image/png;base64,{png_b64}"}],
+            },
+        )
+        check("image task created", r_img.status_code == 201, str(r_img.json()))
+        tid_img = r_img.json()["id"]
+        check("image listed on task", r_img.json().get("images") == ["screenshot.png"], str(r_img.json().get("images")))
+        img_res = client.get(f"/api/tasks/{tid_img}/images/screenshot.png", headers=H)
+        check("image served", img_res.status_code == 200 and img_res.content[:4] == b"\x89PNG", str(img_res.status_code))
+        check(
+            "unknown image -> 404",
+            client.get(f"/api/tasks/{tid_img}/images/other.png", headers=H).status_code == 404,
+        )
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            d_img = client.get(f"/api/tasks/{tid_img}", headers=H).json()
+            if d_img["status"] in terminal:
+                break
+            time.sleep(0.4)
+        check("image task success", d_img["status"] == "success", str(d_img.get("error")))
+        files_img = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
+        check("image NOT committed to repo", "screenshot.png" not in files_img, files_img)
+
+        bad_img = client.post(
+            f"/api/projects/{pid}/tasks",
+            headers=H,
+            json={
+                "agent": "fake",
+                "prompt": "x",
+                "images": [{"name": "evil.exe", "data": png_b64}],
+            },
+        )
+        check("invalid image -> 400", bad_img.status_code == 400, str(bad_img.status_code))
+
         # Second run: the Letzte-Tasks section is REPLACED (one marker, both
         # entries), not appended twice.
         r2 = client.post(
@@ -482,6 +585,7 @@ def main() -> int:
         test_final_output()
         test_agent_runner()
         test_goal_mode()
+        test_images()
         test_config_backfill()
         test_git_cycle()
         test_api_and_task()
