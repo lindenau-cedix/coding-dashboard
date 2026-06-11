@@ -281,7 +281,7 @@ class TaskManager:
                 db.query(Task)
                 .filter(
                     Task.project_id == project_id,
-                    Task.status.in_("success", "failed"),
+                    Task.status.in_(["success", "failed"]),
                 )
                 .order_by(Task.finished_at.desc())
                 .limit(3)
