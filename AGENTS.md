@@ -81,8 +81,10 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   Configs bleiben explizit. So erhalten bestehende Installationen neue optionale
   Felder/Agenten ohne `/etc/coding-dashboard/config.yaml` von Hand editieren zu
   müssen (`update.sh` lässt eine bestehende Config bewusst unangetastet).
-  Claude: `claude -p … stream-json` (Parser zeigt Tool-Calls mit Detail, z.B.
-  `[tool] Bash: ls -la` / `[tool] Read: pfad`, statt nur des Tool-Namens).
+  Claude: `claude -p … stream-json --use-auth-token` (Parser zeigt Tool-Calls mit Detail, z.B.
+ `[tool] Bash: ls -la` / `[tool] Read: pfad`, statt nur des Tool-Namens).
+  `--use-auth-token` nutzt die Pro-Account-Usage-Credits statt des
+ Organisations-API-Key-Limits. Beide Command-Varianten (task + goal) enthalten ihn.
   Hermes: `hermes chat -q {prompt} --yolo --accept-hooks` (nicht-interaktiv,
   streamt Zwischenschritte, lädt AGENTS.md aus CWD; dazu
   `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1` und
@@ -119,6 +121,9 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-12:** Claude Code nutzt jetzt `--use-auth-token`, d.h. die
+  Pro-Account-Usage-Credits statt des Organisations-API-Key-Limits. Beide
+  Command-Varianten (`command` + `goal_command`) enthalten das Flag.
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
   nächsten Publish erkannt).
@@ -154,6 +159,16 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 22:14 — hermes
+
+**Aufgabe:**
+
+Lass Claude Code auch usage-credits nutzen, nicht nur das Limit vom Plan.
+
+**Endausgabe:**
+
+Wichtig: Die Änderung wird erst nach systemctl restart coding-dashboard wirksam.
+
 ### 2026-06-11 22:11 — claude — fehlgeschlagen
 
 **Aufgabe:**
@@ -187,14 +202,3 @@ Resume this session with:
 Session:        20260612_000312_57b422
 Duration:       2m 52s
 Messages:       29 (1 user, 27 tool calls)
-
-### 2026-06-11 21:52 — claude — fehlgeschlagen
-
-**Aufgabe:**
-
-Die Funktion, welche die letzten 3 Ausgaben an die AGENTS.md hängt funktioniert tadellos. Es soll nach jedem Task die aktuelle LETZTE Ausgabe, sowie die LETZTE Ausgabe der vorherigen 2 Agentenläufe zzgl. deren Aufgaben (auch die aktuelle!), welche sie bekommen haben ans Ende der AGENTS.md gehangen werden, sollten dort schon Einträge sein, werden diese überschrieben. Der Push nach der Aufgabe erfolgt natürlich nach dem Ändern der AGENTS.md! Und wirklich nur die ENDAUSGABE (die letzte) des Agenten! Ebenso funktioniert die Ausgabe von Claude vollständig und es erscheinen nicht immer nur einzelne
-[... gekürzt ...]
-
-**Endausgabe:**
-
-You've hit your session limit · resets 4:20am (Europe/Berlin)
