@@ -161,6 +161,16 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 22:46 — claude — fehlgeschlagen
+
+**Aufgabe:**
+
+Test
+
+**Endausgabe:**
+
+error: unknown option '--use-auth-token'
+
 ### 2026-06-11 22:28 — hermes
 
 **Aufgabe:**
@@ -170,16 +180,6 @@ _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Enda
 **Endausgabe:**
 
 Wichtig: Erst nach systemctl restart coding-dashboard wirksam.
-
-### 2026-06-11 22:23 — claude — fehlgeschlagen
-
-**Aufgabe:**
-
-Test
-
-**Endausgabe:**
-
-You've hit your session limit · resets 4:20am (Europe/Berlin)
 
 ### 2026-06-11 22:23 — claude — fehlgeschlagen
 
