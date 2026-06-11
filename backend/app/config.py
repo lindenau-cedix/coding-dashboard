@@ -142,7 +142,7 @@ def default_agents() -> dict[str, AgentSpec]:
             ],
             prompt_via="arg",
             stream_format="claude-json",
-            goal_command="/goal {prompt} --use-auth-token",
+            goal_command="/goal --use-auth-token {prompt}",
             model_choices=["opus", "sonnet", "haiku"],
             model_args=["--model", "{model}"],
             effort_choices=["low", "medium", "high", "xhigh", "max"],

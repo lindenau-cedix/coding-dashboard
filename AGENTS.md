@@ -121,9 +121,9 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
-- **2026-06-12:** Claude Code nutzt jetzt `--use-auth-token`, d.h. die
-  Pro-Account-Usage-Credits statt des Organisations-API-Key-Limits. Beide
-  Command-Varianten (`command` + `goal_command`) enthalten das Flag.
+- **2026-06-12:** Claude Code `--use-auth-token` ist jetzt in beiden Command-Varianten
+  VOR `{prompt}` positioniert (`/goal --use-auth-token {prompt}` statt danach), damit
+  das Flag korrekt vom CLI-Parser gelesen wird.
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
   nächsten Publish erkannt).
@@ -159,6 +159,16 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 22:20 — hermes
+
+**Aufgabe:**
+
+"--use-auth-token" sollte beim Claude Code-Aufruf sowohl im Goalmode als auch bei einer Aufgabe Teil des Commandes sein.
+
+**Endausgabe:**
+
+Beide Modi nutzen jetzt --use-auth-token korrekt.
+
 ### 2026-06-11 22:17 — claude — fehlgeschlagen
 
 **Aufgabe:**
@@ -170,16 +180,6 @@ Test
 You've hit your session limit · resets 4:20am (Europe/Berlin)
 
 ### 2026-06-11 22:17 — claude — fehlgeschlagen
-
-**Aufgabe:**
-
-Test
-
-**Endausgabe:**
-
-You've hit your session limit · resets 4:20am (Europe/Berlin)
-
-### 2026-06-11 22:16 — claude — fehlgeschlagen
 
 **Aufgabe:**
 
