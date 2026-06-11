@@ -121,9 +121,11 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
-- **2026-06-12:** Claude Code `--use-auth-token` ist jetzt in beiden Command-Varianten
-  VOR `{prompt}` positioniert (`/goal --use-auth-token {prompt}` statt danach), damit
-  das Flag korrekt vom CLI-Parser gelesen wird.
+- **2026-06-12 (Fix):** `--use-auth-token` verschwand beim Laden aus config.yaml wegen
+  flacher `.update()`-Merge — die YAML `command`-Liste ersetzte die Builtin-Liste
+  komplett. Fix: wenn YAML kürzer als Builtin ist, werden die extra Elemente
+  (z.B. `--use-auth-token`) ans YAML-Command angehängt statt verworfen.
+  Achtung: erst nach Service-Neustart wirksam.
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
   nächsten Publish erkannt).
@@ -159,6 +161,16 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 22:28 — hermes
+
+**Aufgabe:**
+
+"--use-auth-token" sollte beim Claude Code-Aufruf sowohl im Goalmode als auch bei einer Aufgabe Teil des Commandes sein. Es wird aber nicht gemacht, obwohl du es bereits 2 mal bestätigt hast, dass es im Code ist.
+
+**Endausgabe:**
+
+Wichtig: Erst nach systemctl restart coding-dashboard wirksam.
+
 ### 2026-06-11 22:23 — claude — fehlgeschlagen
 
 **Aufgabe:**
@@ -178,13 +190,3 @@ Test
 **Endausgabe:**
 
 You've hit your session limit · resets 4:20am (Europe/Berlin)
-
-### 2026-06-11 22:20 — hermes
-
-**Aufgabe:**
-
-"--use-auth-token" sollte beim Claude Code-Aufruf sowohl im Goalmode als auch bei einer Aufgabe Teil des Commandes sein.
-
-**Endausgabe:**
-
-Beide Modi nutzen jetzt --use-auth-token korrekt.
