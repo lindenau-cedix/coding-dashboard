@@ -25,7 +25,11 @@ export default function ProjectDetail() {
   const [showAgentsMd, setShowAgentsMd] = useState(false);
   const [agentsMd, setAgentsMd] = useState<string | null>(null);
   const [pulling, setPulling] = useState(false);
-  const [pullError, setPullError] = useState("");
+  const [pullDialog, setPullDialog] = useState<{ open: boolean; output: string; success: boolean }>({
+    open: false,
+    output: "",
+    success: false,
+  });
 
   const agentName = useMemo(() => {
     const m: Record<string, string> = {};
@@ -132,11 +136,12 @@ export default function ProjectDetail() {
 
   async function pull() {
     setPulling(true);
-    setPullError("");
     try {
-      await api.pullProject(id);
+      const res = await api.pullProject(id);
+      setPullDialog({ open: true, output: res.output || "Erfolgreich gepullt.", success: true });
     } catch (err) {
-      setPullError(err instanceof Error ? err.message : "Pull fehlgeschlagen");
+      const msg = err instanceof Error ? err.message : "Pull fehlgeschlagen";
+      setPullDialog({ open: true, output: msg, success: false });
     } finally {
       setPulling(false);
     }
@@ -190,7 +195,6 @@ export default function ProjectDetail() {
       </div>
 
       <ErrorText>{error}</ErrorText>
-      {pullError && <ErrorText>{pullError}</ErrorText>}
 
       {/* New task */}
       <form
@@ -370,6 +374,23 @@ export default function ProjectDetail() {
           </div>
         )}
       </div>
+
+      {/* Pull output dialog */}
+      {pullDialog.open && (
+        <Modal
+          title={pullDialog.success ? "Pull abgeschlossen" : "Pull fehlgeschlagen"}
+          onClose={() => setPullDialog((d) => ({ ...d, open: false }))}
+        >
+          <pre className={`max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs whitespace-pre-wrap ${pullDialog.success ? "text-slate-300" : "text-red-300"}`}>
+            {pullDialog.output}
+          </pre>
+          <div className="mt-4 flex justify-end">
+            <Button onClick={() => setPullDialog((d) => ({ ...d, open: false }))}>
+              Schließen
+            </Button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

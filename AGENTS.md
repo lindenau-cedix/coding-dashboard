@@ -89,3 +89,7 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 - Android: Launcher-Icons/Splash (Capacitor-Defaults bis dahin).
 - Optional: Stash/Pull-Rebase-Option bei Pull-Konflikten (aktuell `git pull origin branch`,
   kein Stash-Schutz).
+- **2026-06-11:** Pull-Button zeigt Terminal-Output jetzt in einem Modal-Dialog an.
+  `git_ops.pull` gibt `result.stdout.strip()` zurück (vorher `None`); `pull_project`
+  Router antwortet mit `{ok, branch, output}`; Frontend zeigt `Modal`-Dialog mit
+  farbcodiertem Output (erfolgreich = slate, fehlgeschlagen = red).

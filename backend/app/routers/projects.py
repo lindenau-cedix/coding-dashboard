@@ -192,7 +192,7 @@ async def pull_project(project_id: str, db: Session = Depends(get_db)) -> dict:
     if not project.local_path:
         raise HTTPException(409, "Kein lokales Repo vorhanden.")
     try:
-        await asyncio.to_thread(git_ops.pull, project.local_path, project.default_branch, settings.github_token)
+        output = await asyncio.to_thread(git_ops.pull, project.local_path, project.default_branch, settings.github_token)
     except git_ops.GitError as exc:
         raise HTTPException(409, str(exc))
-    return {"ok": True, "branch": project.default_branch}
+    return {"ok": True, "branch": project.default_branch, "output": output}
