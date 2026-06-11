@@ -1,0 +1,76 @@
+# =============================================================================
+# Coding Dashboard - Agent-Konfiguration
+# Wird vom Backend gelesen (Pfad via CD_AGENTS_CONFIG_PATH, i.d.R.
+# /etc/coding-dashboard/config.yaml).
+#
+# Platzhalter, die zur Laufzeit ersetzt werden:
+#   {prompt}       -> die Aufgabenbeschreibung (inkl. AGENTS.md-Instruktion)
+#   {project_dir}  -> der lokale Pfad des geklonten Projekt-Repos
+#
+# command : argv-Liste (KEINE Shell). Token 0 ist das Binary.
+# prompt_via : "arg"  -> {prompt} wird in die Argumente eingesetzt
+#              "stdin" -> Prompt wird auf stdin geschrieben (kein {prompt} nötig)
+# stream_format : "claude-json" (Claudes --output-format stream-json) | "raw"
+# goal_command : optional. Template für den "Ziel"-Modus (/goal). Ist es gesetzt,
+#                kann man dem Agenten statt einer Aufgabe ein Ziel geben; der
+#                gesamte Verlauf bis zum Ziel zählt als ein Task. {prompt} ist das
+#                Ziel. Fehlt das Feld, bietet der Agent keinen Ziel-Modus an.
+# =============================================================================
+
+# Instruktion, die JEDER Aufgabe angehängt wird, damit Claude und Hermes über
+# AGENTS.md einen gemeinsamen Projektkontext pflegen.
+context_instruction: |
+  Wichtiger Projekt-Kontext (immer beachten):
+  1. Lies zuerst die Datei `AGENTS.md` im Projekt-Wurzelverzeichnis, falls vorhanden,
+     um Struktur, Tech-Stack, bisherige Entscheidungen und den aktuellen Stand zu verstehen.
+  2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
+  3. Aktualisiere danach `AGENTS.md` (lege sie an, falls nicht vorhanden): beschreibe knapp
+     und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
+     Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code oder
+     Hermes) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
+  4. Committe oder pushe NICHT selbst -- das uebernimmt das Dashboard automatisch nach dem Task.
+
+agents:
+  claude:
+    display_name: "Claude Code"
+    # __CLAUDE_BIN__ wird vom Installer durch den absoluten Pfad ersetzt.
+    command:
+      - "claude"
+      - "-p"
+      - "{prompt}"
+      - "--output-format"
+      - "stream-json"
+      - "--verbose"
+      - "--dangerously-skip-permissions"
+    prompt_via: arg
+    stream_format: claude-json
+    # Aktiviert den "Ziel"-Modus: das Dashboard ruft Claude mit "/goal <Ziel>" auf.
+    goal_command: "/goal {prompt}"
+    enabled: true
+    # timeout_seconds: 3600
+
+  hermes:
+    display_name: "Hermes"
+    # `hermes chat -q "<prompt>"`: einzelne, nicht-interaktive Query, die
+    # Zwischenschritte (Tool-Previews) LIVE streamt. --yolo überspringt Approvals,
+    # --accept-hooks läuft headless. AGENTS.md wird automatisch aus dem CWD geladen.
+    command:
+      - "hermes"
+      - "chat"
+      - "-q"
+      - "{prompt}"
+      - "--yolo"
+      - "--accept-hooks"
+    prompt_via: arg
+    stream_format: raw
+    enabled: true
+    env:
+      HERMES_ACCEPT_HOOKS: "1"   # Shell-Hooks headless akzeptieren
+      NO_COLOR: "1"              # Farbcodes unterdrücken (saubere Web-Konsole)
+    # Verhindert, dass PYTHONPATH/PYTHONHOME des Backend-venv die (Python-)Hermes-
+    # CLI stören (entspricht dem hermes-Wrapper, der diese Variablen leert).
+    unset_env:
+      - "PYTHONPATH"
+      - "PYTHONHOME"
+    # Alternative (nur Endergebnis, kein Live-Stream, am leisesten):
+    #   command: ["hermes", "-z", "{prompt}"]
