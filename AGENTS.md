@@ -169,6 +169,16 @@ Test
 
 You've hit your session limit · resets 4:20am (Europe/Berlin)
 
+### 2026-06-11 22:23 — claude — fehlgeschlagen
+
+**Aufgabe:**
+
+Test
+
+**Endausgabe:**
+
+You've hit your session limit · resets 4:20am (Europe/Berlin)
+
 ### 2026-06-11 22:20 — hermes
 
 **Aufgabe:**
@@ -178,13 +188,3 @@ You've hit your session limit · resets 4:20am (Europe/Berlin)
 **Endausgabe:**
 
 Beide Modi nutzen jetzt --use-auth-token korrekt.
-
-### 2026-06-11 22:17 — claude — fehlgeschlagen
-
-**Aufgabe:**
-
-Test
-
-**Endausgabe:**
-
-You've hit your session limit · resets 4:20am (Europe/Berlin)
