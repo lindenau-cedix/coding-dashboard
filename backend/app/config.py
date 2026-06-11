@@ -107,8 +107,8 @@ Wichtiger Projekt-Kontext (immer beachten):
 2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
 3. Aktualisiere danach `AGENTS.md` (lege sie an, falls nicht vorhanden): beschreibe knapp
    und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
-   Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code oder
-   Hermes) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
+   Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code,
+   Hermes oder Codex) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
 4. Committe oder pushe NICHT selbst -- das uebernimmt das Dashboard automatisch nach dem Task.
 """
 
@@ -144,6 +144,29 @@ def default_agents() -> dict[str, AgentSpec]:
             env={"HERMES_ACCEPT_HOOKS": "1", "NO_COLOR": "1"},
             unset_env=["PYTHONPATH", "PYTHONHOME"],
         ),
+        "codex": AgentSpec(
+            key="codex",
+            display_name="Codex",
+            # `codex exec` is non-interactive. Reading the prompt from stdin keeps
+            # long dashboard prompts out of argv while `-` tells Codex to consume
+            # stdin as the initial instructions.
+            command=[
+                "codex",
+                "exec",
+                "--cd",
+                "{project_dir}",
+                "--sandbox",
+                "workspace-write",
+                "--color",
+                "never",
+                "--ephemeral",
+                "-",
+            ],
+            prompt_via="stdin",
+            stream_format="raw",
+            env={"NO_COLOR": "1"},
+            unset_env=["PYTHONPATH", "PYTHONHOME"],
+        ),
     }
 
 
@@ -175,9 +198,26 @@ def load_agents_config(path: Path) -> AgentsConfig:
         agents[key] = AgentSpec(**spec)
     if not agents:
         agents = default_agents()
+    elif _is_legacy_builtin_config(agents_raw, builtin):
+        # Existing installer-generated configs contain the original built-ins
+        # (claude/hermes) and update.sh intentionally preserves that file. Append
+        # newly introduced built-ins, while configs with custom agents remain
+        # explicit and are not mutated.
+        for key, spec in builtin.items():
+            agents.setdefault(key, spec)
     return AgentsConfig(
         agents=agents,
         context_instruction=data.get("context_instruction") or DEFAULT_CONTEXT_INSTRUCTION,
+    )
+
+
+def _is_legacy_builtin_config(
+    agents_raw: dict[str, object], builtin: dict[str, AgentSpec]
+) -> bool:
+    configured = set(agents_raw)
+    return (
+        {"claude", "hermes"}.issubset(configured)
+        and configured.issubset(set(builtin))
     )
 
 

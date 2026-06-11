@@ -26,6 +26,7 @@ _EXTRA_PATH = [
     "/usr/sbin",
     str(Path.home() / ".local" / "bin"),
     str(Path.home() / ".claude" / "local"),
+    str(Path.home() / ".codex" / "bin"),
     str(Path.home() / ".npm-global" / "bin"),
 ]
 
