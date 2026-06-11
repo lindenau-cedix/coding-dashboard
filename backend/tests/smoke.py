@@ -59,7 +59,7 @@ CONFIG.write_text(
 )
 
 from app import git_ops  # noqa: E402
-from app.agents import _ClaudeJSONParser, run_agent  # noqa: E402
+from app.agents import _build_command, _ClaudeJSONParser, _final_output, run_agent  # noqa: E402
 from app.config import AgentSpec, get_agents_config  # noqa: E402
 from app.security import hash_password, verify_password  # noqa: E402
 
@@ -94,13 +94,78 @@ def test_parser() -> None:
     out += p.feed('{"type":"system","subtype":"init","model":"claude-x"}\n')
     out += p.feed('{"type":"assistant","message":{"content":[{"type":"text","text":"Hallo"}]}}\n')
     out += p.feed('{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}]}}\n')
+    out += p.feed(
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read",'
+        '"input":{"file_path":"/tmp/x.py"}}]}}\n'
+    )
+    out += p.feed(
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash",'
+        '"input":{"command":"ls -la"}}]}}\n'
+    )
     out += p.feed('{"type":"result","subtype":"success","is_error":false,"result":"Fertig."}\n')
     out += p.feed("not-json-line\n")
     check("parser streams assistant text", "Hallo" in out, out)
     check("parser shows tool use", "[tool] Bash" in out, out)
+    check("parser shows file detail", "[tool] Read: /tmp/x.py" in out, out)
+    check("parser shows command detail", "[tool] Bash: ls -la" in out, out)
     check("parser captures summary", p.summary() == "Fertig.", p.summary())
     check("parser not error", p.is_error is False)
     check("parser passes through non-json", "not-json-line" in out, out)
+
+
+def test_command_building() -> None:
+    spec = AgentSpec(
+        key="c",
+        display_name="C",
+        command=["claude", "-p", "{prompt}"],
+        model_choices=["opus"],
+        model_args=["--model", "{model}"],
+        effort_choices=["high"],
+        effort_args=["--effort", "{effort}"],
+    )
+    cmd = _build_command(spec, "hi", "/proj", model="opus", effort="high")
+    check(
+        "model/effort args appended",
+        cmd == ["claude", "-p", "hi", "--model", "opus", "--effort", "high"],
+        str(cmd),
+    )
+    cmd0 = _build_command(spec, "hi", "/proj")
+    check("no selection -> command unchanged", cmd0 == ["claude", "-p", "hi"], str(cmd0))
+
+    stdin_spec = AgentSpec(
+        key="x",
+        display_name="X",
+        command=["codex", "exec", "-"],
+        prompt_via="stdin",
+        model_choices=["m1"],
+        model_args=["--model", "{model}"],
+    )
+    cmd2 = _build_command(stdin_spec, "hi", "/proj", model="m1")
+    check("stdin marker '-' stays last", cmd2 == ["codex", "exec", "--model", "m1", "-"], str(cmd2))
+
+
+def test_final_output() -> None:
+    raw = (
+        "schritt 1: datei lesen\n"
+        "tool output blah\n\n"
+        "╭──────────────╮\n"
+        "│ Alles erledigt: Pull-Button gefixt. │\n"
+        "╰──────────────╯\n\n"
+        "Resume this session with:\n"
+        "  hermes --resume 20260611_abc\n\n"
+        "Session:        20260611_abc\n"
+        "Duration:       1m 30s\n"
+        "Messages:       30 (1 user, 28 tool calls)\n"
+    )
+    fin = _final_output(raw)
+    check("final output keeps last message", "Alles erledigt" in fin, fin)
+    check("final output drops earlier steps", "schritt 1" not in fin, fin)
+    check(
+        "final output strips session footer",
+        "Resume" not in fin and "Session" not in fin and "Duration" not in fin,
+        fin,
+    )
+    check("final output strips box chars", "╰" not in fin and "│" not in fin, fin)
 
 
 def test_agent_runner() -> None:
@@ -139,6 +204,26 @@ def test_agent_runner() -> None:
     missing = AgentSpec(key="x", display_name="x", command=["definitely-not-a-binary-xyz"])
     res2 = asyncio.run(run_agent(missing, "p", str(TMP), lambda c: _noop()))
     check("missing binary -> error", res2.is_error and res2.exit_code == 127, str(res2.exit_code))
+
+    # A CLI that writes its final message to {last_message_file} (codex's
+    # --output-last-message): the file content must win as result summary.
+    last_spec = AgentSpec(
+        key="last",
+        display_name="Last",
+        command=[
+            PY,
+            "-c",
+            "import sys, pathlib;"
+            "print('streamed zwischenschritt');"
+            "pathlib.Path(sys.argv[1]).write_text('FINALE ANTWORT', encoding='utf-8')",
+            "{last_message_file}",
+        ],
+        stream_format="raw",
+    )
+    chunks = []
+    res3 = asyncio.run(run_agent(last_spec, "p", str(TMP), lambda c: _collect(chunks, c)))
+    check("last-message file becomes summary", res3.summary == "FINALE ANTWORT", res3.summary)
+    check("last-message run streamed too", "streamed zwischenschritt" in res3.transcript, res3.transcript)
 
 
 async def _collect(buf: list[str], c: str) -> None:
@@ -200,6 +285,13 @@ def test_config_backfill() -> None:
     check("backfill: explicit command kept", claude.command == ["claude", "-p", "{prompt}"], claude.command)
     check("backfill: codex added to legacy config", codex.command[:2] == ["codex", "exec"], str(codex.command))
     check("backfill: codex prompt via stdin", codex.prompt_via == "stdin", codex.prompt_via)
+    check("backfill: claude model choices", "opus" in claude.model_choices, str(claude.model_choices))
+    check("backfill: claude effort args", claude.effort_args == ["--effort", "{effort}"], str(claude.effort_args))
+    check(
+        "backfill: codex writes last message file",
+        "{last_message_file}" in codex.command,
+        str(codex.command),
+    )
 
     custom_path = TMP / "custom-only.yaml"
     custom_path.write_text(
@@ -334,6 +426,50 @@ def test_api_and_task() -> None:
         files = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
         check("committed agent file", "agent_out.txt" in files, files)
 
+        # AGENTS.md: rewritten BEFORE commit+push, with Aufgabe + Endausgabe
+        # of the current run.
+        agents_md = (proj / "AGENTS.md").read_text(encoding="utf-8")
+        check("AGENTS.md has Letzte Tasks", "## Letzte Tasks" in agents_md, agents_md[:300])
+        check("AGENTS.md entry has Aufgabe", "do work" in agents_md, agents_md[-500:])
+        check(
+            "AGENTS.md entry has Endausgabe",
+            "hello from fake agent" in agents_md,
+            agents_md[-500:],
+        )
+        check("AGENTS.md pushed with task", "AGENTS.md" in files, files)
+
+        # model/effort validation: the fake agent offers no choices -> 400.
+        bad_model = client.post(
+            f"/api/projects/{pid}/tasks",
+            headers=H,
+            json={"agent": "fake", "prompt": "x", "model": "no-such-model"},
+        )
+        check("invalid model -> 400", bad_model.status_code == 400, str(bad_model.status_code))
+
+        # Second run: the Letzte-Tasks section is REPLACED (one marker, both
+        # entries), not appended twice.
+        r2 = client.post(
+            f"/api/projects/{pid}/tasks",
+            headers=H,
+            json={"agent": "fake", "prompt": "zweite aufgabe"},
+        )
+        check("second task created", r2.status_code == 201, str(r2.status_code))
+        tid2 = r2.json()["id"]
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            d2 = client.get(f"/api/tasks/{tid2}", headers=H).json()
+            if d2["status"] in terminal:
+                break
+            time.sleep(0.4)
+        check("second task success", d2["status"] == "success", str(d2))
+        agents_md2 = (proj / "AGENTS.md").read_text(encoding="utf-8")
+        check(
+            "Letzte Tasks replaced not duplicated",
+            agents_md2.count("## Letzte Tasks") == 1,
+            str(agents_md2.count("## Letzte Tasks")),
+        )
+        check("both runs listed", "do work" in agents_md2 and "zweite aufgabe" in agents_md2, agents_md2[-800:])
+
         hist = client.get(f"/api/projects/{pid}/tasks", headers=H).json()
         check("history lists task", any(t["id"] == tid for t in hist), str(len(hist)))
 
@@ -342,6 +478,8 @@ def main() -> int:
     try:
         test_security()
         test_parser()
+        test_command_building()
+        test_final_output()
         test_agent_runner()
         test_goal_mode()
         test_config_backfill()

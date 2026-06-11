@@ -8,6 +8,7 @@ the WebSocket endpoint subscribes to (with full replay for late joiners).
 from __future__ import annotations
 
 import asyncio
+import re
 import traceback
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -162,6 +163,8 @@ class TaskManager:
             agent_key = task.agent
             prompt = task.prompt
             mode = task.mode
+            model = task.model
+            effort = task.effort
             project_dir = project.local_path
             branch = project.default_branch or settings.default_branch
             task.branch = branch
@@ -198,7 +201,9 @@ class TaskManager:
             async def on_output(chunk: str) -> None:
                 ch.publish({"type": "output", "data": chunk})
 
-            result = await run_agent(spec, full_prompt, project_dir, on_output)
+            result = await run_agent(
+                spec, full_prompt, project_dir, on_output, model=model, effort=effort
+            )
 
             status = "success" if not result.is_error else "failed"
             with session_scope() as db:
@@ -209,11 +214,14 @@ class TaskManager:
                 task.status = status
             ch.publish({"type": "status", "status": status})
 
-            await self._git_step(task_id, project_dir, branch, settings, spec.display_name, ch)
-
+            # Finish timestamp BEFORE the AGENTS.md rewrite so the current run
+            # is the newest of the "Letzte Tasks" entries; the rewrite happens
+            # BEFORE the git step so commit & push include the updated file.
+            self._mark(task_id, finished=True)
             self._update_agents_md(project_id, project_dir)
 
-            self._mark(task_id, finished=True)
+            await self._git_step(task_id, project_dir, branch, settings, spec.display_name, ch)
+
             self._publish_done(ch, task_id)
 
     async def _git_step(
@@ -273,8 +281,18 @@ class TaskManager:
             ch.publish({"type": "git", "data": f"[git] Fehler: {exc}\n"})
 
     # -- AGENTS.md upkeep ---------------------------------------------------- #
+    _LETZTE_TASKS_RE = re.compile(r"(?m)^##\s*Letzte Tasks\s*$")
+
     def _update_agents_md(self, project_id: str, project_dir: str) -> None:
-        """Append the last 3 completed tasks to the project's AGENTS.md."""
+        """Rewrite the trailing "## Letzte Tasks" section of AGENTS.md.
+
+        Contains the last 3 finished runs (incl. the one that just ended):
+        for each the task/prompt the agent received and ONLY its final
+        output.  Existing entries are replaced wholesale.  Runs before the
+        git step so commit & push include the updated file.
+        """
+        if not project_dir or not Path(project_dir).exists():
+            return
         agents_path = Path(project_dir) / "AGENTS.md"
         with session_scope() as db:
             tasks = (
@@ -283,7 +301,7 @@ class TaskManager:
                     Task.project_id == project_id,
                     Task.status.in_(["success", "failed"]),
                 )
-                .order_by(Task.finished_at.desc())
+                .order_by(Task.finished_at.desc(), Task.created_at.desc())
                 .limit(3)
                 .all()
             )
@@ -291,23 +309,28 @@ class TaskManager:
         if not tasks:
             return
 
-        section = "\n\n## Letzte Tasks\n\n"
-        for t in reversed(tasks):  # oldest first so newest reads last
+        parts = [
+            "## Letzte Tasks",
+            "",
+            "_Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe"
+            " (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._",
+        ]
+        for t in reversed(tasks):  # oldest first so the newest reads last
             ts = t.finished_at.strftime("%Y-%m-%d %H:%M") if t.finished_at else "?"
-            summary = (t.result_summary or t.prompt or "").replace("**", "").replace("##", "").strip()
-            if not summary:
-                summary = "(kein Ergebnis)"
-            section += f"- **{ts}** [{t.agent}] {summary}\n"
-
-        section = section.rstrip() + "\n"
+            extras = " · ".join(x for x in (t.model, t.effort) if x)
+            head = f"### {ts} — {t.agent}" + (f" ({extras})" if extras else "")
+            head += " — fehlgeschlagen" if t.status == "failed" else ""
+            aufgabe = _embed_md(t.prompt, 600) or "(keine Aufgabe)"
+            ausgabe = _embed_md(t.result_summary, 2000) or "(keine Endausgabe)"
+            parts += ["", head, "", "**Aufgabe:**", "", aufgabe, "", "**Endausgabe:**", "", ausgabe]
+        section = "\n".join(parts).rstrip() + "\n"
 
         if agents_path.exists():
             content = agents_path.read_text(encoding="utf-8")
-            # Remove existing "## Letzte Tasks" section if present
-            marker = "\n## Letzte Tasks\n"
-            if marker in content:
-                content = content.split(marker)[0].rstrip() + "\n"
-            content += section
+            m = self._LETZTE_TASKS_RE.search(content)
+            if m:  # replace the existing section (everything from the marker on)
+                content = content[: m.start()]
+            content = content.rstrip() + "\n\n" + section
         else:
             content = "# AGENTS.md\n\n" + section
 
@@ -350,6 +373,23 @@ class TaskManager:
             task = db.get(Task, task_id)
             data = task_to_dict(task) if task else {"id": task_id, "status": "error"}
         ch.publish({"type": "done", "task": data})
+
+
+def _embed_md(text: str, max_chars: int) -> str:
+    """Prepare task text for embedding in AGENTS.md.
+
+    Escapes line-leading '#' so embedded content cannot spawn headings (which
+    would break the next "## Letzte Tasks" replacement) and clips long text at
+    a line boundary instead of mid-word.
+    """
+    text = (text or "").strip()
+    if len(text) > max_chars:
+        cut = text[:max_chars]
+        nl = cut.rfind("\n")
+        if nl > max_chars // 2:
+            cut = cut[:nl]
+        text = cut.rstrip() + "\n[... gekürzt ...]"
+    return re.sub(r"(?m)^(\s{0,3})#", r"\1\\#", text)
 
 
 def reset_interrupted() -> None:

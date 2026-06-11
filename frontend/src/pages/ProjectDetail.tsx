@@ -15,6 +15,8 @@ export default function ProjectDetail() {
 
   const [agent, setAgent] = useState("");
   const [mode, setMode] = useState<TaskMode>("task");
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
   const [prompt, setPrompt] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
@@ -38,6 +40,15 @@ export default function ProjectDetail() {
   }, [agents]);
 
   const goalSupported = useMemo(() => agents.some((a) => a.supports_goal), [agents]);
+  const currentAgent = useMemo(() => agents.find((a) => a.key === agent), [agents, agent]);
+
+  function changeAgent(next: string) {
+    setAgent(next);
+    // Drop selections the new agent does not offer ("" = agent default).
+    const a = agents.find((x) => x.key === next);
+    setModel((m) => (a?.model_choices?.includes(m) ? m : ""));
+    setEffort((e) => (a?.effort_choices?.includes(e) ? e : ""));
+  }
   // In goal mode only agents that support it are selectable.
   const selectableAgents = useMemo(
     () => (mode === "goal" ? agents.filter((a) => a.supports_goal) : agents),
@@ -94,7 +105,7 @@ export default function ProjectDetail() {
     setSubmitting(true);
     setError("");
     try {
-      const task = await api.createTask(id, agent, prompt.trim(), mode);
+      const task = await api.createTask(id, agent, prompt.trim(), mode, model, effort);
       setActiveTaskId(task.id);
       setPrompt("");
       await refreshTasks();
@@ -225,20 +236,56 @@ export default function ProjectDetail() {
             </div>
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-2">
-          <label className="text-sm text-slate-400">Agent:</label>
-          <select
-            value={agent}
-            onChange={(e) => setAgent(e.target.value)}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
-          >
-            {selectableAgents.map((a) => (
-              <option key={a.key} value={a.key} disabled={!a.enabled}>
-                {a.display_name}
-                {a.enabled ? "" : " (deaktiviert)"}
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+          <span className="flex items-center gap-2">
+            <label className="text-sm text-slate-400">Agent:</label>
+            <select
+              value={agent}
+              onChange={(e) => changeAgent(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
+            >
+              {selectableAgents.map((a) => (
+                <option key={a.key} value={a.key} disabled={!a.enabled}>
+                  {a.display_name}
+                  {a.enabled ? "" : " (deaktiviert)"}
+                </option>
+              ))}
+            </select>
+          </span>
+          {(currentAgent?.model_choices?.length ?? 0) > 0 && (
+            <span className="flex items-center gap-2">
+              <label className="text-sm text-slate-400">Modell:</label>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
+              >
+                <option value="">Standard</option>
+                {currentAgent!.model_choices.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </span>
+          )}
+          {(currentAgent?.effort_choices?.length ?? 0) > 0 && (
+            <span className="flex items-center gap-2">
+              <label className="text-sm text-slate-400">Effort:</label>
+              <select
+                value={effort}
+                onChange={(e) => setEffort(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
+              >
+                <option value="">Standard</option>
+                {currentAgent!.effort_choices.map((ef) => (
+                  <option key={ef} value={ef}>
+                    {ef}
+                  </option>
+                ))}
+              </select>
+            </span>
+          )}
         </div>
         <textarea
           value={prompt}
@@ -353,6 +400,16 @@ export default function ProjectDetail() {
                       )}
                       <span>{t.pushed ? "gepusht ✓" : "nicht gepusht"}</span>
                       {t.exit_code !== null && <span>exit {t.exit_code}</span>}
+                      {t.model && (
+                        <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-300">
+                          {t.model}
+                        </span>
+                      )}
+                      {t.effort && (
+                        <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-300">
+                          Effort: {t.effort}
+                        </span>
+                      )}
                     </div>
 
                     {t.error && (

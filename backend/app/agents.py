@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,19 +53,82 @@ def _build_env(spec: AgentSpec) -> dict[str, str]:
     return env
 
 
-def _build_command(spec: AgentSpec, prompt: str, project_dir: str) -> list[str]:
+def _build_command(
+    spec: AgentSpec,
+    prompt: str,
+    project_dir: str,
+    model: str = "",
+    effort: str = "",
+    last_message_file: str = "",
+) -> list[str]:
     out: list[str] = []
     for tok in spec.command:
         tok = tok.replace("{project_dir}", project_dir)
+        tok = tok.replace("{last_message_file}", last_message_file)
         if spec.prompt_via == "arg":
             tok = tok.replace("{prompt}", prompt)
         out.append(tok)
+
+    # Inject the user's model/effort selection. Inserted before a trailing "-"
+    # (stdin marker, e.g. codex) so the prompt positional stays last; appended
+    # otherwise. This keeps explicit `command` lists in config.yaml working.
+    extra: list[str] = []
+    if model and spec.model_args:
+        extra += [t.replace("{model}", model) for t in spec.model_args]
+    if effort and spec.effort_args:
+        extra += [t.replace("{effort}", effort) for t in spec.effort_args]
+    if extra:
+        if out and out[-1] == "-":
+            out = out[:-1] + extra + ["-"]
+        else:
+            out += extra
     return out
 
 
-def _tail(text: str, n: int = 600) -> str:
-    text = text.strip()
-    return text[-n:] if len(text) > n else text
+# Box-drawing/block characters some CLIs (hermes) draw around their final answer.
+_BOX_CHARS_RE = re.compile(r"[─-╿▀-▟]")
+# Session footers that follow the final answer in raw transcripts.
+_RAW_FOOTER_RE = re.compile(
+    r"^(resume this session with:?|hermes --resume\b|codex resume\b|to continue this session\b"
+    r"|session:|duration:|messages:|tokens used:?)",
+    re.IGNORECASE,
+)
+
+
+def _final_output(text: str, max_chars: int = 2000) -> str:
+    """Best-effort extraction of the agent's FINAL message from a raw transcript.
+
+    Strips box-drawing decoration and known session footers (hermes/codex),
+    then returns the last paragraph block -- i.e. only the closing answer, not
+    intermediate tool output. Used when an agent provides no structured result.
+    """
+    cleaned: list[str] = []
+    for line in text.splitlines():
+        line = _BOX_CHARS_RE.sub("", line).rstrip()
+        if _RAW_FOOTER_RE.match(line.strip()):
+            continue
+        cleaned.append(line)
+
+    blocks: list[list[str]] = [[]]
+    for line in cleaned:
+        if line.strip():
+            blocks[-1].append(line.strip())
+        elif blocks[-1]:
+            blocks.append([])
+    if blocks and not blocks[-1]:
+        blocks.pop()
+    if not blocks:
+        return ""
+
+    # Only the last paragraph counts -- that IS the agent's final output.
+    result = "\n".join(blocks[-1]).strip()
+    if len(result) > max_chars:
+        result = result[-max_chars:]
+        cut = result.find("\n")
+        if 0 <= cut < 200:
+            result = result[cut + 1 :]
+        result = "[...]\n" + result.strip()
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -125,9 +189,44 @@ class _ClaudeJSONParser:
             if bt == "text":
                 parts.append(block.get("text", ""))
             elif bt == "tool_use":
-                parts.append(f"\n[tool] {block.get('name', 'tool')}\n")
+                name = block.get("name", "tool")
+                detail = self._tool_detail(block)
+                parts.append(f"\n[tool] {name}{f': {detail}' if detail else ''}\n")
         text = "".join(parts)
         return text + ("\n" if text and not text.endswith("\n") else "")
+
+    # Input keys that make a useful one-line preview, most specific first.
+    _TOOL_PREVIEW_KEYS = (
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "description",
+        "skill",
+        "prompt",
+    )
+
+    @classmethod
+    def _tool_detail(cls, block: dict) -> str:
+        """One-line preview of a tool call (command, file path, ...)."""
+        inp = block.get("input")
+        if not isinstance(inp, dict) or not inp:
+            return ""
+        for key in cls._TOOL_PREVIEW_KEYS:
+            val = inp.get(key)
+            if isinstance(val, str) and val.strip():
+                return cls._one_line(val)
+        try:
+            return cls._one_line(json.dumps(inp, ensure_ascii=False))
+        except (TypeError, ValueError):
+            return ""
+
+    @staticmethod
+    def _one_line(text: str, limit: int = 160) -> str:
+        text = " ".join(text.split())
+        return text if len(text) <= limit else text[: limit - 1] + "…"
 
     def summary(self) -> str:
         return self._summary
@@ -143,13 +242,54 @@ def _make_parser(stream_format: str):
 # Runner
 # --------------------------------------------------------------------------- #
 async def run_agent(
-    spec: AgentSpec, prompt: str, project_dir: str, on_output: OutputCallback
+    spec: AgentSpec,
+    prompt: str,
+    project_dir: str,
+    on_output: OutputCallback,
+    model: str = "",
+    effort: str = "",
 ) -> AgentResult:
-    cmd = _build_command(spec, prompt, project_dir)
+    # Some CLIs (codex --output-last-message) can write their FINAL message to
+    # a file; that beats any transcript heuristic, so prefer it as summary.
+    last_message_path: Path | None = None
+    if any("{last_message_file}" in tok for tok in spec.command):
+        fd, tmp = tempfile.mkstemp(prefix="cd-last-msg-", suffix=".txt")
+        os.close(fd)
+        last_message_path = Path(tmp)
+
+    try:
+        return await _run_agent_inner(
+            spec, prompt, project_dir, on_output, model, effort, last_message_path
+        )
+    finally:
+        if last_message_path is not None:
+            last_message_path.unlink(missing_ok=True)
+
+
+async def _run_agent_inner(
+    spec: AgentSpec,
+    prompt: str,
+    project_dir: str,
+    on_output: OutputCallback,
+    model: str,
+    effort: str,
+    last_message_path: Path | None,
+) -> AgentResult:
+    cmd = _build_command(
+        spec,
+        prompt,
+        project_dir,
+        model=model,
+        effort=effort,
+        last_message_file=str(last_message_path) if last_message_path else "",
+    )
     env = _build_env(spec)
     cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", project_dir) or project_dir
 
     await on_output(f"$ {' '.join(spec.command)}\n")
+    if model or effort:
+        sel = " ".join(x for x in (model, effort) if x)
+        await on_output(f"[auswahl] {sel}\n")
     await on_output(f"[cwd] {cwd}\n\n")
 
     try:
@@ -210,6 +350,15 @@ async def run_agent(
 
     exit_code = proc.returncode if proc.returncode is not None else -1
     full = "".join(transcript)
-    summary = parser.summary() or _tail(full)
+    summary = _read_last_message(last_message_path) or parser.summary() or _final_output(full)
     is_error = exit_code != 0 or parser.is_error
     return AgentResult(exit_code, full, summary, is_error=is_error)
+
+
+def _read_last_message(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""

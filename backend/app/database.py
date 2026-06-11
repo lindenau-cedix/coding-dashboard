@@ -27,7 +27,11 @@ class Base(DeclarativeBase):
 # ALTERs existing tables and we run without Alembic, so add them by hand here.
 # Each entry is idempotent (checked against PRAGMA table_info).
 _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
-    "tasks": {"mode": "VARCHAR(16) NOT NULL DEFAULT 'task'"},
+    "tasks": {
+        "mode": "VARCHAR(16) NOT NULL DEFAULT 'task'",
+        "model": "VARCHAR(128) NOT NULL DEFAULT ''",
+        "effort": "VARCHAR(32) NOT NULL DEFAULT ''",
+    },
 }
 
 

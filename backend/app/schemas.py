@@ -23,6 +23,9 @@ class AgentInfo(BaseModel):
     display_name: str
     enabled: bool
     supports_goal: bool = False
+    # Selectable models/effort levels ([] = no selector in the UI).
+    model_choices: list[str] = []
+    effort_choices: list[str] = []
 
 
 class ProjectCreate(BaseModel):
@@ -57,6 +60,9 @@ class TaskCreate(BaseModel):
     agent: str
     prompt: str = Field(min_length=1)
     mode: Literal["task", "goal"] = "task"
+    # "" = use the agent's/CLI's default model resp. effort.
+    model: str = ""
+    effort: str = ""
 
 
 class TaskOut(BaseModel):
@@ -67,6 +73,8 @@ class TaskOut(BaseModel):
     agent: str
     prompt: str
     mode: str
+    model: str = ""
+    effort: str = ""
     status: str
     exit_code: Optional[int]
     result_summary: str
