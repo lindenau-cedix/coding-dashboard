@@ -93,3 +93,6 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
   `git_ops.pull` gibt `result.stdout.strip()` zurück (vorher `None`); `pull_project`
   Router antwortet mit `{ok, branch, output}`; Frontend zeigt `Modal`-Dialog mit
   farbcodiertem Output (erfolgreich = slate, fehlgeschlagen = red).
+- **2026-06-11 (Fix):** `Modal` war in `ProjectDetail.tsx` verwendet aber nicht
+  importiert → TypeScript-Fehler TS2304, trotz Vite-Build. Fix: `Modal` zum
+  ui-Import hinzugefügt.

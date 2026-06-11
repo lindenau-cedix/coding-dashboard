@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
 import TaskConsole from "../components/TaskConsole";
-import { Button, ErrorText, Spinner, StatusBadge, formatDate } from "../components/ui";
+import { Button, ErrorText, Modal, Spinner, StatusBadge, formatDate } from "../components/ui";
 import type { Agent, Project, Task, TaskMode } from "../types";
 
 export default function ProjectDetail() {
