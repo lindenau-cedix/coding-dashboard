@@ -83,3 +83,5 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 - Android: Launcher-Icons/Splash (Capacitor-Defaults bis dahin).
 - Hermes nutzt `chat -q` (Live-Stream). Leise Alternative ohne Zwischenschritte:
   `command: ["hermes", "-z", "{prompt}"]`.
+- Optional: Stash/Pull-Rebase-Option bei Pull-Konflikten (aktuell `git pull origin branch`,
+  kein Stash-Schutz).

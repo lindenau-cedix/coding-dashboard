@@ -24,6 +24,8 @@ export default function ProjectDetail() {
 
   const [showAgentsMd, setShowAgentsMd] = useState(false);
   const [agentsMd, setAgentsMd] = useState<string | null>(null);
+  const [pulling, setPulling] = useState(false);
+  const [pullError, setPullError] = useState("");
 
   const agentName = useMemo(() => {
     const m: Record<string, string> = {};
@@ -128,6 +130,18 @@ export default function ProjectDetail() {
     }
   }
 
+  async function pull() {
+    setPulling(true);
+    setPullError("");
+    try {
+      await api.pullProject(id);
+    } catch (err) {
+      setPullError(err instanceof Error ? err.message : "Pull fehlgeschlagen");
+    } finally {
+      setPulling(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex justify-center py-16 text-slate-500">
@@ -161,6 +175,13 @@ export default function ProjectDetail() {
             <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
               ⎇ {project.default_branch}
             </span>
+            <button
+              onClick={pull}
+              disabled={pulling}
+              className="rounded border border-cyan-700 bg-cyan-900/30 px-2.5 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-900/60 disabled:opacity-50"
+            >
+              {pulling ? "Pulling…" : "Pull"}
+            </button>
           </div>
         </div>
         {project.description && (
@@ -169,6 +190,7 @@ export default function ProjectDetail() {
       </div>
 
       <ErrorText>{error}</ErrorText>
+      {pullError && <ErrorText>{pullError}</ErrorText>}
 
       {/* New task */}
       <form

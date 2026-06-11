@@ -173,6 +173,8 @@ export const api = {
   getTask: (id: string) => request<Task>("GET", `/tasks/${id}`),
   stopTask: (id: string) =>
     request<{ stopped: boolean }>("POST", `/tasks/${id}/stop`),
+  pullProject: (id: string) =>
+    request<{ ok: boolean; branch: string }>("POST", `/projects/${id}/pull`),
 };
 
 export function commitUrl(project: Project, hash: string): string | null {

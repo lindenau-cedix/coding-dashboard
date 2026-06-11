@@ -102,3 +102,7 @@ def commit_all(
 
 def push(repo_dir: str | Path, branch: str, token: str) -> None:
     _run(["push", "origin", f"HEAD:{branch}"], cwd=repo_dir, token=token)
+
+
+def pull(repo_dir: str | Path, branch: str, token: str) -> None:
+    _run(["pull", "origin", branch], cwd=repo_dir, token=token)

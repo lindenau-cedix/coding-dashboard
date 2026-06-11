@@ -180,3 +180,19 @@ async def delete_project(
     db.delete(project)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/{project_id}/pull", status_code=status.HTTP_200_OK)
+async def pull_project(project_id: str, db: Session = Depends(get_db)) -> dict:
+    """Fetch and merge remote changes into the local repo."""
+    settings = get_settings()
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if not project.local_path:
+        raise HTTPException(409, "Kein lokales Repo vorhanden.")
+    try:
+        await asyncio.to_thread(git_ops.pull, project.local_path, project.default_branch, settings.github_token)
+    except git_ops.GitError as exc:
+        raise HTTPException(409, str(exc))
+    return {"ok": True, "branch": project.default_branch}
