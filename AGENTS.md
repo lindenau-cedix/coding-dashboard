@@ -159,6 +159,16 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 22:17 — claude — fehlgeschlagen
+
+**Aufgabe:**
+
+Test
+
+**Endausgabe:**
+
+You've hit your session limit · resets 4:20am (Europe/Berlin)
+
 ### 2026-06-11 22:16 — claude — fehlgeschlagen
 
 **Aufgabe:**
@@ -178,13 +188,3 @@ Lass Claude Code auch usage-credits nutzen, nicht nur das Limit vom Plan.
 **Endausgabe:**
 
 Wichtig: Die Änderung wird erst nach systemctl restart coding-dashboard wirksam.
-
-### 2026-06-11 22:11 — claude — fehlgeschlagen
-
-**Aufgabe:**
-
-Test
-
-**Endausgabe:**
-
-You've hit your session limit · resets 4:20am (Europe/Berlin)
