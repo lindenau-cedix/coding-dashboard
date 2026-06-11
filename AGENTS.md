@@ -169,7 +169,7 @@ Test
 
 You've hit your session limit · resets 4:20am (Europe/Berlin)
 
-### 2026-06-11 22:16 — claude — fehlgeschlagen
+### 2026-06-11 22:17 — claude — fehlgeschlagen
 
 **Aufgabe:**
 
@@ -179,12 +179,12 @@ Test
 
 You've hit your session limit · resets 4:20am (Europe/Berlin)
 
-### 2026-06-11 22:14 — hermes
+### 2026-06-11 22:16 — claude — fehlgeschlagen
 
 **Aufgabe:**
 
-Lass Claude Code auch usage-credits nutzen, nicht nur das Limit vom Plan.
+Test
 
 **Endausgabe:**
 
-Wichtig: Die Änderung wird erst nach systemctl restart coding-dashboard wirksam.
+You've hit your session limit · resets 4:20am (Europe/Berlin)
