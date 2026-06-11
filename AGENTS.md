@@ -150,44 +150,51 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 - Codex-`model_choices` (gpt-5.1-codex…) sind Stand 2026-06; bei neuen
   Codex-Releases ggf. in `default_agents()` / config.yaml nachziehen.
 
-
 ## Letzte Tasks
 
-- **2026-06-11 18:36** [hermes] ersetzt (oder neu angehängt) mit je einem Eintrag: Datum [agent] Zusammenfassung
-    - AGENTS.md existiert noch nicht → wird neu angelegt mit leerem Header + dem Block- Der Agent selbst pflegt den Rest der AGENTS.md (Struktur, Tech-Stack, Entscheidungen) über die context_instruction — das Dashboard kümmert sich nur um das Letzte-Tasks-Block
+_Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
+
+### 2026-06-11 22:11 — claude — fehlgeschlagen
+
+**Aufgabe:**
+
+Test
+
+**Endausgabe:**
+
+You've hit your session limit · resets 4:20am (Europe/Berlin)
+
+### 2026-06-11 22:06 — hermes
+
+**Aufgabe:**
+
+Die Funktion, welche die letzten 3 Ausgaben an die AGENTS.md hängt soll tadellos funktionieren. Es soll nach jedem Task die aktuelle LETZTE Ausgabe, sowie die LETZTE Ausgabe der vorherigen 2 Agentenläufe zzgl. deren Aufgaben (auch die aktuelle!), welche sie bekommen haben ans Ende der AGENTS.md gehangen werden, sollten dort schon Einträge sein, werden diese überschrieben. Der Push nach der Aufgabe erfolgt natürlich nach dem Ändern der AGENTS.md! Und wirklich nur die ENDAUSGABE (die letzte) des Agenten! Ebenso funktioniert die Ausgabe von Claude vollständig und es erscheinen nicht immer nur ein
+[... gekürzt ...]
+
+**Endausgabe:**
+
+info.
+    Nachher: Fallback auf json.dumps(inp) für alle nicht-dict Inputs.
+    
+    3. _update_agents_md() Reihenfolge (task_runner.py)
+    Vorher: reversed(tasks) — kehrte die DESC-Liste um, newest kam zuunterst (irreführend, newest sollte oben stehen).
+    Nachher: for t in tasks — newest-first (mit dem gerade beendeten Task zuerst).
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
 Resume this session with:
-  hermes --resume 20260611_203430_9e19b2
+  hermes --resume 20260612_000312_57b422
 
-Session:        20260611_203430_9e19b2
-Duration:       1m 30s
-Messages:       30 (1 user, 28 tool calls)
-- **2026-06-11 20:12** [hermes] ktionierte nicht weil Modal aus ui.tsx in ProjectDetail.tsx nicht importiert war. Der TypeScript-Compiler hat das bemängelt (TS2304), aber Vite hat trotzdem gebaut, weshalb es im Browser einfach still zusammenbrach.
-    
-    Was war's:
-    
-    import { Button, ErrorText, Spinner, StatusBadge, formatDate } from "../components/ui";
-    
-    ↓ wurde zu:
-    
-    import { Button, ErrorText, Modal, Spinner, StatusBadge, formatDate } from "../components/ui";
-    
-    
-    TypeScript jetzt grün, Build clean.
-╰──────────────────────────────────────────────────────────────────────────────╯
-- **2026-06-11 21:30** [hermes] d entfernt. Die aktuelle Codex-Version ist von sich aus nicht-interaktiv wenn ein Prompt übergeben wird — das Flag existiert schlicht nicht.
-    
-    Geändert: backend/app/config.py — Codex command-Array
-    
-    Aktualisiert: AGENTS.md — Dokumentation + Erklärung
-    
-    Nach dem nächsten sudo deploy/update.sh sollte Codex funktionieren.
-╰──────────────────────────────────────────────────────────────────────────────╯
+Session:        20260612_000312_57b422
+Duration:       2m 52s
+Messages:       29 (1 user, 27 tool calls)
 
-Resume this session with:
-  hermes --resume 20260611_232915_a1a57e
+### 2026-06-11 21:52 — claude — fehlgeschlagen
 
-Session:        20260611_232915_a1a57e
-Duration:       46s
-Messages:       11 (1 user, 9 tool calls)
+**Aufgabe:**
+
+Die Funktion, welche die letzten 3 Ausgaben an die AGENTS.md hängt funktioniert tadellos. Es soll nach jedem Task die aktuelle LETZTE Ausgabe, sowie die LETZTE Ausgabe der vorherigen 2 Agentenläufe zzgl. deren Aufgaben (auch die aktuelle!), welche sie bekommen haben ans Ende der AGENTS.md gehangen werden, sollten dort schon Einträge sein, werden diese überschrieben. Der Push nach der Aufgabe erfolgt natürlich nach dem Ändern der AGENTS.md! Und wirklich nur die ENDAUSGABE (die letzte) des Agenten! Ebenso funktioniert die Ausgabe von Claude vollständig und es erscheinen nicht immer nur einzelne
+[... gekürzt ...]
+
+**Endausgabe:**
+
+You've hit your session limit · resets 4:20am (Europe/Berlin)
