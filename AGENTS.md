@@ -159,6 +159,16 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 22:16 — claude — fehlgeschlagen
+
+**Aufgabe:**
+
+Test
+
+**Endausgabe:**
+
+You've hit your session limit · resets 4:20am (Europe/Berlin)
+
 ### 2026-06-11 22:14 — hermes
 
 **Aufgabe:**
@@ -178,27 +188,3 @@ Test
 **Endausgabe:**
 
 You've hit your session limit · resets 4:20am (Europe/Berlin)
-
-### 2026-06-11 22:06 — hermes
-
-**Aufgabe:**
-
-Die Funktion, welche die letzten 3 Ausgaben an die AGENTS.md hängt soll tadellos funktionieren. Es soll nach jedem Task die aktuelle LETZTE Ausgabe, sowie die LETZTE Ausgabe der vorherigen 2 Agentenläufe zzgl. deren Aufgaben (auch die aktuelle!), welche sie bekommen haben ans Ende der AGENTS.md gehangen werden, sollten dort schon Einträge sein, werden diese überschrieben. Der Push nach der Aufgabe erfolgt natürlich nach dem Ändern der AGENTS.md! Und wirklich nur die ENDAUSGABE (die letzte) des Agenten! Ebenso funktioniert die Ausgabe von Claude vollständig und es erscheinen nicht immer nur ein
-[... gekürzt ...]
-
-**Endausgabe:**
-
-info.
-    Nachher: Fallback auf json.dumps(inp) für alle nicht-dict Inputs.
-    
-    3. _update_agents_md() Reihenfolge (task_runner.py)
-    Vorher: reversed(tasks) — kehrte die DESC-Liste um, newest kam zuunterst (irreführend, newest sollte oben stehen).
-    Nachher: for t in tasks — newest-first (mit dem gerade beendeten Task zuerst).
-╰──────────────────────────────────────────────────────────────────────────────╯
-
-Resume this session with:
-  hermes --resume 20260612_000312_57b422
-
-Session:        20260612_000312_57b422
-Duration:       2m 52s
-Messages:       29 (1 user, 27 tool calls)
