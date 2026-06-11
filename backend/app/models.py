@@ -55,6 +55,9 @@ class Task(Base):
     prompt: Mapped[str] = mapped_column(Text)
     # "task" (one-off prompt) | "goal" (agent works until the goal is reached)
     mode: Mapped[str] = mapped_column(String(16), default="task")
+    # Optional per-task model/effort selection ("" = agent/CLI default).
+    model: Mapped[str] = mapped_column(String(128), default="")
+    effort: Mapped[str] = mapped_column(String(32), default="")
 
     # queued | running | success | failed | error | interrupted | cancelled
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)

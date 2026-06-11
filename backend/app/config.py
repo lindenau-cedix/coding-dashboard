@@ -75,10 +75,12 @@ class Settings(BaseSettings):
 class AgentSpec(BaseModel):
     """How to invoke one coding agent CLI.
 
-    ``command`` is a list of argv tokens (no shell).  The tokens ``{prompt}``
-    and ``{project_dir}`` are substituted at run time.  If ``prompt_via`` is
-    ``"stdin"`` the prompt is written to the process stdin instead of being
-    substituted into argv.
+    ``command`` is a list of argv tokens (no shell).  The tokens ``{prompt}``,
+    ``{project_dir}`` and ``{last_message_file}`` are substituted at run time
+    (the latter becomes a temp file the CLI writes its FINAL message to, e.g.
+    codex's ``--output-last-message``; its content is used as the task's
+    result summary).  If ``prompt_via`` is ``"stdin"`` the prompt is written to
+    the process stdin instead of being substituted into argv.
     """
 
     key: str
@@ -91,6 +93,15 @@ class AgentSpec(BaseModel):
     # template wraps the user's goal text before it is sent (``{prompt}`` is the
     # goal).  ``None`` => the agent has no goal mode.
     goal_command: Optional[str] = None
+    # Optional model/effort selection. ``*_choices`` is what the UI offers (an
+    # empty list hides the selector); ``*_args`` are the argv tokens injected
+    # when the user picked a value ("{model}"/"{effort}" are substituted).  The
+    # tokens are inserted before a trailing "-" (stdin marker), else appended,
+    # so explicit ``command`` lists in config.yaml keep working unchanged.
+    model_choices: list[str] = Field(default_factory=list)
+    model_args: list[str] = Field(default_factory=list)
+    effort_choices: list[str] = Field(default_factory=list)
+    effort_args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     # Environment variables to REMOVE before spawning (e.g. PYTHONPATH/PYTHONHOME
     # that would leak the backend's venv into a Python-based agent CLI).
@@ -131,6 +142,10 @@ def default_agents() -> dict[str, AgentSpec]:
             prompt_via="arg",
             stream_format="claude-json",
             goal_command="/goal {prompt}",
+            model_choices=["opus", "sonnet", "haiku"],
+            model_args=["--model", "{model}"],
+            effort_choices=["low", "medium", "high", "xhigh", "max"],
+            effort_args=["--effort", "{effort}"],
         ),
         "hermes": AgentSpec(
             key="hermes",
@@ -149,7 +164,9 @@ def default_agents() -> dict[str, AgentSpec]:
             display_name="Codex",
             # `codex exec` is non-interactive. Reading the prompt from stdin keeps
             # long dashboard prompts out of argv while `-` tells Codex to consume
-            # stdin as the initial instructions.
+            # stdin as the initial instructions. --output-last-message writes the
+            # agent's FINAL message to a temp file the runner reads back as the
+            # task's result summary (exact, instead of tail-of-transcript).
             command=[
                 "codex",
                 "exec",
@@ -160,12 +177,23 @@ def default_agents() -> dict[str, AgentSpec]:
                 "--color",
                 "never",
                 "--ephemeral",
+                "--output-last-message",
+                "{last_message_file}",
                 "-",
             ],
             prompt_via="stdin",
             stream_format="raw",
             env={"NO_COLOR": "1"},
             unset_env=["PYTHONPATH", "PYTHONHOME"],
+            model_choices=[
+                "gpt-5.1-codex",
+                "gpt-5.1-codex-max",
+                "gpt-5.1-codex-mini",
+                "gpt-5.1",
+            ],
+            model_args=["--model", "{model}"],
+            effort_choices=["low", "medium", "high", "xhigh"],
+            effort_args=["-c", "model_reasoning_effort={effort}"],
         ),
     }
 

@@ -3,6 +3,9 @@ export interface Agent {
   display_name: string;
   enabled: boolean;
   supports_goal: boolean;
+  /** Selectable models/effort levels; empty array = no selector. */
+  model_choices: string[];
+  effort_choices: string[];
 }
 
 export type TaskMode = "task" | "goal";
@@ -36,6 +39,9 @@ export interface Task {
   agent: string;
   prompt: string;
   mode: TaskMode;
+  /** Selected model/effort ("" = agent default). */
+  model: string;
+  effort: string;
   status: TaskStatus;
   exit_code: number | null;
   result_summary: string;

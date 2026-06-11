@@ -169,7 +169,16 @@ export const api = {
     agent: string,
     prompt: string,
     mode: TaskMode = "task",
-  ) => request<Task>("POST", `/projects/${projectId}/tasks`, { agent, prompt, mode }),
+    model = "",
+    effort = "",
+  ) =>
+    request<Task>("POST", `/projects/${projectId}/tasks`, {
+      agent,
+      prompt,
+      mode,
+      model,
+      effort,
+    }),
   getTask: (id: string) => request<Task>("GET", `/tasks/${id}`),
   stopTask: (id: string) =>
     request<{ stopped: boolean }>("POST", `/tasks/${id}/stop`),

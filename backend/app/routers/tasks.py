@@ -23,6 +23,8 @@ def list_agents() -> list[AgentInfo]:
             display_name=a.display_name,
             enabled=a.enabled,
             supports_goal=bool(a.goal_command),
+            model_choices=a.model_choices if a.model_args else [],
+            effort_choices=a.effort_choices if a.effort_args else [],
         )
         for a in cfg.agents.values()
     ]
@@ -58,12 +60,22 @@ async def create_task(
         raise HTTPException(
             400, f"Agent {spec.display_name} unterstützt keinen Goal-Modus."
         )
+    if body.model and body.model not in spec.model_choices:
+        raise HTTPException(
+            400, f"Agent {spec.display_name} unterstützt das Modell '{body.model}' nicht."
+        )
+    if body.effort and body.effort not in spec.effort_choices:
+        raise HTTPException(
+            400, f"Agent {spec.display_name} unterstützt Effort '{body.effort}' nicht."
+        )
 
     task = Task(
         project_id=project_id,
         agent=body.agent,
         prompt=body.prompt,
         mode=body.mode,
+        model=body.model,
+        effort=body.effort,
         status="queued",
     )
     db.add(task)

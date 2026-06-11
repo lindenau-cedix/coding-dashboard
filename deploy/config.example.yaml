@@ -4,8 +4,12 @@
 # /etc/coding-dashboard/config.yaml).
 #
 # Platzhalter, die zur Laufzeit ersetzt werden:
-#   {prompt}       -> die Aufgabenbeschreibung (inkl. AGENTS.md-Instruktion)
-#   {project_dir}  -> der lokale Pfad des geklonten Projekt-Repos
+#   {prompt}             -> die Aufgabenbeschreibung (inkl. AGENTS.md-Instruktion)
+#   {project_dir}        -> der lokale Pfad des geklonten Projekt-Repos
+#   {last_message_file}  -> temporäre Datei, in die die CLI ihre LETZTE Nachricht
+#                           schreibt (z.B. codex --output-last-message). Ihr Inhalt
+#                           wird als Endausgabe des Tasks übernommen (exakt, statt
+#                           Transkript-Heuristik) und landet in AGENTS.md.
 #
 # command : argv-Liste (KEINE Shell). Token 0 ist das Binary.
 # prompt_via : "arg"  -> {prompt} wird in die Argumente eingesetzt
@@ -15,6 +19,11 @@
 #                kann man dem Agenten statt einer Aufgabe ein Ziel geben; der
 #                gesamte Verlauf bis zum Ziel zählt als ein Task. {prompt} ist das
 #                Ziel. Fehlt das Feld, bietet der Agent keinen Ziel-Modus an.
+# model_choices / effort_choices : optionale Listen, die das UI als Dropdown
+#                anbietet (leer = kein Dropdown). Auswahl ist pro Task.
+# model_args / effort_args : argv-Tokens, die bei einer Auswahl eingefügt werden
+#                ({model}/{effort} werden ersetzt). Eingefügt vor einem
+#                abschließenden "-" (stdin-Marker), sonst angehängt.
 # =============================================================================
 
 # Instruktion, die JEDER Aufgabe angehängt wird, damit Claude, Hermes und Codex über
@@ -46,6 +55,11 @@ agents:
     stream_format: claude-json
     # Aktiviert den "Ziel"-Modus: das Dashboard ruft Claude mit "/goal <Ziel>" auf.
     goal_command: "/goal {prompt}"
+    # Pro Task wählbares Modell / Effort-Level (leer lassen = kein Dropdown).
+    model_choices: ["opus", "sonnet", "haiku"]
+    model_args: ["--model", "{model}"]
+    effort_choices: ["low", "medium", "high", "xhigh", "max"]
+    effort_args: ["--effort", "{effort}"]
     enabled: true
     # timeout_seconds: 3600
 
@@ -77,10 +91,11 @@ agents:
 
   codex:
     display_name: "Codex"
-    # `codex exec`: einzelne, nicht-interaktive Aufgabe. "-" liest den Prompt
-    # von stdin, damit lange Dashboard-Prompts nicht in der Prozessliste landen.
-    # workspace-write + ask-for-approval never läuft headless, ohne die Sandbox
-    # komplett zu deaktivieren.
+    # `codex exec`: einzelne, nicht-interaktive Aufgabe (mit Prompt von sich aus
+    # headless; --ask-for-approval gibt es in aktuellen Versionen nicht mehr).
+    # "-" liest den Prompt von stdin, damit lange Dashboard-Prompts nicht in der
+    # Prozessliste landen. --output-last-message schreibt die LETZTE Nachricht
+    # des Agenten in {last_message_file} -> exakte Endausgabe für AGENTS.md.
     command:
       - "codex"
       - "exec"
@@ -88,14 +103,18 @@ agents:
       - "{project_dir}"
       - "--sandbox"
       - "workspace-write"
-      - "--ask-for-approval"
-      - "never"
       - "--color"
       - "never"
       - "--ephemeral"
+      - "--output-last-message"
+      - "{last_message_file}"
       - "-"
     prompt_via: stdin
     stream_format: raw
+    model_choices: ["gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini", "gpt-5.1"]
+    model_args: ["--model", "{model}"]
+    effort_choices: ["low", "medium", "high", "xhigh"]
+    effort_args: ["-c", "model_reasoning_effort={effort}"]
     enabled: true
     env:
       NO_COLOR: "1"
