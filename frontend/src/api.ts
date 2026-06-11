@@ -174,7 +174,7 @@ export const api = {
   stopTask: (id: string) =>
     request<{ stopped: boolean }>("POST", `/tasks/${id}/stop`),
   pullProject: (id: string) =>
-    request<{ ok: boolean; branch: string }>("POST", `/projects/${id}/pull`),
+    request<{ ok: boolean; branch: string; output: string }>("POST", `/projects/${id}/pull`),
 };
 
 export function commitUrl(project: Project, hash: string): string | null {
