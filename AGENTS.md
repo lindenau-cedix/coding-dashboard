@@ -29,13 +29,15 @@ backend/app/
   agents.py        run_agent(): Subprocess + Streaming, claude-json/raw Parser,
                    Modell/Effort-Arg-Injektion, Endausgabe-Extraktion
                    (_final_output-Heuristik bzw. {last_message_file})
+  uploads.py       Bild-Anhänge: Base64/Data-URL-Decode + Validierung,
+                   Speicherung unter data_dir/task_images/{task_id}/
   task_runner.py   TaskManager: pro-Projekt-Lock, WS-Pub/Sub, AGENTS.md-Pflege,
                    Auto-Commit+Push
   routers/         auth, projects, tasks, ws
   main.py          App-Factory, lifespan, SPA-Auslieferung (Fallback)
 frontend/src/
   api.ts (REST + apiBase/Token), auth.tsx, types.ts
-  pages/ (Login, Projects, ProjectDetail), components/ (TaskConsole, ui, ...)
+  pages/ (Login, Projects, ProjectDetail), components/ (TaskConsole, TaskImages, ui, ...)
 deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, nginx, *.example
 ```
 
@@ -56,6 +58,21 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   `command`-Listen in config.yaml funktionieren daher unverändert).
   Claude: `--model {opus|sonnet|haiku}`, `--effort {low|medium|high|xhigh|max}`.
   Codex: `--model …`, `-c model_reasoning_effort={low|medium|high|xhigh}`.
+- **Bild-Anhänge:** `TaskCreate.images` = Liste `{name, data}` (data = Base64,
+  Data-URL erlaubt; max 6 Bilder, je max 8 MB, nur png/jpg/jpeg/gif/webp;
+  Validierung in `uploads.decode_images`, 400 bei Fehler VOR dem Anlegen des
+  Task-Rows). Speicherung AUSSERHALB des Repos unter
+  `data_dir/task_images/{task_id}/` (Auto-Commit nimmt sie daher nie mit);
+  Dateinamen sanitisiert/dedupliziert, als JSON-Liste in `tasks.images`
+  (TEXT-Spalte). Der Agent bekommt die absoluten Pfade als Block "Angehängte
+  Bilder" an den Prompt angehängt (`build_agent_prompt(..., image_paths=…)`)
+  und öffnet sie mit seinem eigenen Read-/Bild-Tool. Auslieferung ans UI über
+  `GET /api/tasks/{id}/images/{name}` (nur in `tasks.images` registrierte
+  Namen → kein Traversal; Auth nötig, daher lädt das Frontend per fetch +
+  Object-URL statt direktem `<img src>`). UI: Datei-Button + Strg+V-Paste ins
+  Textfeld, Vorschau mit Entfernen, Thumbnails in der Historie
+  (`components/TaskImages.tsx`). Beim Projekt-Löschen werden die Bildordner
+  der Tasks mitgelöscht.
 - **Endausgabe (`Task.result_summary`):** Priorität: Inhalt von
   `{last_message_file}` (Codex `--output-last-message`, exakt die letzte
   Agent-Nachricht) → Parser-Summary (Claude `result`-Event) →
@@ -120,6 +137,15 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-12 (Bilder):** Bilder können Teil einer Aufgabe sein (Upload im
+  Formular + Paste, Speicherung in `data_dir/task_images/`, Pfade im Prompt,
+  Anzeige in der Historie; DB-Spalte `tasks.images` additiv). Erst nach
+  `systemctl restart coding-dashboard` wirksam. Smoke-Test
+  `backfill: explicit command kept` war seit dem `--use-auth-token`-Removal
+  stale (Backfill füllt kürzere YAML-Commands absichtlich auf) und wurde an
+  das dokumentierte Verhalten angepasst.
+- Optional: Alte Bildordner abgeschlossener Tasks aufräumen (derzeit bleiben
+  sie für die Historie-Anzeige unbegrenzt liegen; gelöscht nur mit dem Projekt).
 - **2026-06-12:** `--use-auth-token` bei Claude-Aufrufen entfernt (Aufgabe + Goal-Modus).
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
@@ -156,6 +182,29 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 23:21 — claude
+
+**Aufgabe:**
+
+Bilder sollen Teil einer Aufgabe sein können.
+
+**Endausgabe:**
+
+Fertig — Bilder können jetzt Teil einer Aufgabe sein. Alle Smoke-Tests laufen durch (inkl. neuer Bild-Tests), TypeScript-Check und Vite-Build sind sauber.
+
+**Wie es funktioniert:**
+- Im Aufgaben-Formular gibt es einen „📎 Bilder anhängen"-Button; alternativ kann man Bilder direkt per Strg+V in das Textfeld einfügen. Vorschau-Thumbnails mit Entfernen-Button erscheinen unter dem Textfeld (max. 6 Bilder, je max. 8 MB, png/jpg/gif/webp).
+- Das Backend validiert und dekodiert die Base64-Uploads **vor** dem Anlegen des Tasks (400 bei ungültigem Format/Größe) und speichert sie bewusst **außerhalb des Repos** unter `data_dir/task_images/{task_id}/` — der Auto-Commit nimmt sie dadurch nie mit (per Test abgesichert).
+- Der Agent bekommt die absoluten Dateipfade als Block „Angehängte Bilder" an den Prompt angehängt und öffnet sie mit seinem eigenen Read-/Bild-Tool (funktioniert für Claude Code, Hermes und Codex, in Aufgabe- wie Goal-Modus).
+- In der Historie zeigt jeder Task ein 📎-Badge und aufgeklappt anklickbare Thumbnails (`GET /api/tasks/{id}/images/{name}`, auth-geschützt, nur registrierte Dateinamen → kein Path-Traversal). Beim Projekt-Löschen werden die Bildordner mit entfernt.
+- Neue DB-Spalte `tasks.images` (JSON-Liste) wird beim Start additiv per `ALTER TABLE` ergänzt — bestehende Datenbanken brauchen keine Migration.
+
+**Zwei Hinweise:**
+1. Der Smoke-Test `backfill: explicit command kept` schlug schon **vor** meinen Änderungen auf HEAD fehl (Folge des `--use-auth-token`-Removals; in einem sauberen Worktree verifiziert). Das Backfill-Verhalten — kürzere YAML-Commands werden aus den Builtin-Defaults aufgefüllt — ist laut Code-Kommentar gewollt, also habe ich den veralteten Test an das dokumentierte Verhalten angepasst.
+2. Wie üblich: wirksam erst nach `systemctl restart coding-dashboard` (nicht aus einem laufenden Task heraus neustarten).
+
+`AGENTS.md` ist aktualisiert (Struktur, Bild-Ablauf, offene Punkte). Commit und Push übernimmt das Dashboard.
+
 ### 2026-06-11 23:09 — hermes
 
 **Aufgabe:**
@@ -175,13 +224,3 @@ Test
 **Endausgabe:**
 
 error: unknown option '--use-auth-token'
-
-### 2026-06-11 22:28 — hermes
-
-**Aufgabe:**
-
-"--use-auth-token" sollte beim Claude Code-Aufruf sowohl im Goalmode als auch bei einer Aufgabe Teil des Commandes sein. Es wird aber nicht gemacht, obwohl du es bereits 2 mal bestätigt hast, dass es im Code ist.
-
-**Endausgabe:**
-
-Wichtig: Erst nach systemctl restart coding-dashboard wirksam.

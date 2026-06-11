@@ -31,6 +31,7 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "mode": "VARCHAR(16) NOT NULL DEFAULT 'task'",
         "model": "VARCHAR(128) NOT NULL DEFAULT ''",
         "effort": "VARCHAR(32) NOT NULL DEFAULT ''",
+        "images": "TEXT NOT NULL DEFAULT ''",
     },
 }
 

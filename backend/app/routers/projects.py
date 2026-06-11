@@ -9,11 +9,11 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
-from .. import git_ops, github_client
+from .. import git_ops, github_client, uploads
 from ..auth import get_current_user
 from ..config import get_settings
 from ..database import get_db
-from ..models import Project
+from ..models import Project, Task
 from ..schemas import ProjectCreate, ProjectDetail, ProjectOut
 
 router = APIRouter(
@@ -177,6 +177,8 @@ async def delete_project(
             raise HTTPException(502, f"GitHub: {exc.message}")
     if project.local_path:
         shutil.rmtree(project.local_path, ignore_errors=True)
+    for (task_id,) in db.query(Task.id).filter(Task.project_id == project_id):
+        uploads.delete_images(task_id)
     db.delete(project)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

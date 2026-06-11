@@ -42,6 +42,8 @@ export interface Task {
   /** Selected model/effort ("" = agent default). */
   model: string;
   effort: string;
+  /** Filenames of attached images (served via /api/tasks/{id}/images/{name}). */
+  images: string[];
   status: TaskStatus;
   exit_code: number | null;
   result_summary: string;
@@ -55,6 +57,13 @@ export interface Task {
   started_at: string | null;
   finished_at: string | null;
   output?: string;
+}
+
+/** Upload payload for one image attached to a new task. */
+export interface TaskImagePayload {
+  name: string;
+  /** Base64 content, data-URL form ("data:image/png;base64,...") is fine. */
+  data: string;
 }
 
 export interface ProjectCreatePayload {

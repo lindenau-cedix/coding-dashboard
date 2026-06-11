@@ -1,9 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
 import TaskConsole from "../components/TaskConsole";
+import TaskImages from "../components/TaskImages";
 import { Button, ErrorText, Modal, Spinner, StatusBadge, formatDate } from "../components/ui";
-import type { Agent, Project, Task, TaskMode } from "../types";
+import type { Agent, Project, Task, TaskImagePayload, TaskMode } from "../types";
+
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
 
 export default function ProjectDetail() {
   const { id = "" } = useParams();
@@ -18,6 +31,8 @@ export default function ProjectDetail() {
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
   const [prompt, setPrompt] = useState("");
+  const [images, setImages] = useState<TaskImagePayload[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
 
@@ -71,6 +86,40 @@ export default function ProjectDetail() {
     setTasks(await api.listTasks(id));
   }
 
+  async function addImageFiles(files: Iterable<File>) {
+    setError("");
+    const next = [...images];
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) continue;
+      if (next.length >= MAX_IMAGES) {
+        setError(`Maximal ${MAX_IMAGES} Bilder pro Aufgabe.`);
+        break;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        setError(`"${file.name}" ist größer als ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`);
+        continue;
+      }
+      try {
+        const data = await readAsDataUrl(file);
+        next.push({ name: file.name || `bild-${next.length + 1}.png`, data });
+      } catch {
+        setError(`"${file.name}" konnte nicht gelesen werden.`);
+      }
+    }
+    setImages(next);
+  }
+
+  function onPaste(e: React.ClipboardEvent) {
+    const files = Array.from(e.clipboardData?.items ?? [])
+      .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => f !== null);
+    if (files.length) {
+      e.preventDefault();
+      void addImageFiles(files);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     (async () => {
@@ -105,9 +154,10 @@ export default function ProjectDetail() {
     setSubmitting(true);
     setError("");
     try {
-      const task = await api.createTask(id, agent, prompt.trim(), mode, model, effort);
+      const task = await api.createTask(id, agent, prompt.trim(), mode, model, effort, images);
       setActiveTaskId(task.id);
       setPrompt("");
+      setImages([]);
       await refreshTasks();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Task konnte nicht gestartet werden");
@@ -290,6 +340,7 @@ export default function ProjectDetail() {
         <textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
+          onPaste={onPaste}
           rows={4}
           placeholder={
             mode === "goal"
@@ -298,19 +349,69 @@ export default function ProjectDetail() {
           }
           className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
         />
-        <div className="flex items-center justify-between">
-          <p className="text-xs text-slate-500">
-            {mode === "goal"
-              ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
-              : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
-          </p>
-          <Button type="submit" disabled={submitting || !agent || !prompt.trim()}>
-            {submitting
-              ? "Startet…"
-              : mode === "goal"
-                ? "Ziel starten"
-                : "Aufgabe starten"}
-          </Button>
+        {images.length > 0 && (
+          <div className="flex flex-wrap gap-2">
+            {images.map((img, i) => (
+              <div key={`${img.name}-${i}`} className="relative">
+                <img
+                  src={img.data}
+                  alt={img.name}
+                  title={img.name}
+                  className="h-20 w-20 rounded-lg border border-slate-700 object-cover"
+                />
+                <button
+                  type="button"
+                  onClick={() => setImages((arr) => arr.filter((_, j) => j !== i))}
+                  title="Bild entfernen"
+                  className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-slate-600 bg-slate-900 text-xs text-slate-300 hover:border-red-500 hover:text-red-400"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files) void addImageFiles(Array.from(e.target.files));
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={images.length >= MAX_IMAGES}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-slate-700 disabled:opacity-50"
+            >
+              📎 Bilder anhängen
+            </button>
+            <span className="text-xs text-slate-500">
+              {images.length > 0
+                ? `${images.length}/${MAX_IMAGES} Bild(er)`
+                : "oder Bild in das Textfeld einfügen (Strg+V)"}
+            </span>
+          </div>
+          <div className="flex items-center gap-3">
+            <p className="hidden text-xs text-slate-500 sm:block">
+              {mode === "goal"
+                ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
+                : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
+            </p>
+            <Button type="submit" disabled={submitting || !agent || !prompt.trim()}>
+              {submitting
+                ? "Startet…"
+                : mode === "goal"
+                  ? "Ziel starten"
+                  : "Aufgabe starten"}
+            </Button>
+          </div>
         </div>
       </form>
 
@@ -368,6 +469,9 @@ export default function ProjectDetail() {
                   <span className="flex-1 truncate text-sm text-slate-400">
                     {t.prompt}
                   </span>
+                  {(t.images?.length ?? 0) > 0 && (
+                    <span className="text-xs text-slate-500">📎 {t.images.length}</span>
+                  )}
                   <span className="text-xs text-slate-500">{formatDate(t.created_at)}</span>
                   <span className="text-slate-600">{expanded === t.id ? "▲" : "▼"}</span>
                 </button>
@@ -380,6 +484,17 @@ export default function ProjectDetail() {
                       </div>
                       <p className="mt-1 whitespace-pre-wrap text-sm text-slate-300">{t.prompt}</p>
                     </div>
+
+                    {(t.images?.length ?? 0) > 0 && (
+                      <div>
+                        <div className="text-xs uppercase tracking-wide text-slate-500">
+                          Bilder ({t.images.length})
+                        </div>
+                        <div className="mt-1">
+                          <TaskImages taskId={t.id} names={t.images} />
+                        </div>
+                      </div>
+                    )}
 
                     <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
                       {t.commit_hash ? (
