@@ -3,9 +3,9 @@
 # Coding Dashboard - Installer (Ubuntu)
 #
 # Installiert Backend (systemd-Service) + gebautes Frontend + nginx-Reverse-Proxy.
-# Muss mit sudo/root laufen. Der Service läuft als der User, der `claude` und
-# `hermes` authentifiziert hat (Standard: der sudo-aufrufende User), damit die
-# Agenten ihre Credentials in dessen $HOME finden.
+# Muss mit sudo/root laufen. Der Service läuft als der User, der `claude`,
+# `hermes` und `codex` authentifiziert hat (Standard: der sudo-aufrufende User),
+# damit die Agenten ihre Credentials in dessen $HOME finden.
 #
 # Anpassbar über Umgebungsvariablen, z.B.:
 #   sudo SERVICE_USER=deploy DOMAIN=dash.example.com SETUP_NGINX=yes ./install.sh
@@ -57,7 +57,7 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 if [[ $SERVICE_USER == root ]]; then
   warn "Service läuft als root. 'claude --dangerously-skip-permissions' verweigert root!"
-  warn "Setze SERVICE_USER auf den User, der claude/hermes eingerichtet hat."
+  warn "Setze SERVICE_USER auf den User, der claude/hermes/codex eingerichtet hat."
 fi
 
 info "Konfiguration"
@@ -124,8 +124,10 @@ ok "Backend-Dependencies installiert"
 info "Agent-CLIs erkennen (als $SERVICE_USER)"
 CLAUDE_BIN=$(sudo -u "$SERVICE_USER" -H bash -lc 'command -v claude' 2>/dev/null || true)
 HERMES_BIN=$(sudo -u "$SERVICE_USER" -H bash -lc 'command -v hermes' 2>/dev/null || true)
+CODEX_BIN=$(sudo -u "$SERVICE_USER" -H bash -lc 'command -v codex' 2>/dev/null || true)
 [[ -n $CLAUDE_BIN ]] && echo "  claude: $CLAUDE_BIN" || { warn "claude nicht im PATH von $SERVICE_USER gefunden."; CLAUDE_BIN=claude; }
 [[ -n $HERMES_BIN ]] && echo "  hermes: $HERMES_BIN" || { warn "hermes nicht im PATH von $SERVICE_USER gefunden."; HERMES_BIN=hermes; }
+[[ -n $CODEX_BIN ]] && echo "  codex : $CODEX_BIN" || { warn "codex nicht im PATH von $SERVICE_USER gefunden."; CODEX_BIN=codex; }
 
 # --- directories ----------------------------------------------------------- #
 mkdir -p "$DATA_DIR" "$CONFIG_DIR"
@@ -147,8 +149,8 @@ context_instruction: |
   2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
   3. Aktualisiere danach \`AGENTS.md\` (lege sie an, falls nicht vorhanden): beschreibe knapp
      und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
-     Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code oder
-     Hermes) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
+     Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code,
+     Hermes oder Codex) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
   4. Committe oder pushe NICHT selbst -- das uebernimmt das Dashboard automatisch nach dem Task.
 
 agents:
@@ -170,6 +172,19 @@ agents:
     enabled: true
     env:
       HERMES_ACCEPT_HOOKS: "1"
+      NO_COLOR: "1"
+    unset_env: ["PYTHONPATH", "PYTHONHOME"]
+
+  codex:
+    display_name: "Codex"
+    # codex exec: nicht-interaktiver Lauf. "-" liest den Prompt von stdin.
+    # workspace-write + ask-for-approval never macht den Lauf headless, ohne die
+    # Sandbox komplett zu deaktivieren.
+    command: ["$CODEX_BIN", "exec", "--cd", "{project_dir}", "--sandbox", "workspace-write", "--ask-for-approval", "never", "--color", "never", "--ephemeral", "-"]
+    prompt_via: stdin
+    stream_format: raw
+    enabled: true
+    env:
       NO_COLOR: "1"
     unset_env: ["PYTHONPATH", "PYTHONHOME"]
 YAML
@@ -282,4 +297,6 @@ else
 fi
 [[ -z $(sudo -u "$SERVICE_USER" -H bash -lc 'command -v hermes' 2>/dev/null || true) ]] && \
   warn "Hermes wurde nicht gefunden – prüfe/justiere die 'hermes'-Sektion in $CONFIG_YAML und 'systemctl restart $SERVICE_NAME'."
+[[ -z $(sudo -u "$SERVICE_USER" -H bash -lc 'command -v codex' 2>/dev/null || true) ]] && \
+  warn "Codex wurde nicht gefunden – prüfe/justiere die 'codex'-Sektion in $CONFIG_YAML und 'systemctl restart $SERVICE_NAME'."
 echo "  Android   : siehe deploy/build-android.sh (VITE_API_BASE auf öffentliche URL setzen)."

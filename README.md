@@ -1,13 +1,13 @@
 # Coding Dashboard
 
-Ein selbst-gehostetes Dashboard, um Coding-Aufgaben an **Claude Code** oder
-**Hermes** zu delegieren – pro Projekt, mit Live-Ausgabe, automatischem
+Ein selbst-gehostetes Dashboard, um Coding-Aufgaben an **Claude Code**,
+**Hermes** oder **Codex** zu delegieren – pro Projekt, mit Live-Ausgabe, automatischem
 Commit & Push und vollständiger Historie. Erreichbar über **Web** und
 **Android-App**.
 
 > **Wichtig:** Dieses Repo enthält Code **und Installations-Scripts**. Es wird
 > **nicht** automatisch deployt – du führst `deploy/install.sh` auf deinem
-> Ubuntu-Server aus (auf dem `hermes` und `claude` bereits installiert &
+> Ubuntu-Server aus (auf dem `hermes`, `claude` und `codex` bereits installiert &
 > eingeloggt sind).
 
 ---
@@ -18,8 +18,8 @@ Commit & Push und vollständiger Historie. Erreichbar über **Web** und
 |---|---|
 | Neues Projekt → **privates** GitHub-Repo anlegen | `POST /api/projects` (`mode=create`, `private=true`) via GitHub-API, danach lokaler Clone |
 | Bestehendes Repo **importieren** | `mode=import` (`owner/repo` oder URL) |
-| Aufgaben an **Hermes oder Claude** stellen, ausführen, Ergebnis anzeigen | Agent-Runner spawnt die CLI, **streamt Output live** per WebSocket |
-| Beide pflegen eine **gemeinsame `.md`** für den jeweils anderen Agenten | jeder Task bekommt eine Instruktion angehängt, `AGENTS.md` zu lesen & zu aktualisieren |
+| Aufgaben an **Hermes, Claude oder Codex** stellen, ausführen, Ergebnis anzeigen | Agent-Runner spawnt die CLI, **streamt Output live** per WebSocket |
+| Agenten pflegen eine **gemeinsame `.md`** als Kontextübergabe | jeder Task bekommt eine Instruktion angehängt, `AGENTS.md` zu lesen & zu aktualisieren |
 | Nach jeder Aufgabe bei Änderungen **ohne Rückfrage pushen** | nach jedem Task: `git add -A` → commit → `git push` (automatisch) |
 | **Historie** aus Aufgaben, Ausgabe & Commit | jede Task in SQLite: Prompt, Output, Status, Commit-Hash, Push-Status, Zeiten |
 | Backend als **systemd-Service** (Ubuntu) | `deploy/coding-dashboard.service` + `install.sh` |
@@ -39,7 +39,7 @@ Commit & Push und vollständiger Historie. Erreichbar über **Web** und
             │                          │                                            │
             │                          ├─ SQLite  (Projekte, Tasks, Historie)        │
             │                          ├─ GitHub API (Repo anlegen/importieren)      │
-            │                          └─ Subprocess: `claude` / `hermes`            │
+            │                          └─ Subprocess: `claude` / `hermes` / `codex`  │
             │                                 └─ in /var/lib/coding-dashboard/projects/<slug>
             └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -55,7 +55,7 @@ Commit & Push und vollständiger Historie. Erreichbar über **Web** und
 ## Voraussetzungen auf dem Server
 
 - Ubuntu mit `sudo`
-- `claude` (Claude Code) **und** `hermes` installiert **und eingeloggt** für den
+- `claude` (Claude Code), `hermes` **und** `codex` installiert **und eingeloggt** für den
   User, unter dem der Service laufen soll (er nutzt deren Credentials in `$HOME`).
 - Ein **GitHub Personal Access Token**:
   - **Klassisch:** `repo`-Scope (zum Löschen von Repos zusätzlich `delete_repo`).
@@ -82,7 +82,7 @@ und richtet ein:
 
 - Code unter `/opt/coding-dashboard`
 - venv + Dependencies, Frontend-Build
-- `/etc/coding-dashboard/config.yaml` (Agent-Kommandos; `claude`/`hermes`-Pfade automatisch erkannt)
+- `/etc/coding-dashboard/config.yaml` (Agent-Kommandos; `claude`/`hermes`/`codex`-Pfade automatisch erkannt)
 - `/etc/coding-dashboard/coding-dashboard.env` (Secrets, `chmod 640`)
 - systemd-Service `coding-dashboard` (enabled + gestartet)
 - nginx-Site (optional)
@@ -116,8 +116,9 @@ sudo ./deploy/uninstall.sh   # entfernen
 
 ## ⚙️ Agent-Konfiguration (`config.yaml`)
 
-**Beide Agenten sind fertig vorkonfiguriert** – Claude über `claude -p … stream-json`,
-Hermes über `chat -q` (mit Live-Streaming der Zwischenschritte):
+**Die Agenten sind fertig vorkonfiguriert** – Claude über `claude -p … stream-json`,
+Hermes über `chat -q` (mit Live-Streaming der Zwischenschritte) und Codex über
+`codex exec`:
 
 ```yaml
 agents:
@@ -129,6 +130,12 @@ agents:
     stream_format: raw
     env: { HERMES_ACCEPT_HOOKS: "1", NO_COLOR: "1" }
     unset_env: ["PYTHONPATH", "PYTHONHOME"]   # Backend-venv nicht in Hermes leaken
+  codex:
+    command: ["codex", "exec", "--cd", "{project_dir}", "--sandbox", "workspace-write", "--ask-for-approval", "never", "--color", "never", "--ephemeral", "-"]
+    prompt_via: stdin
+    stream_format: raw
+    env: { NO_COLOR: "1" }
+    unset_env: ["PYTHONPATH", "PYTHONHOME"]
 ```
 
 Warum so bei Hermes:
@@ -139,8 +146,19 @@ Warum so bei Hermes:
 - `NO_COLOR=1` + ANSI-Filter im Backend → saubere Web-Konsole.
 - `unset_env` spiegelt den `hermes`-Wrapper, der `PYTHONPATH`/`PYTHONHOME` leert.
 
+Warum so bei Codex:
+- **`codex exec`** ist der nicht-interaktive Lauf für eine einzelne Aufgabe.
+- **`prompt_via: stdin`** mit `-` hält lange Dashboard-Prompts aus der Prozessliste.
+- **`--sandbox workspace-write`** + **`--ask-for-approval never`** läuft headless,
+  ohne die Codex-Sandbox komplett zu deaktivieren.
+- **`--color never`** + `NO_COLOR=1` halten die Web-Konsole lesbar.
+
 Platzhalter: `{prompt}` (Aufgabe inkl. AGENTS.md-Instruktion), `{project_dir}`.
-Der absolute `hermes`/`claude`-Pfad wird vom Installer automatisch eingetragen.
+Der absolute `hermes`/`claude`/`codex`-Pfad wird vom Installer automatisch eingetragen.
+Bestehende installer-generierte Configs mit `claude`/`hermes` bekommen `codex`
+beim Neustart automatisch über den Backend-Backfill dazu. Wenn Codex nicht im UI
+auftauchen soll, in `/etc/coding-dashboard/config.yaml` eine `codex`-Sektion mit
+`enabled: false` setzen und den Service neu starten.
 
 Leiser (nur **Endergebnis**, kein Live-Stream): `command: ["hermes", "-z", "{prompt}"]`.
 Nach Änderungen: `sudo systemctl restart coding-dashboard`.
@@ -226,7 +244,8 @@ cd backend && .venv/bin/python tests/smoke.py
 
 - **Single-User-Login** (Passwort → JWT, pbkdf2-Hash). Secrets in `…/coding-dashboard.env` (`chmod 640`).
 - GitHub-Token wird **nie** in `.git/config` geschrieben – nur pro Netzwerk-Operation als Auth-Header injiziert.
-- Agenten laufen mit `--dangerously-skip-permissions` (Claude) **autonom** und committen/pushen ohne Rückfrage.
+- Agenten laufen autonom (Claude mit `--dangerously-skip-permissions`, Hermes mit
+  `--yolo`, Codex mit `--ask-for-approval never`) und committen/pushen ohne Rückfrage.
   Betreibe das nur mit privaten Repos und einem dafür vorgesehenen Token. Aktiviere TLS.
 - Der Service läuft als normaler User (nicht root) – Voraussetzung für Claudes Autonomie-Flag.
 

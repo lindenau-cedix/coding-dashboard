@@ -17,7 +17,7 @@
 #                Ziel. Fehlt das Feld, bietet der Agent keinen Ziel-Modus an.
 # =============================================================================
 
-# Instruktion, die JEDER Aufgabe angehängt wird, damit Claude und Hermes über
+# Instruktion, die JEDER Aufgabe angehängt wird, damit Claude, Hermes und Codex über
 # AGENTS.md einen gemeinsamen Projektkontext pflegen.
 context_instruction: |
   Wichtiger Projekt-Kontext (immer beachten):
@@ -26,8 +26,8 @@ context_instruction: |
   2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
   3. Aktualisiere danach `AGENTS.md` (lege sie an, falls nicht vorhanden): beschreibe knapp
      und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
-     Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code oder
-     Hermes) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
+     Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code,
+     Hermes oder Codex) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
   4. Committe oder pushe NICHT selbst -- das uebernimmt das Dashboard automatisch nach dem Task.
 
 agents:
@@ -74,3 +74,31 @@ agents:
       - "PYTHONHOME"
     # Alternative (nur Endergebnis, kein Live-Stream, am leisesten):
     #   command: ["hermes", "-z", "{prompt}"]
+
+  codex:
+    display_name: "Codex"
+    # `codex exec`: einzelne, nicht-interaktive Aufgabe. "-" liest den Prompt
+    # von stdin, damit lange Dashboard-Prompts nicht in der Prozessliste landen.
+    # workspace-write + ask-for-approval never läuft headless, ohne die Sandbox
+    # komplett zu deaktivieren.
+    command:
+      - "codex"
+      - "exec"
+      - "--cd"
+      - "{project_dir}"
+      - "--sandbox"
+      - "workspace-write"
+      - "--ask-for-approval"
+      - "never"
+      - "--color"
+      - "never"
+      - "--ephemeral"
+      - "-"
+    prompt_via: stdin
+    stream_format: raw
+    enabled: true
+    env:
+      NO_COLOR: "1"
+    unset_env:
+      - "PYTHONPATH"
+      - "PYTHONHOME"

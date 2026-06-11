@@ -123,6 +123,19 @@ def test_agent_runner() -> None:
     check("agent streamed output", "line1" in joined and "line2" in joined, joined)
     check("agent not error", res.is_error is False)
 
+    stdin_spec = AgentSpec(
+        key="stdin",
+        display_name="Stdin",
+        command=[PY, "-c", "import sys; print(sys.stdin.read())"],
+        prompt_via="stdin",
+        stream_format="raw",
+    )
+    chunks = []
+    res_stdin = asyncio.run(
+        run_agent(stdin_spec, "prompt over stdin", str(TMP), lambda c: _collect(chunks, c))
+    )
+    check("agent prompt via stdin", "prompt over stdin" in res_stdin.transcript, res_stdin.transcript)
+
     missing = AgentSpec(key="x", display_name="x", command=["definitely-not-a-binary-xyz"])
     res2 = asyncio.run(run_agent(missing, "p", str(TMP), lambda c: _noop()))
     check("missing binary -> error", res2.is_error and res2.exit_code == 127, str(res2.exit_code))
@@ -172,13 +185,32 @@ def test_config_backfill() -> None:
         '    display_name: "Claude Code"\n'
         '    command: ["claude", "-p", "{prompt}"]\n'
         "    stream_format: claude-json\n"
+        "    enabled: true\n"
+        "  hermes:\n"
+        '    display_name: "Hermes"\n'
+        '    command: ["hermes", "chat", "-q", "{prompt}"]\n'
+        "    stream_format: raw\n"
         "    enabled: true\n",
         encoding="utf-8",
     )
     cfg = load_agents_config(cfg_path)
     claude = cfg.agents["claude"]
+    codex = cfg.agents["codex"]
     check("backfill: goal_command inherited", claude.goal_command == "/goal {prompt}", claude.goal_command)
     check("backfill: explicit command kept", claude.command == ["claude", "-p", "{prompt}"], claude.command)
+    check("backfill: codex added to legacy config", codex.command[:2] == ["codex", "exec"], str(codex.command))
+    check("backfill: codex prompt via stdin", codex.prompt_via == "stdin", codex.prompt_via)
+
+    custom_path = TMP / "custom-only.yaml"
+    custom_path.write_text(
+        "agents:\n"
+        "  fake:\n"
+        '    display_name: "Fake"\n'
+        f'    command: ["{PY}", "-c", "print(123)"]\n',
+        encoding="utf-8",
+    )
+    custom = load_agents_config(custom_path)
+    check("backfill: custom-only config stays explicit", set(custom.agents) == {"fake"}, str(sorted(custom.agents)))
 
 
 def test_git_cycle() -> None:

@@ -1,6 +1,6 @@
 # systemd unit for the Coding Dashboard backend.
 # Placeholders (__UPPER__) are substituted by deploy/install.sh.
-# Runs as the user that has `claude` and `hermes` authenticated, so the agents
+# Runs as the user that has `claude`, `hermes`, and `codex` authenticated, so the agents
 # find their credentials in that user's $HOME.
 [Unit]
 Description=Coding Dashboard backend (FastAPI/uvicorn)

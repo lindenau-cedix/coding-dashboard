@@ -286,7 +286,7 @@ export default function ProjectDetail() {
           onClick={toggleAgentsMd}
           className="flex w-full items-center justify-between px-5 py-3 text-left text-sm font-medium text-slate-200"
         >
-          <span>AGENTS.md (gemeinsamer Kontext für Claude & Hermes)</span>
+          <span>AGENTS.md (gemeinsamer Kontext für Agenten)</span>
           <span className="text-slate-500">{showAgentsMd ? "▲" : "▼"}</span>
         </button>
         {showAgentsMd && (
