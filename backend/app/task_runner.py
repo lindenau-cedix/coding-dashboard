@@ -211,6 +211,8 @@ class TaskManager:
 
             await self._git_step(task_id, project_dir, branch, settings, spec.display_name, ch)
 
+            self._update_agents_md(project_id, project_dir)
+
             self._mark(task_id, finished=True)
             self._publish_done(ch, task_id)
 
@@ -269,6 +271,47 @@ class TaskManager:
                 ch.publish({"type": "git", "data": f"[git] push fehlgeschlagen: {exc}\n"})
         except Exception as exc:  # noqa: BLE001
             ch.publish({"type": "git", "data": f"[git] Fehler: {exc}\n"})
+
+    # -- AGENTS.md upkeep ---------------------------------------------------- #
+    def _update_agents_md(self, project_id: str, project_dir: str) -> None:
+        """Append the last 3 completed tasks to the project's AGENTS.md."""
+        agents_path = Path(project_dir) / "AGENTS.md"
+        with session_scope() as db:
+            tasks = (
+                db.query(Task)
+                .filter(
+                    Task.project_id == project_id,
+                    Task.status.in_("success", "failed"),
+                )
+                .order_by(Task.finished_at.desc())
+                .limit(3)
+                .all()
+            )
+
+        if not tasks:
+            return
+
+        section = "\n\n## Letzte Tasks\n\n"
+        for t in reversed(tasks):  # oldest first so newest reads last
+            ts = t.finished_at.strftime("%Y-%m-%d %H:%M") if t.finished_at else "?"
+            summary = (t.result_summary or t.prompt or "").replace("**", "").replace("##", "").strip()
+            if not summary:
+                summary = "(kein Ergebnis)"
+            section += f"- **{ts}** [{t.agent}] {summary}\n"
+
+        section = section.rstrip() + "\n"
+
+        if agents_path.exists():
+            content = agents_path.read_text(encoding="utf-8")
+            # Remove existing "## Letzte Tasks" section if present
+            marker = "\n## Letzte Tasks\n"
+            if marker in content:
+                content = content.split(marker)[0].rstrip() + "\n"
+            content += section
+        else:
+            content = "# AGENTS.md\n\n" + section
+
+        agents_path.write_text(content, encoding="utf-8")
 
     # -- small DB helpers -------------------------------------------------- #
     def _summary_line(self, task_id: str) -> str:

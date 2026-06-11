@@ -62,6 +62,12 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   --accept-hooks` (nicht-interaktiv, streamt Zwischenschritte, lädt AGENTS.md aus
   CWD; dazu `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1` und
   `unset_env: [PYTHONPATH, PYTHONHOME]`). Raw-Output wird im Runner ANSI-gefiltert.
+- **AGENTS.md-Aktualisierung:** Nach jedem abgeschlossenen Task aktualisiert
+  `TaskManager._update_agents_md()` die `AGENTS.md` im Projektverzeichnis:
+  Das ``## Letzte Tasks``-Block wird ersetzt (oder neu angehängt) mit den
+  letzten 3 erfolgreichen/failed Tasks (Datum, Agent, Zusammenfassung).
+  Der Agent selbst aktualisiert den Rest der AGENTS.md über die
+  `context_instruction` (siehe oben).
 - **Serialisierung:** pro Projekt ein `asyncio.Lock` (kein Git-Race); verschiedene
   Projekte laufen parallel. Laufende Tasks werden bei Neustart als `interrupted` markiert.
 
@@ -81,7 +87,5 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
   nächsten Publish erkannt).
 - Android: Launcher-Icons/Splash (Capacitor-Defaults bis dahin).
-- Hermes nutzt `chat -q` (Live-Stream). Leise Alternative ohne Zwischenschritte:
-  `command: ["hermes", "-z", "{prompt}"]`.
 - Optional: Stash/Pull-Rebase-Option bei Pull-Konflikten (aktuell `git pull origin branch`,
   kein Stash-Schutz).
