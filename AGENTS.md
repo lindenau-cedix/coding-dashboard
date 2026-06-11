@@ -81,10 +81,9 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   Configs bleiben explizit. So erhalten bestehende Installationen neue optionale
   Felder/Agenten ohne `/etc/coding-dashboard/config.yaml` von Hand editieren zu
   müssen (`update.sh` lässt eine bestehende Config bewusst unangetastet).
-  Claude: `claude -p … stream-json --use-auth-token` (Parser zeigt Tool-Calls mit Detail, z.B.
- `[tool] Bash: ls -la` / `[tool] Read: pfad`, statt nur des Tool-Namens).
-  `--use-auth-token` nutzt die Pro-Account-Usage-Credits statt des
- Organisations-API-Key-Limits. Beide Command-Varianten (task + goal) enthalten ihn.
+  Claude: `claude -p … stream-json` (Parser zeigt Tool-Calls mit Detail, z.B.
+  `[tool] Bash: ls -la` / `[tool] Read: pfad`, statt nur des Tool-Namens).
+  Beide Command-Varianten (task + goal) kommen ohne `--use-auth-token` aus.
   Hermes: `hermes chat -q {prompt} --yolo --accept-hooks` (nicht-interaktiv,
   streamt Zwischenschritte, lädt AGENTS.md aus CWD; dazu
   `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1` und
@@ -121,11 +120,7 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
-- **2026-06-12 (Fix):** `--use-auth-token` verschwand beim Laden aus config.yaml wegen
-  flacher `.update()`-Merge — die YAML `command`-Liste ersetzte die Builtin-Liste
-  komplett. Fix: wenn YAML kürzer als Builtin ist, werden die extra Elemente
-  (z.B. `--use-auth-token`) ans YAML-Command angehängt statt verworfen.
-  Achtung: erst nach Service-Neustart wirksam.
+- **2026-06-12:** `--use-auth-token` bei Claude-Aufrufen entfernt (Aufgabe + Goal-Modus).
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
   nächsten Publish erkannt).
@@ -161,6 +156,16 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-11 23:09 — hermes
+
+**Aufgabe:**
+
+Entferne --use-auth-token bei Claude Aufrufen, sowohl Aufgabe als auch Goalmodus
+
+**Endausgabe:**
+
+Wichtig: Erst nach systemctl restart coding-dashboard wirksam.
+
 ### 2026-06-11 22:46 — claude — fehlgeschlagen
 
 **Aufgabe:**
@@ -180,13 +185,3 @@ error: unknown option '--use-auth-token'
 **Endausgabe:**
 
 Wichtig: Erst nach systemctl restart coding-dashboard wirksam.
-
-### 2026-06-11 22:23 — claude — fehlgeschlagen
-
-**Aufgabe:**
-
-Test
-
-**Endausgabe:**
-
-You've hit your session limit · resets 4:20am (Europe/Berlin)
