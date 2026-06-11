@@ -315,7 +315,7 @@ class TaskManager:
             "_Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe"
             " (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._",
         ]
-        for t in reversed(tasks):  # oldest first so the newest reads last
+        for t in tasks:  # newest first (finished_at DESC, current run is first)
             ts = t.finished_at.strftime("%Y-%m-%d %H:%M") if t.finished_at else "?"
             extras = " · ".join(x for x in (t.model, t.effort) if x)
             head = f"### {ts} — {t.agent}" + (f" ({extras})" if extras else "")

@@ -97,9 +97,11 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   Ende der `AGENTS.md` komplett (oder legt ihn an): die letzten 3 Läufe —
   inklusive des gerade beendeten — je mit Datum, Agent, ggf. Modell/Effort,
   **Aufgabe** (User-Prompt, gekürzt auf 600 Zeichen) und **Endausgabe** (NUR die
-  letzte Agent-Nachricht, gekürzt auf 2000 Zeichen; Quelle siehe "Endausgabe"
-  oben). Eingebettete `#`-Zeilen werden escapet, damit der Block-Marker eindeutig
-  bleibt. Läuft VOR dem Commit/Push-Schritt, damit die Änderung mitgepusht wird.
+  letzte Agent-Nachricht, gekürzt auf 2000 Zeichen; Quelle: Codex
+  `--output-last-message` → Claude `result`-Event → `_final_output()`-
+  Heuristik). Eingebettete `#`-Zeilen werden escapet, damit der Block-Marker
+  eindeutig bleibt. Läuft VOR dem Commit/Push-Schritt, damit die Änderung
+  mitgepusht wird. Eintragsreihenfolge: newest-first (finished_at DESC).
   Der Agent selbst aktualisiert den Rest der AGENTS.md über die
   `context_instruction` (siehe oben).
 - **Serialisierung:** pro Projekt ein `asyncio.Lock` (kein Git-Race); verschiedene
@@ -147,3 +149,45 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
   neustarten, das killt den eigenen Lauf.
 - Codex-`model_choices` (gpt-5.1-codex…) sind Stand 2026-06; bei neuen
   Codex-Releases ggf. in `default_agents()` / config.yaml nachziehen.
+
+
+## Letzte Tasks
+
+- **2026-06-11 18:36** [hermes] ersetzt (oder neu angehängt) mit je einem Eintrag: Datum [agent] Zusammenfassung
+    - AGENTS.md existiert noch nicht → wird neu angelegt mit leerem Header + dem Block- Der Agent selbst pflegt den Rest der AGENTS.md (Struktur, Tech-Stack, Entscheidungen) über die context_instruction — das Dashboard kümmert sich nur um das Letzte-Tasks-Block
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+Resume this session with:
+  hermes --resume 20260611_203430_9e19b2
+
+Session:        20260611_203430_9e19b2
+Duration:       1m 30s
+Messages:       30 (1 user, 28 tool calls)
+- **2026-06-11 20:12** [hermes] ktionierte nicht weil Modal aus ui.tsx in ProjectDetail.tsx nicht importiert war. Der TypeScript-Compiler hat das bemängelt (TS2304), aber Vite hat trotzdem gebaut, weshalb es im Browser einfach still zusammenbrach.
+    
+    Was war's:
+    
+    import { Button, ErrorText, Spinner, StatusBadge, formatDate } from "../components/ui";
+    
+    ↓ wurde zu:
+    
+    import { Button, ErrorText, Modal, Spinner, StatusBadge, formatDate } from "../components/ui";
+    
+    
+    TypeScript jetzt grün, Build clean.
+╰──────────────────────────────────────────────────────────────────────────────╯
+- **2026-06-11 21:30** [hermes] d entfernt. Die aktuelle Codex-Version ist von sich aus nicht-interaktiv wenn ein Prompt übergeben wird — das Flag existiert schlicht nicht.
+    
+    Geändert: backend/app/config.py — Codex command-Array
+    
+    Aktualisiert: AGENTS.md — Dokumentation + Erklärung
+    
+    Nach dem nächsten sudo deploy/update.sh sollte Codex funktionieren.
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+Resume this session with:
+  hermes --resume 20260611_232915_a1a57e
+
+Session:        20260611_232915_a1a57e
+Duration:       46s
+Messages:       11 (1 user, 9 tool calls)

@@ -123,11 +123,14 @@ def _final_output(text: str, max_chars: int = 2000) -> str:
     # Only the last paragraph counts -- that IS the agent's final output.
     result = "\n".join(blocks[-1]).strip()
     if len(result) > max_chars:
-        result = result[-max_chars:]
-        cut = result.find("\n")
-        if 0 <= cut < 200:
-            result = result[cut + 1 :]
-        result = "[...]\n" + result.strip()
+        # Clip from the BEGINNING so the most important conclusion (which is
+        # at the start of the final paragraph) is preserved, not discarded.
+        cut = result[max_chars - 200 : max_chars].find("\n")
+        if cut >= 0:
+            result = result[: max_chars - 200 + cut]
+        else:
+            result = result[:max_chars]
+        result = result.strip() + "\n[... gekürzt ...]"
     return result
 
 
@@ -212,8 +215,12 @@ class _ClaudeJSONParser:
     def _tool_detail(cls, block: dict) -> str:
         """One-line preview of a tool call (command, file path, ...)."""
         inp = block.get("input")
-        if not isinstance(inp, dict) or not inp:
-            return ""
+        # Fall back to json.dumps for any non-dict input (string, list, None…)
+        if not isinstance(inp, dict):
+            try:
+                return cls._one_line(json.dumps(inp, ensure_ascii=False))
+            except (TypeError, ValueError):
+                return ""
         for key in cls._TOOL_PREVIEW_KEYS:
             val = inp.get(key)
             if isinstance(val, str) and val.strip():
