@@ -191,37 +191,3 @@ angepasst), alle 82 Smoke-Tests bestanden.
 
 **Nächste Schritte:** Nach `systemctl restart coding-dashboard` wirksam.
 
-## Letzte Tasks
-
-_Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
-
-### 2026-06-12 13:13 — hermes
-
-**Aufgabe:**
-
-Füge bei Claude Code Fable als Modell hinzu und aktuallisiere die Liste der Modelle für Codex (aktuell gibt es gpt-5.4 , gpt-5.5 , gpt-5.4-mini). Ebenfalls soll das einstellen des Efforts bei Claude Code die Config in ~/.claude/settings.json anpassen bevor die Aufgabe gestartet wird, dass auf jeden Fall dieses Efffort Level genutzt wird.
-
-**Endausgabe:**
-
-Wirkend nach systemctl restart coding-dashboard.
-
-### 2026-06-12 12:51 — hermes
-
-**Aufgabe:**
-
-Anstatt dass das Dashboard die letzten 3 Durchläufe + Ausgaben an die AGENTS.md hängt nach jedem Ablauf und die Infos der vorherigen 3 überschreibt soll der Agent selber am Anfang der .md ein Bereich führen, in dem er erklärt, was er als letztes wie getan hat, dieser Bereich soll bei JEDEM Durchlauf aktualisiert/überschrieben werden. Das Dashboard prüft nach einem Lauf vor dem Pushen nur noch, ob noch alte "Letzte Tasks" Regionen in der Datei sind von alten Dashboard-Versionen, wenn ja sollen diese entfernt werden.
-
-**Endausgabe:**
-
-Wichtig: Erst nach systemctl restart coding-dashboard wirksam.
-
-### 2026-06-12 12:44 — hermes
-
-**Aufgabe:**
-
-Anstatt dass das Dashboard die letzten 3 Durchläufe + Ausgaben an die AGENTS.md hängt nach jedem Ablauf und die Infos der vorherigen 3 überschreibt soll der Agent selber am Anfang der .md ein Bereich führen, in dem er erklärt, was er als letztes wie getan hat, dieser Bereich soll bei JEDEM Durchlauf aktualisiert/überschrieben werden. Das Dashboard prüft nach einem Lauf vor dem Pushen nur noch, ob noch alte "Letzte Tasks" Regionen in der Datei sind von alten Dashboard-Versionen, wenn ja sollen diese entfernt werden.
-
-**Endausgabe:**
-
-Error: Error code: 401 - {'error': {'message': 'User not found.',
-'code': 401}}
