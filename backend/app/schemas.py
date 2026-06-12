@@ -88,6 +88,8 @@ class TaskOut(BaseModel):
     effort: str = ""
     # Filenames of the attached images (DB stores them as a JSON string).
     images: list[str] = []
+    is_session: bool = False
+    chat_history: list[SessionMessage] = []
     status: str
     exit_code: Optional[int]
     result_summary: str
@@ -108,6 +110,47 @@ class TaskOut(BaseModel):
             return json.loads(v) if v.strip() else []
         return v or []
 
+    @field_validator("chat_history", mode="before")
+    @classmethod
+    def _chat_history_from_json(cls, v: object) -> object:
+        if isinstance(v, str):
+            return json.loads(v) if v.strip() else []
+        return v or []
+
 
 class TaskDetail(TaskOut):
     output: str
+
+
+# --------------------------------------------------------------------------- #
+# Session mode
+# --------------------------------------------------------------------------- #
+
+class SessionMessage(BaseModel):
+    """One turn in the chat history."""
+
+    role: Literal["user", "assistant"]
+    content: str
+    timestamp: str  # ISO-8601
+
+
+class SessionCreate(BaseModel):
+    """POST /sessions — start a new interactive session."""
+
+    project_id: str
+    agent: str
+    model: str = ""
+    effort: str = ""
+
+
+class SessionStartResponse(BaseModel):
+    """Response after creating a session task."""
+
+    task_id: str
+    status: str
+
+
+class SessionEndRequest(BaseModel):
+    """POST /sessions/{id}/end — user ends the interactive session."""
+
+    commit_message: str = ""

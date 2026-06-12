@@ -8,7 +8,7 @@ export interface Agent {
   effort_choices: string[];
 }
 
-export type TaskMode = "task" | "goal";
+export type TaskMode = "task" | "goal" | "session";
 
 export interface Project {
   id: string;
@@ -44,6 +44,10 @@ export interface Task {
   effort: string;
   /** Filenames of attached images (served via /api/tasks/{id}/images/{name}). */
   images: string[];
+  /** Whether this task is an interactive session. */
+  is_session: boolean;
+  /** Chat history for session tasks (JSON list of {role, content, timestamp}). */
+  chat_history: SessionMessage[];
   status: TaskStatus;
   exit_code: number | null;
   result_summary: string;
@@ -58,6 +62,24 @@ export interface Task {
   finished_at: string | null;
   output?: string;
 }
+
+/** One turn in a session chat history. */
+export interface SessionMessage {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+}
+
+/** WebSocket message envelope for session mode. */
+export type SessionWsMessage =
+  | { type: "started"; task_id: string }
+  | { type: "output"; data: string }
+  | { type: "message"; role: "user" | "assistant"; content: string }
+  | { type: "status"; status: string }
+  | { type: "done"; task_id: string; status: string; summary?: string }
+  | { type: "git"; data: string }
+  | { type: "error"; message: string }
+  | { type: string; [k: string]: unknown };
 
 /** Upload payload for one image attached to a new task. */
 export interface TaskImagePayload {

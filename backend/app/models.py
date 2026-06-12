@@ -60,6 +60,11 @@ class Task(Base):
     effort: Mapped[str] = mapped_column(String(32), default="")
     # JSON list of attached image filenames (stored under data_dir/task_images/{id}/).
     images: Mapped[str] = mapped_column(Text, default="")
+    # Session mode: the task is an interactive session (vs one-off task/goal).
+    is_session: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Session mode: full chat history as JSON list of {role, content, timestamp}.
+    # Updated live after each user turn; final state becomes Task.output on end.
+    chat_history: Mapped[str] = mapped_column(Text, default="")
 
     # queued | running | success | failed | error | interrupted | cancelled
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)

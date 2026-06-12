@@ -13,6 +13,7 @@ from .config import get_agents_config, get_settings
 from .database import init_db
 from .routers import auth as auth_router
 from .routers import projects as projects_router
+from .routers import sessions as sessions_router
 from .routers import tasks as tasks_router
 from .routers import ws as ws_router
 from .task_runner import reset_interrupted
@@ -57,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router.router, prefix="/api")
     app.include_router(projects_router.router, prefix="/api")
     app.include_router(tasks_router.router, prefix="/api")
+    app.include_router(sessions_router.router, prefix="/api")
     app.include_router(ws_router.router, prefix="/api")
 
     @app.get("/api/health")

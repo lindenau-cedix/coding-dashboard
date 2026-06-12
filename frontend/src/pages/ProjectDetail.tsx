@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
 import TaskConsole from "../components/TaskConsole";
 import TaskImages from "../components/TaskImages";
@@ -20,6 +20,7 @@ function readAsDataUrl(file: File): Promise<string> {
 
 export default function ProjectDetail() {
   const { id = "" } = useParams();
+  const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -35,6 +36,7 @@ export default function ProjectDetail() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [sessionActiveId, setSessionActiveId] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<Record<string, string>>({});
@@ -166,7 +168,26 @@ export default function ProjectDetail() {
     }
   }
 
+  async function startSession() {
+    if (!agent) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const { task_id } = await api.createSession(id, agent, model, effort);
+      setSessionActiveId(task_id);
+      navigate(`/projects/${id}/sessions/${task_id}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Session konnte nicht gestartet werden");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   async function toggleExpand(task: Task) {
+    if (task.is_session || task.mode === "session") {
+      navigate(`/projects/${id}/sessions/${task.id}`);
+      return;
+    }
     if (expanded === task.id) {
       setExpanded(null);
       return;
@@ -269,7 +290,7 @@ export default function ProjectDetail() {
           <div className="flex flex-wrap items-center gap-2">
             <label className="text-sm text-slate-400">Modus:</label>
             <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-              {(["task", "goal"] as const).map((m) => (
+              {(["task", "goal", "session"] as const).map((m) => (
                 <button
                   key={m}
                   type="button"
@@ -280,7 +301,28 @@ export default function ProjectDetail() {
                       : "bg-slate-800 text-slate-300 hover:bg-slate-700"
                   }`}
                 >
-                  {m === "goal" ? "Ziel (/goal)" : "Aufgabe"}
+                  {m === "goal" ? "Ziel" : m === "session" ? "Session" : "Aufgabe"}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {!goalSupported && (
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-sm text-slate-400">Modus:</label>
+            <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
+              {(["task", "session"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => changeMode(m)}
+                  className={`px-3 py-1.5 text-sm transition ${
+                    mode === m
+                      ? "bg-cyan-600 text-white"
+                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                  }`}
+                >
+                  {m === "session" ? "Session" : "Aufgabe"}
                 </button>
               ))}
             </div>
@@ -342,12 +384,17 @@ export default function ProjectDetail() {
           onChange={(e) => setPrompt(e.target.value)}
           onPaste={onPaste}
           rows={4}
+          disabled={mode === "session"}
           placeholder={
-            mode === "goal"
-              ? "Beschreibe das Ziel – der Agent arbeitet im /goal-Modus, bis es erreicht ist…"
-              : "Beschreibe die Aufgabe, die der Agent im Projekt erledigen soll…"
+            mode === "session"
+              ? "Session-Modus: Nach dem Start chattest du direkt mit dem Agenten im Browser. Dieses Feld wird nicht verwendet."
+              : mode === "goal"
+                ? "Beschreibe das Ziel – der Agent arbeitet im /goal-Modus, bis es erreicht ist…"
+                : "Beschreibe die Aufgabe, die der Agent im Projekt erledigen soll…"
           }
-          className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
+          className={`w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500 ${
+            mode === "session" ? "opacity-50 cursor-not-allowed" : ""
+          }`}
         />
         {images.length > 0 && (
           <div className="flex flex-wrap gap-2">
@@ -400,17 +447,29 @@ export default function ProjectDetail() {
           </div>
           <div className="flex items-center gap-3">
             <p className="hidden text-xs text-slate-500 sm:block">
-              {mode === "goal"
-                ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
-                : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
-            </p>
-            <Button type="submit" disabled={submitting || !agent || !prompt.trim()}>
-              {submitting
-                ? "Startet…"
+              {mode === "session"
+                ? "Interaktive Session: Du chattest mit dem Agenten. Nach dem Beenden werden Änderungen automatisch committet & gepusht."
                 : mode === "goal"
-                  ? "Ziel starten"
-                  : "Aufgabe starten"}
-            </Button>
+                  ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
+                  : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
+            </p>
+            {mode === "session" ? (
+              <Button
+                type="button"
+                onClick={() => void startSession()}
+                disabled={submitting || !agent}
+              >
+                {submitting ? "Startet…" : "Session starten"}
+              </Button>
+            ) : (
+              <Button type="submit" disabled={submitting || !agent || !prompt.trim()}>
+                {submitting
+                  ? "Startet…"
+                  : mode === "goal"
+                    ? "Ziel starten"
+                    : "Aufgabe starten"}
+              </Button>
+            )}
           </div>
         </div>
       </form>
@@ -464,6 +523,11 @@ export default function ProjectDetail() {
                   {t.mode === "goal" && (
                     <span className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-xs font-medium text-cyan-300">
                       Ziel
+                    </span>
+                  )}
+                  {t.mode === "session" && (
+                    <span className="rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-medium text-purple-300">
+                      Session
                     </span>
                   )}
                   <span className="flex-1 truncate text-sm text-slate-400">

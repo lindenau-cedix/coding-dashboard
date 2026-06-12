@@ -32,6 +32,8 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "model": "VARCHAR(128) NOT NULL DEFAULT ''",
         "effort": "VARCHAR(32) NOT NULL DEFAULT ''",
         "images": "TEXT NOT NULL DEFAULT ''",
+        "is_session": "BOOLEAN NOT NULL DEFAULT 0",
+        "chat_history": "TEXT NOT NULL DEFAULT ''",
     },
 }
 

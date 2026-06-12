@@ -5,6 +5,7 @@ import { Spinner } from "./components/ui";
 import Login from "./pages/Login";
 import Projects from "./pages/Projects";
 import ProjectDetail from "./pages/ProjectDetail";
+import SessionPage from "./pages/SessionPage";
 
 function Splash() {
   return (
@@ -32,6 +33,7 @@ export default function App() {
       <Route element={<Protected />}>
         <Route path="/" element={<Projects />} />
         <Route path="/projects/:id" element={<ProjectDetail />} />
+        <Route path="/projects/:id/sessions/:taskId" element={<SessionPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>

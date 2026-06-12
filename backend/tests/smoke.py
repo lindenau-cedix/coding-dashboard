@@ -591,6 +591,84 @@ def test_api_and_task() -> None:
         check("history lists task", any(t["id"] == tid for t in hist), str(len(hist)))
 
 
+# --------------------------------------------------------------------------- #
+# Session mode
+# --------------------------------------------------------------------------- #
+
+def test_session_api_and_manager() -> None:
+    from app.task_runner import session_manager, SessionChannel
+
+    # SessionChannel works.
+    ch = SessionChannel("test-ch")
+    check("channel publish+subscribe works", len(ch.buffer) == 0, str(len(ch.buffer)))
+    ch.publish({"type": "output", "data": "hello"})
+    q = ch.subscribe()
+    got = q.get_nowait()
+    check("subscribed queue receives published message", got == {"type": "output", "data": "hello"}, str(got))
+    ch.close()
+
+    # SessionManager.start with invalid agent raises ValueError.
+    import asyncio
+    try:
+        asyncio.run(
+            session_manager.start("fake-task", "fake-project", "nonexistent-agent", "", "")
+        )
+        check("start with invalid agent raised", False, "no error")
+    except ValueError as e:
+        check("start with invalid agent raises ValueError", "Unknown or disabled agent" in str(e), str(e))
+
+
+def test_session_end_flow() -> None:
+    """Smoke test for end_session: creates a task record, calls end_session,
+    verifies Task is updated with chat_history, result_summary, and marked done."""
+    from app.database import session_scope, engine
+    from app.models import Task, Project
+    from app.task_runner import session_manager
+    import asyncio, json
+    from sqlalchemy.orm import Session
+
+    # Use an existing project from the DB.
+    with Session(engine) as db:
+        proj_row = db.query(Project).first()
+        if proj_row is None:
+            check("session end test skipped (no project)", True, "")
+            return
+        pid = proj_row.id
+
+    task = Task(project_id=pid, agent="fake", prompt="", mode="session",
+                is_session=True, status="running", chat_history="[]")
+    with session_scope() as db:
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        tid = task.id
+
+    # Pre-populate chat_history.
+    with session_scope() as db:
+        t = db.get(Task, tid)
+        t.chat_history = json.dumps([
+            {"role": "user", "content": "hello", "timestamp": "2026-01-01T00:00:00Z"},
+            {"role": "assistant", "content": "hi there", "timestamp": "2026-01-01T00:00:01Z"},
+        ])
+        db.commit()
+
+    # end_session should succeed (process already dead → catch path).
+    result = asyncio.run(
+        session_manager.end_session(tid, pid, commit_message="test commit")
+    )
+    check("session end returns dict", isinstance(result, dict), str(result))
+    check("session end has status", "status" in result, str(result))
+
+    with session_scope() as db:
+        t = db.get(Task, tid)
+        if t is None:
+            check("task exists after end_session", False, "task is None")
+            return
+        check("task marked finished after end_session", t.finished_at is not None, str(t.finished_at))
+        history = json.loads(t.chat_history or "[]")
+        check("task chat_history preserved", len(history) == 2, str(len(history)))
+
+
 def main() -> int:
     try:
         test_security()
@@ -603,6 +681,8 @@ def main() -> int:
         test_config_backfill()
         test_git_cycle()
         test_api_and_task()
+        test_session_api_and_manager()
+        test_session_end_flow()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

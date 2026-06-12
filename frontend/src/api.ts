@@ -2,6 +2,7 @@ import type {
   Agent,
   Project,
   ProjectCreatePayload,
+  SessionMessage,
   Task,
   TaskImagePayload,
   TaskMode,
@@ -59,6 +60,11 @@ export function wsUrl(path: string): string {
   if (base) return base.replace(/^http/, "ws") + path;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}${path}`;
+}
+
+export function wsSessionUrl(taskId: string): string {
+  const token = getToken() ?? "";
+  return wsUrl(`/api/ws/sessions/${taskId}?token=${encodeURIComponent(token)}`);
 }
 
 export class ApiError extends Error {
@@ -187,6 +193,34 @@ export const api = {
     request<{ stopped: boolean }>("POST", `/tasks/${id}/stop`),
   pullProject: (id: string) =>
     request<{ ok: boolean; branch: string; output: string }>("POST", `/projects/${id}/pull`),
+
+  // Session mode
+  createSession: (projectId: string, agent: string, model = "", effort = "") =>
+    request<{ task_id: string; status: string }>("POST", "/sessions", {
+      project_id: projectId,
+      agent,
+      model,
+      effort,
+    }),
+  getSession: (taskId: string) =>
+    request<{
+      id: string;
+      project_id: string;
+      agent: string;
+      model: string;
+      effort: string;
+      chat_history: SessionMessage[];
+      status: string;
+      result_summary: string;
+      output: string;
+      is_session: boolean;
+    }>("GET", `/sessions/${taskId}`),
+  endSession: (taskId: string, commitMessage = "") =>
+    request<{ status: string; summary: string; commit_hash: string; pushed: boolean }>(
+      "POST",
+      `/sessions/${taskId}/end`,
+      { commit_message: commitMessage },
+    ),
 };
 
 /**

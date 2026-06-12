@@ -120,6 +120,20 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   seinen eigenen Abschnitt. Läuft VOR dem Commit/Push-Schritt.
 - **Serialisierung:** pro Projekt ein `asyncio.Lock` (kein Git-Race); verschiedene
   Projekte laufen parallel. Laufende Tasks werden bei Neustart als `interrupted` markiert.
+- **Session Mode (`mode="session"`):** Interaktive Agent-Sessions im Browser.
+  - `Task.is_session=True`, `Task.chat_history` (JSON-Liste von `{role, content, timestamp}`).
+  - Backend: `SessionManager` (`task_runner.py`) – startet Subprocess, pumpt stdout in
+    `SessionChannel`, leitet stdin vom WebSocket an den Prozess weiter.
+  - WebSocket: `/api/ws/sessions/{task_id}?token=…` — Client sendet `{type:"message",content}`
+    oder `{type:"end",commit_message}`, Server sendet `{type:"output"|"message"|"status"|"done"|"git"}`.
+  - Nach `end_session`: Subprocess beendet, `chat_history` + `result_summary` als Task-Output
+    gespeichert, dann Git-Commit+Push. Ergebnis ist ein normaler Task in der Historie.
+  - **Reload unterbricht die Session NICHT** — die SessionChannel bleibt im Speicher,
+    der Client kann die WS-Verbindung verlieren und neu verbinden; beim Rejoin liest er
+    den aktuellen `chat_history`-Stand aus der DB und zeigt ihn wieder her.
+  - Task-Suche in der Historie (`toggleExpand`) navigiert bei Sessions direkt zur
+    `SessionPage` (`/projects/:id/sessions/:taskId`); der Chatverlauf ist vollständig
+    wiederherstellbar.
 
 ## Konventionen
 - Secrets nur via env (`CD_*`). GitHub-Token nie persistieren.
@@ -133,6 +147,14 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-12:** Session Mode implementiert: interaktive Browser-Sessions mit
+  WebSocket stdin/stdout, Chatverlauf in DB, Auto-Commit+Push beim Beenden.
+  Modus-Umschalter (Aufgabe/Ziel/Session) im Projekt-Detail-Formular.
+  Route `/projects/:id/sessions/:taskId` für aktive und vergangene Sessions.
+  WICHTIG: Reload/Neuladen unterbricht die Session NICHT — die
+  SessionChannel bleibt im Backend-Speicher, und der Chatverlauf ist in der DB.
+  Nach `systemctl restart coding-dashboard` sind laufende Sessions
+  allerdings beendet (Server-Prozess weg) — das ist ein bekanntes Limitation.
 - **2026-06-12:** Modellliste aktualisiert: Claude Code hat jetzt `fable` als viertes Modell;
   Codex verwendet `gpt-5.4`, `gpt-5.5`, `gpt-5.4-mini` (vorher `gpt-5.1-*`).
   Bei Claude Code wird bei gesetztem Effort-Level zusätzlich `~/.claude/settings.json`
