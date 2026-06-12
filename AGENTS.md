@@ -182,6 +182,17 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-12 12:44 — hermes
+
+**Aufgabe:**
+
+Anstatt dass das Dashboard die letzten 3 Durchläufe + Ausgaben an die AGENTS.md hängt nach jedem Ablauf und die Infos der vorherigen 3 überschreibt soll der Agent selber am Anfang der .md ein Bereich führen, in dem er erklärt, was er als letztes wie getan hat, dieser Bereich soll bei JEDEM Durchlauf aktualisiert/überschrieben werden. Das Dashboard prüft nach einem Lauf vor dem Pushen nur noch, ob noch alte "Letzte Tasks" Regionen in der Datei sind von alten Dashboard-Versionen, wenn ja sollen diese entfernt werden.
+
+**Endausgabe:**
+
+Error: Error code: 401 - {'error': {'message': 'User not found.',
+'code': 401}}
+
 ### 2026-06-11 23:21 — claude
 
 **Aufgabe:**
@@ -214,13 +225,3 @@ Entferne --use-auth-token bei Claude Aufrufen, sowohl Aufgabe als auch Goalmodus
 **Endausgabe:**
 
 Wichtig: Erst nach systemctl restart coding-dashboard wirksam.
-
-### 2026-06-11 22:46 — claude — fehlgeschlagen
-
-**Aufgabe:**
-
-Test
-
-**Endausgabe:**
-
-error: unknown option '--use-auth-token'
