@@ -156,11 +156,12 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
-- **2026-06-12:** Codex schreibt vor dem Start `~/.codex/config.toml` mit den
-  im Dashboard eingestellten `model` und `model_reasoning_effort`-Werten
-  (Format: `model = "gpt-5.4-mini"`, `model_reasoning_effort = "medium"`).
-  Bestehende Datei wird gelesen, nur die beiden Keys werden überschrieben,
-  alle anderen Zeilen/Comments bleiben erhalten. Erst dann startet der Agent.
+- **2026-06-12 (Fix):** `_write_codex_config` strippte beim Lesen die
+  Anführungszeichen von allen Werten (`strip('"')`), schrieb sie aber nur
+  für `model`/`model_reasoning_effort` zurück — `service_tier = "default"`
+  wurde so zu `service_tier = default` (ohne Quotes), was Codex blockierte.
+  Fix: Raw-Wert ohne Quote-Removal speichern, Formatierung bleibt erhalten.
+  Nach `systemctl restart coding-dashboard` wirksam.
 - **2026-06-12:** Session Mode PTY-basiert: Agent läuft in echtem PTY, alle
   Tastatureingaben (Pfeiltasten, Ctrl+C, etc.) werden 1:1 durchgereicht.
   `session_command` in AgentSpec (neu), `os.openpty`+`os.fork` statt

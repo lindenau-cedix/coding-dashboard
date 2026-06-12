@@ -83,12 +83,13 @@ def _write_codex_config(model: str, effort: str) -> None:
             lines = []
 
     # Build a dict of existing key=value lines
+    # Keep the raw value (with or without quotes) so formatting is preserved on rewrite.
     cfg: dict[str, str] = {}
     for line in lines:
         line = line.strip()
         if "=" in line and not line.startswith("#"):
             key, _, val = line.partition("=")
-            cfg[key.strip()] = val.strip().strip('"')
+            cfg[key.strip()] = val.strip()
 
     # Update the relevant keys
     if model:
