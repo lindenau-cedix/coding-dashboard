@@ -24,7 +24,7 @@ chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR"
 
 info "Frontend bauen"
 if sudo -u "$SERVICE_USER" -H bash -lc 'command -v npm >/dev/null 2>&1'; then
-  sudo -u "$SERVICE_USER" -H bash -lc "cd '$APP_DIR/frontend' && npm ci && VITE_API_BASE='' npm run build"
+  sudo -u "$SERVICE_USER" -H bash -lc "cd '$APP_DIR/frontend' && npm install && VITE_API_BASE='' npm run build"
 elif [[ -d "$REPO_DIR/frontend/dist" ]]; then
   mkdir -p "$APP_DIR/frontend/dist"; cp -r "$REPO_DIR/frontend/dist/." "$APP_DIR/frontend/dist/"
   chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR/frontend/dist"
