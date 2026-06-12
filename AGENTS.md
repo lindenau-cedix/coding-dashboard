@@ -139,6 +139,9 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
   geschrieben (Key: `effort`), damit das Level garantiert genutzt wird — nicht nur
   per `--effort`-Flag in der CLI. Erst nach `systemctl restart coding-dashboard`
   wirksam.
+- **2026-06-12 (Fix):** `@vitejs/plugin-react` upgedated von `^4.3.2` auf `^6.0.2` (braucht jetzt
+  `@rolldown/plugin-babel@^0.2.3` + `babel-plugin-react-compiler@^1.0.0` als peer deps).
+  Fix für npm 10 + vite 8 peer-dep conflict. Build erfolgreich.
 - Optional: Alte Bildordner abgeschlossener Tasks aufräumen (derzeit bleiben
   sie für die Historie-Anzeige unbegrenzt liegen; gelöscht nur mit dem Projekt).
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
