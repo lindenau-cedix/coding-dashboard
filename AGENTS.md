@@ -133,11 +133,12 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
-- **2026-06-12 (AGENTS.md-Pflege umgestellt):** Der Agent führt jetzt selber
-  einen `## Letzter Durchlauf`-Block am Anfang der AGENTS.md. Das Dashboard
-  schreibt nicht mehr die letzten 3 Läufe in `## Letzte Tasks` und entfernt nur
-  noch alte Blöcke (vor 2026-06-12). `context_instruction` + Punkt 5 ergänzt.
-  Erst nach `systemctl restart coding-dashboard` wirksam.
+- **2026-06-12:** Modellliste aktualisiert: Claude Code hat jetzt `fable` als viertes Modell;
+  Codex verwendet `gpt-5.4`, `gpt-5.5`, `gpt-5.4-mini` (vorher `gpt-5.1-*`).
+  Bei Claude Code wird bei gesetztem Effort-Level zusätzlich `~/.claude/settings.json`
+  geschrieben (Key: `effort`), damit das Level garantiert genutzt wird — nicht nur
+  per `--effort`-Flag in der CLI. Erst nach `systemctl restart coding-dashboard`
+  wirksam.
 - Optional: Alte Bildordner abgeschlossener Tasks aufräumen (derzeit bleiben
   sie für die Historie-Anzeige unbegrenzt liegen; gelöscht nur mit dem Projekt).
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
@@ -194,6 +195,16 @@ angepasst), alle 82 Smoke-Tests bestanden.
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
 
+### 2026-06-12 13:13 — hermes
+
+**Aufgabe:**
+
+Füge bei Claude Code Fable als Modell hinzu und aktuallisiere die Liste der Modelle für Codex (aktuell gibt es gpt-5.4 , gpt-5.5 , gpt-5.4-mini). Ebenfalls soll das einstellen des Efforts bei Claude Code die Config in ~/.claude/settings.json anpassen bevor die Aufgabe gestartet wird, dass auf jeden Fall dieses Efffort Level genutzt wird.
+
+**Endausgabe:**
+
+Wirkend nach systemctl restart coding-dashboard.
+
 ### 2026-06-12 12:51 — hermes
 
 **Aufgabe:**
@@ -214,26 +225,3 @@ Anstatt dass das Dashboard die letzten 3 Durchläufe + Ausgaben an die AGENTS.md
 
 Error: Error code: 401 - {'error': {'message': 'User not found.',
 'code': 401}}
-
-### 2026-06-11 23:21 — claude
-
-**Aufgabe:**
-
-Bilder sollen Teil einer Aufgabe sein können.
-
-**Endausgabe:**
-
-Fertig — Bilder können jetzt Teil einer Aufgabe sein. Alle Smoke-Tests laufen durch (inkl. neuer Bild-Tests), TypeScript-Check und Vite-Build sind sauber.
-
-**Wie es funktioniert:**
-- Im Aufgaben-Formular gibt es einen „📎 Bilder anhängen"-Button; alternativ kann man Bilder direkt per Strg+V in das Textfeld einfügen. Vorschau-Thumbnails mit Entfernen-Button erscheinen unter dem Textfeld (max. 6 Bilder, je max. 8 MB, png/jpg/gif/webp).
-- Das Backend validiert und dekodiert die Base64-Uploads **vor** dem Anlegen des Tasks (400 bei ungültigem Format/Größe) und speichert sie bewusst **außerhalb des Repos** unter `data_dir/task_images/{task_id}/` — der Auto-Commit nimmt sie dadurch nie mit (per Test abgesichert).
-- Der Agent bekommt die absoluten Dateipfade als Block „Angehängte Bilder" an den Prompt angehängt und öffnet sie mit seinem eigenen Read-/Bild-Tool (funktioniert für Claude Code, Hermes und Codex, in Aufgabe- wie Goal-Modus).
-- In der Historie zeigt jeder Task ein 📎-Badge und aufgeklappt anklickbare Thumbnails (`GET /api/tasks/{id}/images/{name}`, auth-geschützt, nur registrierte Dateinamen → kein Path-Traversal). Beim Projekt-Löschen werden die Bildordner mit entfernt.
-- Neue DB-Spalte `tasks.images` (JSON-Liste) wird beim Start additiv per `ALTER TABLE` ergänzt — bestehende Datenbanken brauchen keine Migration.
-
-**Zwei Hinweise:**
-1. Der Smoke-Test `backfill: explicit command kept` schlug schon **vor** meinen Änderungen auf HEAD fehl (Folge des `--use-auth-token`-Removals; in einem sauberen Worktree verifiziert). Das Backfill-Verhalten — kürzere YAML-Commands werden aus den Builtin-Defaults aufgefüllt — ist laut Code-Kommentar gewollt, also habe ich den veralteten Test an das dokumentierte Verhalten angepasst.
-2. Wie üblich: wirksam erst nach `systemctl restart coding-dashboard` (nicht aus einem laufenden Task heraus neustarten).
-
-`AGENTS.md` ist aktualisiert (Struktur, Bild-Ablauf, offene Punkte). Commit und Push übernimmt das Dashboard.

@@ -53,6 +53,22 @@ def _build_env(spec: AgentSpec) -> dict[str, str]:
     return env
 
 
+def _write_claude_settings(effort: str) -> None:
+    """Write effort to ~/.claude/settings.json so Claude Code honours it."""
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    if not isinstance(settings, dict):
+        settings = {}
+    settings["effort"] = effort
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
 def _build_command(
     spec: AgentSpec,
     prompt: str,
@@ -298,6 +314,11 @@ async def _run_agent_inner(
         sel = " ".join(x for x in (model, effort) if x)
         await on_output(f"[auswahl] {sel}\n")
     await on_output(f"[cwd] {cwd}\n\n")
+
+    # For Claude Code, write effort to ~/.claude/settings.json so it is honoured
+    # even if the --effort flag is absent from the command template.
+    if effort and spec.key == "claude":
+        _write_claude_settings(effort)
 
     try:
         proc = await asyncio.create_subprocess_exec(
