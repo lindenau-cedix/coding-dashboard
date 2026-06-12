@@ -69,6 +69,54 @@ def _write_claude_settings(effort: str) -> None:
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
 
 
+def _write_codex_config(model: str, effort: str) -> None:
+    """Write model + model_reasoning_effort to ~/.codex/config.toml before Codex starts."""
+    config_path = Path.home() / ".codex" / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read existing config or start fresh
+    lines: list[str] = []
+    if config_path.exists():
+        try:
+            lines = config_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            lines = []
+
+    # Build a dict of existing key=value lines
+    cfg: dict[str, str] = {}
+    for line in lines:
+        line = line.strip()
+        if "=" in line and not line.startswith("#"):
+            key, _, val = line.partition("=")
+            cfg[key.strip()] = val.strip().strip('"')
+
+    # Update the relevant keys
+    if model:
+        cfg["model"] = f'"{model}"'
+    if effort:
+        cfg["model_reasoning_effort"] = f'"{effort}"'
+
+    # Rewrite the file, preserving comments and unknown keys
+    new_lines: list[str] = []
+    seen_keys: set[str] = set()
+    for line in lines:
+        stripped = line.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            key, _, _ = stripped.partition("=")
+            key = key.strip()
+            if key in cfg:
+                new_lines.append(f"{key} = {cfg[key]}")
+                seen_keys.add(key)
+                continue
+        new_lines.append(line)
+    # Append any keys that weren't in the original file
+    for key in ("model", "model_reasoning_effort"):
+        if key not in seen_keys and key in cfg:
+            new_lines.append(f"{key} = {cfg[key]}")
+
+    config_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
 def _build_command(
     spec: AgentSpec,
     prompt: str,
@@ -319,6 +367,11 @@ async def _run_agent_inner(
     # even if the --effort flag is absent from the command template.
     if effort and spec.key == "claude":
         _write_claude_settings(effort)
+
+    # For Codex, write model + model_reasoning_effort to ~/.codex/config.toml
+    # so Codex uses exactly the values the user selected in the dashboard.
+    if (model or effort) and spec.key == "codex":
+        _write_codex_config(model, effort)
 
     try:
         proc = await asyncio.create_subprocess_exec(
