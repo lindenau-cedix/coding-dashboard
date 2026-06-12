@@ -410,12 +410,10 @@ class SessionManager:
 
     def __init__(self) -> None:
         self._channels: dict[str, SessionChannel] = {}
-        self._procs: dict[str, asyncio.subprocess.Process] = {}
+        # In PTY mode we store {"pid": int, "master_fd": int}.
+        self._procs: dict[str, dict] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._parsers: dict[str, object] = {}
         self._project_locks: dict[str, asyncio.Lock] = {}
-        # Temp file paths for last-message files (task_id -> path).
-        self._last_msg_paths: dict[str, str] = {}
 
     def _project_lock(self, project_id: str) -> asyncio.Lock:
         lock = self._project_locks.get(project_id)
@@ -438,13 +436,25 @@ class SessionManager:
         model: str,
         effort: str,
     ) -> None:
-        """Launch the subprocess for an interactive session."""
-        from .agents import _build_env, _build_command, _make_parser, _write_claude_settings
+        """Launch the subprocess for an interactive session using a PTY.
+
+        The agent runs in a true interactive shell so keyboard input (Enter,
+        arrow keys, Ctrl-C, etc.) is forwarded faithfully.  No prompt is
+        injected -- the user talks to the agent directly over the WebSocket.
+        """
+        import os
+        import signal
+        import fcntl
+        import termios
+
+        from .agents import _build_env, _write_claude_settings
 
         agents = get_agents_config()
         spec = agents.agents.get(agent_key)
         if spec is None or not spec.enabled:
             raise ValueError(f"Unknown or disabled agent: {agent_key}")
+        if not spec.session_command:
+            raise ValueError(f"Agent {agent_key} does not support session mode")
 
         project_dir = ""
         with session_scope() as db:
@@ -460,82 +470,120 @@ class SessionManager:
         lock = self._project_lock(project_id)
         self._locks[task_id] = lock
 
-        # Build last-message temp file if the agent supports it.
-        last_message_path = ""
-        if any("{last_message_file}" in tok for tok in spec.command):
-            fd, tmp = tempfile.mkstemp(prefix="cd-sess-last-", suffix=".txt")
-            os.close(fd)
-            last_message_path = tmp
-            self._last_msg_paths[task_id] = tmp
+        # Build session command from session_command template.
+        cmd = []
+        for tok in spec.session_command:
+            tok = tok.replace("{project_dir}", project_dir)
+            cmd.append(tok)
 
-        cmd = _build_command(
-            spec,
-            "",  # no initial prompt in session mode
-            project_dir,
-            model=model,
-            effort=effort,
-            last_message_file=last_message_path,
-        )
+        # Inject model/effort args (same logic as _build_command).
+        extra: list[str] = []
+        if model and spec.model_args:
+            extra += [t.replace("{model}", model) for t in spec.model_args]
+        if effort and spec.effort_args:
+            extra += [t.replace("{effort}", effort) for t in spec.effort_args]
+        if extra:
+            cmd += extra
+
         env = _build_env(spec)
         cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", project_dir) or project_dir
 
         if effort and agent_key == "claude":
             _write_claude_settings(effort)
 
+        # Fork a PTY for the subprocess.
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=cwd,
-                env=env,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        except FileNotFoundError:
-            msg = f"[Fehler] Agent-Binary nicht gefunden: {cmd[0]!r}"
+            master_fd, slave_fd = os.openpty()
+        except OSError as exc:
+            msg = f"[Fehler] PTY konnte nicht erstellt werden: {exc}"
             ch.publish({"type": "output", "data": msg + "\n"})
             ch.publish({"type": "status", "status": "error"})
             ch.publish({"type": "done", "error": msg})
             ch.close()
             return
 
-        self._procs[task_id] = proc
-        parser = _make_parser(spec.stream_format)
-        self._parsers[task_id] = parser
+        # Make slave non-blocking so read() doesn't hang forever.
+        flags = fcntl.fcntl(slave_fd, fcntl.F_GETFL)
+        fcntl.fcntl(slave_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        try:
+            pid = os.fork()
+        except OSError as exc:
+            os.close(master_fd)
+            os.close(slave_fd)
+            msg = f"[Fehler] fork() fehlgeschlagen: {exc}"
+            ch.publish({"type": "output", "data": msg + "\n"})
+            ch.publish({"type": "status", "status": "error"})
+            ch.publish({"type": "done", "error": msg})
+            ch.close()
+            return
+
+        if pid == 0:
+            # Child: become session leader, set controlling TTY, redirect stdio.
+            os.close(master_fd)
+            try:
+                os.setsid()
+                # Set slave as controlling terminal.
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+            except OSError:
+                pass
+            os.dup2(slave_fd, 0)
+            os.dup2(slave_fd, 1)
+            os.dup2(slave_fd, 2)
+            os.close(slave_fd)
+            os.chdir(cwd or str(Path.home()))
+            # Reset signal mask, set clean env.
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            os.execvpe(cmd[0], cmd, env)
+        else:
+            # Parent: close slave, keep master.
+            os.close(slave_fd)
+            proc = None  # managed manually via pid
+
+        proc_info = {"pid": pid, "master_fd": master_fd}
+        self._procs[task_id] = proc_info  # type: ignore[assignment]
 
         async def pump() -> None:
-            """Pump subprocess stdout -> channel, forever until process closes."""
-            assert proc.stdout is not None
+            """Pump raw PTY output -> channel, forever until process closes."""
+            master = master_fd
+            ch_local = ch
             try:
                 while True:
-                    raw = await proc.stdout.readline()
+                    try:
+                        raw = os.read(master, 4096)
+                    except OSError:
+                        break
                     if not raw:
                         break
-                    display = parser.feed(raw.decode("utf-8", errors="replace"))
-                    if display:
-                        ch.publish({"type": "output", "data": display})
+                    display = raw.decode("utf-8", errors="replace")
+                    ch_local.publish({"type": "output", "data": display})
             except asyncio.CancelledError:
                 pass
 
         asyncio.create_task(pump())
 
     async def send_message(self, task_id: str, content: str) -> None:
-        """Send a user message to the session's stdin and store in chat_history."""
-        proc = self._procs.get(task_id)
-        if proc is None or proc.stdin is None:
+        """Forward raw data to the PTY master fd (keyboard strokes, etc.)."""
+        proc_info = self._procs.get(task_id)
+        if proc_info is None:
             raise RuntimeError("Session process not running")
-        ch = self._channels.get(task_id)
+        master_fd = proc_info["master_fd"]
 
-        ts = datetime.now(timezone.utc).isoformat()
-        msg_entry = {"role": "user", "content": content, "timestamp": ts}
+        # Forward raw bytes directly to the PTY master.
+        import fcntl
+        import os
+        import errno
 
-        if ch:
-            ch.publish({"type": "message", "role": "user", "content": content})
-
-        self._append_chat_history(task_id, msg_entry)
-
-        proc.stdin.write(content.encode("utf-8") + b"\n")
-        await proc.stdin.drain()
+        data = content.encode("utf-8")
+        try:
+            n = os.write(master_fd, data)
+        except OSError as exc:
+            if exc.errno == errno.EIO:
+                # PTY slave closed — process is gone
+                pass
+            else:
+                raise
 
     async def end_session(
         self,
@@ -543,52 +591,51 @@ class SessionManager:
         project_id: str,
         commit_message: str = "",
     ) -> dict:
-        """Terminate the subprocess, commit+push, persist Task."""
-        from .agents import _final_output
+        """Terminate the PTY process, commit+push, persist chat_history."""
+        import os
+        import signal
 
-        proc = self._procs.pop(task_id, None)
-        parser = self._parsers.pop(task_id, None)
+        proc_info = self._procs.pop(task_id, None)
         ch = self._channels.pop(task_id, None)
         lock = self._locks.pop(task_id, None)
-        last_msg_path = self._last_msg_paths.pop(task_id, "")
 
-        # Terminate process.
-        if proc is not None:
+        # Terminate PTY process group.
+        exit_code = 0
+        status = "success"
+        if proc_info is not None:
+            master_fd = proc_info["master_fd"]
+            pid = proc_info["pid"]
             try:
-                proc.stdin.close()
-            except Exception:
+                # Kill the process group (including any children).
+                os.killpg(pid, signal.SIGTERM)
+            except OSError:
                 pass
-            proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-            await proc.wait()
-
-        # Read last-message file if available.
-        summary = ""
-        if last_msg_path:
-            try:
-                summary = Path(last_msg_path).read_text(errors="replace").strip()
-            except Exception:
+                os.close(master_fd)
+            except OSError:
                 pass
-        if not summary and parser is not None:
-            summary = getattr(parser, "summary", lambda: "")() or ""
+            # Reap child.
+            try:
+                pid_ret, code = os.waitpid(pid, os.WNOHANG)
+                if pid_ret != 0:
+                    exit_code = os.WEXITSTATUS(code) if os.WIFEXITED(code) else -1
+                    if exit_code != 0:
+                        status = "failed"
+            except ChildProcessError:
+                pass
+            except OSError:
+                pass
 
         # Build full chat history from DB.
         chat_history = self._get_chat_history(task_id)
         chat_history_json = json.dumps(chat_history, ensure_ascii=False)
 
-        # Full output = chat history as JSON string.
+        # PTY sessions don't have structured summaries — use a fixed placeholder.
+        summary = "Interaktive Session beendet"
+
         output_text = chat_history_json
 
         settings = get_settings()
-        exit_code = 0
-        status = "success"
-        if proc is not None and proc.returncode not in (None, 0):
-            status = "failed"
-            exit_code = proc.returncode if proc.returncode is not None else -1
-
         # Update Task record.
         with session_scope() as db:
             task = db.get(Task, task_id)

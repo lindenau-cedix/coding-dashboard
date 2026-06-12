@@ -120,20 +120,29 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   seinen eigenen Abschnitt. Läuft VOR dem Commit/Push-Schritt.
 - **Serialisierung:** pro Projekt ein `asyncio.Lock` (kein Git-Race); verschiedene
   Projekte laufen parallel. Laufende Tasks werden bei Neustart als `interrupted` markiert.
-- **Session Mode (`mode="session"`):** Interaktive Agent-Sessions im Browser.
-  - `Task.is_session=True`, `Task.chat_history` (JSON-Liste von `{role, content, timestamp}`).
-  - Backend: `SessionManager` (`task_runner.py`) – startet Subprocess, pumpt stdout in
-    `SessionChannel`, leitet stdin vom WebSocket an den Prozess weiter.
-  - WebSocket: `/api/ws/sessions/{task_id}?token=…` — Client sendet `{type:"message",content}`
-    oder `{type:"end",commit_message}`, Server sendet `{type:"output"|"message"|"status"|"done"|"git"}`.
-  - Nach `end_session`: Subprocess beendet, `chat_history` + `result_summary` als Task-Output
-    gespeichert, dann Git-Commit+Push. Ergebnis ist ein normaler Task in der Historie.
-  - **Reload unterbricht die Session NICHT** — die SessionChannel bleibt im Speicher,
-    der Client kann die WS-Verbindung verlieren und neu verbinden; beim Rejoin liest er
-    den aktuellen `chat_history`-Stand aus der DB und zeigt ihn wieder her.
-  - Task-Suche in der Historie (`toggleExpand`) navigiert bei Sessions direkt zur
-    `SessionPage` (`/projects/:id/sessions/:taskId`); der Chatverlauf ist vollständig
-    wiederherstellbar.
+- **Session Mode (`mode="session"`):** Echte interaktive Terminal-Sessions im Browser
+  (PTY-basiert). Der Agent läuft in einer echten Shell, Tastatureingaben (Enter,
+  Pfeiltasten, Ctrl+C, etc.) werden 1:1 weitergeleitet. Kein Prompt wird injiziert —
+  der Benutzer tippt direkt mit dem Agenten.
+  - `Task.is_session=True`, `Task.chat_history` (leer — Output kommt live per PTY).
+  - Backend: `SessionManager.start()` forked einen PTY (`os.openpty` + `os.fork`),
+    `pump()` liest `os.read(master_fd, 4096)` und published rohe Bytes als
+    `{type:"output",data}` an die `SessionChannel`. `send_message()` schreibt rohe
+    UTF-8-Bytes direkt in den PTY-Master.
+  - Agent-spezifisch: `session_command` in `AgentSpec` — Liste von argv-Tokens ohne
+    Prompt-Injection. Für Claude: `["claude"]`, für Hermes:
+    `["hermes","chat","--yolo","--accept-hooks"]`.
+  - WebSocket `/api/ws/sessions/{task_id}?token=…` leitet `{type:"message",content}`
+    (rohe Typed-Zeichen) an `session_manager.send_message()` weiter.
+  - Frontend: grüner Terminal-Display (`<pre className="text-green-400">`) zeigt
+    `terminalOutput` live, Input leitet alle Tastendrücke weiter.
+  - Nach `end_session`: PTY-Process via `os.killpg(pid, SIGTERM)` beendet,
+    `result_summary = "Interaktive Session beendet"`, dann Git-Commit+Push.
+  - **Reload unterbricht die Session NICHT** — die `SessionChannel` bleibt im
+    Backend-Speicher; der Client kann die WS-Verbindung verlieren und neu verbinden.
+  - Route `/projects/:id/sessions/:taskId` für aktive und vergangene Sessions.
+  - **Limitation:** Nach `systemctl restart coding-dashboard` sind laufende Sessions
+    beendet (Server-Prozess weg) — ein bekanntes Limitation.
 
 ## Konventionen
 - Secrets nur via env (`CD_*`). GitHub-Token nie persistieren.
@@ -147,14 +156,11 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
-- **2026-06-12:** Session Mode implementiert: interaktive Browser-Sessions mit
-  WebSocket stdin/stdout, Chatverlauf in DB, Auto-Commit+Push beim Beenden.
-  Modus-Umschalter (Aufgabe/Ziel/Session) im Projekt-Detail-Formular.
-  Route `/projects/:id/sessions/:taskId` für aktive und vergangene Sessions.
-  WICHTIG: Reload/Neuladen unterbricht die Session NICHT — die
-  SessionChannel bleibt im Backend-Speicher, und der Chatverlauf ist in der DB.
-  Nach `systemctl restart coding-dashboard` sind laufende Sessions
-  allerdings beendet (Server-Prozess weg) — das ist ein bekanntes Limitation.
+- **2026-06-12:** Session Mode PTY-basiert: Agent läuft in echtem PTY, alle
+  Tastatureingaben (Pfeiltasten, Ctrl+C, etc.) werden 1:1 durchgereicht.
+  `session_command` in AgentSpec (neu), `os.openpty`+`os.fork` statt
+  `asyncio.subprocess`, grüner Terminal-Display im Frontend.
+  Nach `systemctl restart coding-dashboard` wirksam.
 - **2026-06-12:** Modellliste aktualisiert: Claude Code hat jetzt `fable` als viertes Modell;
   Codex verwendet `gpt-5.4`, `gpt-5.5`, `gpt-5.4-mini` (vorher `gpt-5.1-*`).
   Bei Claude Code wird bei gesetztem Effort-Level zusätzlich `~/.claude/settings.json`
@@ -203,28 +209,23 @@ _Der Agent führt diesen Block bei jedem Durchlauf selbst: kurze Zusammenfassung
 der Aufgabe, der wichtigsten Änderung/Erkenntnis und des Ergebnisses.
 Das Dashboard entfernt lediglich noch alte "Letzte Tasks"-Blöcke (vor 2026-06-12)._
 
-### 2026-06-12 13:00 — hermes
+### 2026-06-12 14:30 — hermes
 
-**Was getan:** Die AGENTS.md-Pflege umgestellt: Der Agent führt jetzt selber
-einen `## Letzter Durchlauf`-Block am Anfang der Datei (nach Titel + Zweck),
-der bei jedem Lauf überschrieben wird. Das Dashboard schreibt nicht mehr die
-letzten 3 Läufe in einen `## Letzte Tasks`-Block am Ende, sondern prüft nur
-noch, ob alte "Letzte Tasks"-Blöcke (von Dashboards vor 2026-06-12) existieren
--- und entfernt sie falls nötig. Änderungen: `config.py` (context_instruction
-Punkt 5), `task_runner.py` (_update_agents_mdcleanup), `smoke.py` (Tests
-angepasst), alle 82 Smoke-Tests bestanden.
-
-**Nächste Schritte:** Nach `systemctl restart coding-dashboard` wirksam.
-
-### 2026-06-12 13:30 — hermes
-
-**Was getan:** `npm audit fix` im frontend: 10 → 6 Vulnerabilities.
-- **uuid** (moderate): via `overrides: {uuid: "^11.1.1"}` in package.json gefixt.
-- **esbuild/vite** (moderate): `vite@8.0.16` installiert (Vite 8 Major-Upgrade).
-- **minimatch + tar** (high, 6x): keine Fixes verfügbar — stammen aus
-  `@capacitor/assets` → `@trapezedev/project` → `replace`/`xcode`-Ketten im
-  Capacitor-Android-Build-Tooling. Nur Upstream-Fixes möglich.
-Build erfolgreich (`vite build`, 415ms).
+**Was getan:** Session Mode auf PTY-Basis umgestellt — der Agent läuft jetzt in
+einer echten interaktiven Shell im Browser.
+- Neues Feld `session_command` in `AgentSpec` (config.py): Agent-spezifische
+  argv-Liste ohne Prompt-Injection. Claude: `["claude"]`, Hermes:
+  `["hermes","chat","--yolo","--accept-hooks"]`.
+- `SessionManager.start()` nutzt jetzt `os.openpty()` + `os.fork()` statt
+  `asyncio.subprocess_exec` mit Pipes. Das Child wird Session Leader mit
+  `setsid()` + `TIOCSCTTY`, stdio auf den PTY-Slave umgeleitet.
+- `pump()` liest rohe Bytes mit `os.read(master_fd, 4096)` aus dem PTY-Master
+  und published sie als `{type:"output",data}`.
+- `send_message()` schreibt rohe UTF-8-Bytes direkt in den PTY-Master.
+- `end_session()` nutzt `os.killpg(pid, SIGTERM)` statt proc.terminate().
+- Frontend: grüner `<pre>`-Terminal statt Chat-Bubbles, alle Tastendrücke
+  (Pfeiltasten, Ctrl+C, etc.) werden 1:1 durchgereicht.
+- Backend-Smoke-Tests: 12/12 bestanden. Frontend-Build erfolgreich.
 
 **Nächste Schritte:** Nach `systemctl restart coding-dashboard` wirksam.
 

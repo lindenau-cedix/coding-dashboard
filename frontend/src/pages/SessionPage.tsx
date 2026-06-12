@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ensureCloudflareAccess, wsSessionUrl } from "../api";
 import { Button, Modal, Spinner, StatusBadge } from "../components/ui";
-import type { Agent, Project, SessionMessage, SessionWsMessage } from "../types";
+import type { Agent, Project, SessionMessage, SessionWsMessage, TaskStatus } from "../types";
 
 export default function SessionPage() {
   const { id: projectId = "", taskId = "" } = useParams();
@@ -18,8 +18,8 @@ export default function SessionPage() {
 
   // Chat messages accumulated from WS and history.
   const [messages, setMessages] = useState<SessionMessage[]>([]);
-  // Streaming output not yet in a message.
-  const [streamingOutput, setStreamingOutput] = useState("");
+  // Terminal output (raw PTY bytes — the actual interactive shell display).
+  const [terminalOutput, setTerminalOutput] = useState("");
   const [gitOutput, setGitOutput] = useState("");
 
   const [input, setInput] = useState("");
@@ -91,15 +91,17 @@ export default function SessionPage() {
         if (msg.type === "started") {
           // Session is live.
         } else if (msg.type === "output") {
+          // Raw terminal output — append directly to terminal display.
           const data = (msg as { data: string }).data;
-          setStreamingOutput((prev) => prev + data);
+          setTerminalOutput((prev) => prev + data);
         } else if (msg.type === "message") {
+          // Structured messages (from rejoin / old session mode).
           const m = msg as { role: "user" | "assistant"; content: string };
           setMessages((prev) => [
             ...prev,
             { role: m.role, content: m.content, timestamp: new Date().toISOString() },
           ]);
-          setStreamingOutput(""); // Flush any pending streaming output.
+          setTerminalOutput(""); // Flush any pending streaming output.
         } else if (msg.type === "status") {
           const s = (msg as { status: string }).status;
           setStatus(s);
@@ -111,25 +113,21 @@ export default function SessionPage() {
           setStatus(d.status);
           setSummary(d.summary || "");
           setEnded(true);
-          setStreamingOutput("");
-          // Flush any remaining streaming as an assistant message.
+          // Flush any remaining streaming output.
           setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.role === "assistant" && last.content === "") {
-              return prev;
-            }
-            if (streamingOutput) {
+            if (terminalOutput) {
               return [
                 ...prev,
                 {
                   role: "assistant",
-                  content: streamingOutput,
+                  content: terminalOutput,
                   timestamp: new Date().toISOString(),
                 },
               ];
             }
             return prev;
           });
+          setTerminalOutput("");
         }
       };
 
@@ -163,14 +161,15 @@ export default function SessionPage() {
   // Auto-scroll chat.
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingOutput]);
+  }, [messages, terminalOutput]);
 
   async function sendMessage() {
-    const text = input.trim();
+    const text = input;
     if (!text || sending || ended) return;
     setInput("");
     setSending(true);
     try {
+      // Send raw keystrokes to the PTY — including the trailing newline.
       wsRef.current?.send(JSON.stringify({ type: "message", content: text }));
     } finally {
       setSending(false);
@@ -217,7 +216,7 @@ export default function SessionPage() {
             <h1 className="text-xl font-semibold text-slate-100">
               {agent?.display_name ?? "Session"}
             </h1>
-            <StatusBadge status={status} />
+            <StatusBadge status={status as TaskStatus} />
             {isLive && (
               <span className="rounded bg-cyan-500/15 px-2 py-0.5 text-xs font-medium text-cyan-300">
                 Live
@@ -251,7 +250,7 @@ export default function SessionPage() {
       <div className="flex-1 overflow-hidden rounded-xl border border-slate-800 bg-slate-900 flex flex-col min-h-96">
         {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-          {messages.length === 0 && !streamingOutput && (
+          {messages.length === 0 && !terminalOutput && (
             <p className="text-sm text-slate-500 italic">
               {isLive
                 ? "Warte auf erste Antwort des Agenten…"
@@ -273,14 +272,11 @@ export default function SessionPage() {
             </div>
           ))}
 
-          {/* Streaming output from assistant (accumulated until next message or done). */}
-          {streamingOutput && (
-            <div className="flex justify-start">
-              <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-slate-800 px-4 py-2.5 text-sm whitespace-pre-wrap text-slate-200 font-mono">
-                {streamingOutput}
-                <span className="ml-1 inline-block h-3 w-2 animate-pulse rounded-sm bg-slate-400 align-middle" />
-              </div>
-            </div>
+          {/* Live terminal output from PTY — shown as a raw terminal display. */}
+          {terminalOutput && (
+            <pre className="whitespace-pre-wrap break-all font-mono text-sm text-green-400 leading-relaxed">
+              {terminalOutput}
+            </pre>
           )}
 
           <div ref={chatEndRef} />
