@@ -121,6 +121,13 @@ Wichtiger Projekt-Kontext (immer beachten):
    Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code,
    Hermes oder Codex) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
 4. Committe oder pushe NICHT selbst -- das uebernimmt das Dashboard automatisch nach dem Task.
+5. **Pflege den "Letzter Durchlauf"-Block GANZ AM ANFANG der AGENTS.md** (direkt nach dem
+   Titel und dem Zweck-Absatz, noch vor allen anderen Abschnitten): Überschreibe ihn bei
+   jedem Durchlauf mit einer kurzen, fuer Menschen lesbaren Zusammenfassung dessen, was du
+   in diesem Lauf getan hast -- was die Aufgabe war, was du gefunden/gebaut/geantwortet hast,
+   und was die wichtigste Aenderung oder Erkenntnis war. Dieser Block wird vom Dashboard
+   NICHT mehr geschrieben; nur das Dashboard entfernt noch alte "Letzte Tasks"-Bloecke
+   (von Dashboards vor Version 2026-06-12), falls solche noch in der Datei existieren.
 """
 
 
