@@ -93,6 +93,10 @@ class AgentSpec(BaseModel):
     # template wraps the user's goal text before it is sent (``{prompt}`` is the
     # goal).  ``None`` => the agent has no goal mode.
     goal_command: Optional[str] = None
+    # If set, this agent supports interactive session mode: the command is
+    # invoked in a PTY so the agent runs in a proper interactive shell.
+    # No prompt is injected -- the user talks to the agent directly.
+    session_command: Optional[list[str]] = None
     # Optional model/effort selection. ``*_choices`` is what the UI offers (an
     # empty list hides the selector); ``*_args`` are the argv tokens injected
     # when the user picked a value ("{model}"/"{effort}" are substituted).  The
@@ -149,6 +153,7 @@ def default_agents() -> dict[str, AgentSpec]:
             prompt_via="arg",
             stream_format="claude-json",
             goal_command="/goal {prompt}",
+            session_command=["claude"],
             model_choices=["opus", "sonnet", "haiku", "fable"],
             model_args=["--model", "{model}"],
             effort_choices=["low", "medium", "high", "xhigh", "max"],
@@ -165,6 +170,7 @@ def default_agents() -> dict[str, AgentSpec]:
             stream_format="raw",
             env={"HERMES_ACCEPT_HOOKS": "1", "NO_COLOR": "1"},
             unset_env=["PYTHONPATH", "PYTHONHOME"],
+            session_command=["hermes", "chat", "--yolo", "--accept-hooks"],
         ),
         "codex": AgentSpec(
             key="codex",
