@@ -111,17 +111,13 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   Codex-Versionen — das Command ist von sich aus nicht-interaktiv wenn ein
   Prompt übergeben wird. Raw-Output wird im Runner ANSI-gefiltert.
 - **AGENTS.md-Aktualisierung:** Nach jedem abgeschlossenen Task (success/failed)
-  ersetzt `TaskManager._update_agents_md()` den ``## Letzte Tasks``-Block am
-  Ende der `AGENTS.md` komplett (oder legt ihn an): die letzten 3 Läufe —
-  inklusive des gerade beendeten — je mit Datum, Agent, ggf. Modell/Effort,
-  **Aufgabe** (User-Prompt, gekürzt auf 600 Zeichen) und **Endausgabe** (NUR die
-  letzte Agent-Nachricht, gekürzt auf 2000 Zeichen; Quelle: Codex
-  `--output-last-message` → Claude `result`-Event → `_final_output()`-
-  Heuristik). Eingebettete `#`-Zeilen werden escapet, damit der Block-Marker
-  eindeutig bleibt. Läuft VOR dem Commit/Push-Schritt, damit die Änderung
-  mitgepusht wird. Eintragsreihenfolge: newest-first (finished_at DESC).
-  Der Agent selbst aktualisiert den Rest der AGENTS.md über die
-  `context_instruction` (siehe oben).
+  führt der Agent über die `context_instruction` den Block `## Letzter Durchlauf`
+  GANZ AM ANFANG der AGENTS.md (direkt nach dem Titel und dem Zweck-Absatz):
+  eine kurze Zusammenfassung dessen, was er in diesem Lauf getan hat. Das Dashboard
+  schreibt diesen Block NICHT mehr -- es prüft nur noch vor dem Push, ob alte
+  `## Letzte Tasks`-Blöcke (von Dashboards vor 2026-06-12) in der Datei existieren,
+  und entfernt sie falls nötig. So bleibt die Datei sauber und der Agent führt
+  seinen eigenen Abschnitt. Läuft VOR dem Commit/Push-Schritt.
 - **Serialisierung:** pro Projekt ein `asyncio.Lock` (kein Git-Race); verschiedene
   Projekte laufen parallel. Laufende Tasks werden bei Neustart als `interrupted` markiert.
 
@@ -137,16 +133,13 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
-- **2026-06-12 (Bilder):** Bilder können Teil einer Aufgabe sein (Upload im
-  Formular + Paste, Speicherung in `data_dir/task_images/`, Pfade im Prompt,
-  Anzeige in der Historie; DB-Spalte `tasks.images` additiv). Erst nach
-  `systemctl restart coding-dashboard` wirksam. Smoke-Test
-  `backfill: explicit command kept` war seit dem `--use-auth-token`-Removal
-  stale (Backfill füllt kürzere YAML-Commands absichtlich auf) und wurde an
-  das dokumentierte Verhalten angepasst.
+- **2026-06-12 (AGENTS.md-Pflege umgestellt):** Der Agent führt jetzt selber
+  einen `## Letzter Durchlauf`-Block am Anfang der AGENTS.md. Das Dashboard
+  schreibt nicht mehr die letzten 3 Läufe in `## Letzte Tasks` und entfernt nur
+  noch alte Blöcke (vor 2026-06-12). `context_instruction` + Punkt 5 ergänzt.
+  Erst nach `systemctl restart coding-dashboard` wirksam.
 - Optional: Alte Bildordner abgeschlossener Tasks aufräumen (derzeit bleiben
   sie für die Historie-Anzeige unbegrenzt liegen; gelöscht nur mit dem Projekt).
-- **2026-06-12:** `--use-auth-token` bei Claude-Aufrufen entfernt (Aufgabe + Goal-Modus).
 - Optional: Token-Refresh/Logout-Härtung; Multi-User.
 - Optional: WS-Disconnect-Erkennung bei stillen, sehr langen Tasks (aktuell beim
   nächsten Publish erkannt).
@@ -178,9 +171,38 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
 - Codex-`model_choices` (gpt-5.1-codex…) sind Stand 2026-06; bei neuen
   Codex-Releases ggf. in `default_agents()` / config.yaml nachziehen.
 
+## Letzter Durchlauf
+
+_Der Agent führt diesen Block bei jedem Durchlauf selbst: kurze Zusammenfassung
+der Aufgabe, der wichtigsten Änderung/Erkenntnis und des Ergebnisses.
+Das Dashboard entfernt lediglich noch alte "Letzte Tasks"-Blöcke (vor 2026-06-12)._
+
+### 2026-06-12 13:00 — hermes
+
+**Was getan:** Die AGENTS.md-Pflege umgestellt: Der Agent führt jetzt selber
+einen `## Letzter Durchlauf`-Block am Anfang der Datei (nach Titel + Zweck),
+der bei jedem Lauf überschrieben wird. Das Dashboard schreibt nicht mehr die
+letzten 3 Läufe in einen `## Letzte Tasks`-Block am Ende, sondern prüft nur
+noch, ob alte "Letzte Tasks"-Blöcke (von Dashboards vor 2026-06-12) existieren
+-- und entfernt sie falls nötig. Änderungen: `config.py` (context_instruction
+Punkt 5), `task_runner.py` (_update_agents_mdcleanup), `smoke.py` (Tests
+angepasst), alle 82 Smoke-Tests bestanden.
+
+**Nächste Schritte:** Nach `systemctl restart coding-dashboard` wirksam.
+
 ## Letzte Tasks
 
 _Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._
+
+### 2026-06-12 12:51 — hermes
+
+**Aufgabe:**
+
+Anstatt dass das Dashboard die letzten 3 Durchläufe + Ausgaben an die AGENTS.md hängt nach jedem Ablauf und die Infos der vorherigen 3 überschreibt soll der Agent selber am Anfang der .md ein Bereich führen, in dem er erklärt, was er als letztes wie getan hat, dieser Bereich soll bei JEDEM Durchlauf aktualisiert/überschrieben werden. Das Dashboard prüft nach einem Lauf vor dem Pushen nur noch, ob noch alte "Letzte Tasks" Regionen in der Datei sind von alten Dashboard-Versionen, wenn ja sollen diese entfernt werden.
+
+**Endausgabe:**
+
+Wichtig: Erst nach systemctl restart coding-dashboard wirksam.
 
 ### 2026-06-12 12:44 — hermes
 
@@ -215,13 +237,3 @@ Fertig — Bilder können jetzt Teil einer Aufgabe sein. Alle Smoke-Tests laufen
 2. Wie üblich: wirksam erst nach `systemctl restart coding-dashboard` (nicht aus einem laufenden Task heraus neustarten).
 
 `AGENTS.md` ist aktualisiert (Struktur, Bild-Ablauf, offene Punkte). Commit und Push übernimmt das Dashboard.
-
-### 2026-06-11 23:09 — hermes
-
-**Aufgabe:**
-
-Entferne --use-auth-token bei Claude Aufrufen, sowohl Aufgabe als auch Goalmodus
-
-**Endausgabe:**
-
-Wichtig: Erst nach systemctl restart coding-dashboard wirksam.

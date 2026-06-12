@@ -395,6 +395,13 @@ def test_api_and_task() -> None:
     (proj / "README.md").write_text("# proj\n", encoding="utf-8")
     git_ops.commit_all(proj, "init", "Tester", "t@example.com")
     git_ops.push(proj, "main", token="")
+    # seed with an AGENTS.md that has the old "Letzte Tasks" block (pre-2026-06-12)
+    (proj / "AGENTS.md").write_text(
+        "# AGENTS.md\n\n## Letzter Durchlauf\n\n_Noch kein Durchlauf aufgezeichnet._\n\n## Letzte Tasks\n\n_die letzten 3 laeufe_\n",
+        encoding="utf-8",
+    )
+    git_ops.commit_all(proj, "add AGENTS.md", "Tester", "t@example.com")
+    git_ops.push(proj, "main", token="")
     base_head = run(["git", "--git-dir", str(remote), "rev-parse", "main"])
 
     with TestClient(app) as client:
@@ -484,15 +491,18 @@ def test_api_and_task() -> None:
         files = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
         check("committed agent file", "agent_out.txt" in files, files)
 
-        # AGENTS.md: rewritten BEFORE commit+push, with Aufgabe + Endausgabe
-        # of the current run.
+        # AGENTS.md: agent writes "Letzter Durchlauf" at top via context_instruction;
+        # Dashboard strips old "Letzte Tasks" block. Both changes land before push.
         agents_md = (proj / "AGENTS.md").read_text(encoding="utf-8")
-        check("AGENTS.md has Letzte Tasks", "## Letzte Tasks" in agents_md, agents_md[:300])
-        check("AGENTS.md entry has Aufgabe", "do work" in agents_md, agents_md[-500:])
         check(
-            "AGENTS.md entry has Endausgabe",
-            "hello from fake agent" in agents_md,
-            agents_md[-500:],
+            "AGENTS.md old Letzte Tasks stripped",
+            "## Letzte Tasks" not in agents_md,
+            agents_md[:300],
+        )
+        check(
+            "AGENTS.md has Letzter Durchlauf",
+            "## Letzter Durchlauf" in agents_md,
+            agents_md[:300],
         )
         check("AGENTS.md pushed with task", "AGENTS.md" in files, files)
 
@@ -567,11 +577,15 @@ def test_api_and_task() -> None:
         check("second task success", d2["status"] == "success", str(d2))
         agents_md2 = (proj / "AGENTS.md").read_text(encoding="utf-8")
         check(
-            "Letzte Tasks replaced not duplicated",
-            agents_md2.count("## Letzte Tasks") == 1,
+            "old Letzte Tasks still stripped after second run",
+            agents_md2.count("## Letzte Tasks") == 0,
             str(agents_md2.count("## Letzte Tasks")),
         )
-        check("both runs listed", "do work" in agents_md2 and "zweite aufgabe" in agents_md2, agents_md2[-800:])
+        check(
+            "Letzter Durchlauf present after second run",
+            "## Letzter Durchlauf" in agents_md2,
+            agents_md2[:300],
+        )
 
         hist = client.get(f"/api/projects/{pid}/tasks", headers=H).json()
         check("history lists task", any(t["id"] == tid for t in hist), str(len(hist)))

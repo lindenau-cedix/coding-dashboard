@@ -308,60 +308,28 @@ class TaskManager:
             ch.publish({"type": "git", "data": f"[git] Fehler: {exc}\n"})
 
     # -- AGENTS.md upkeep ---------------------------------------------------- #
-    _LETZTE_TASKS_RE = re.compile(r"(?m)^##\s*Letzte Tasks\s*$")
+    # Matches old "## Letzte Tasks" blocks written by Dashboard versions
+    # before 2026-06-12.  The agent now owns a "## Letzter Durchlauf" block
+    # at the top of AGENTS.md via context_instruction; we leave that alone.
+    _LETZTE_TASKS_RE = re.compile(r"(?m)^##\s*Letzte Tasks\s*$.*", re.DOTALL)
 
     def _update_agents_md(self, project_id: str, project_dir: str) -> None:
-        """Rewrite the trailing "## Letzte Tasks" section of AGENTS.md.
-
-        Contains the last 3 finished runs (incl. the one that just ended):
-        for each the task/prompt the agent received and ONLY its final
-        output.  Existing entries are replaced wholesale.  Runs before the
-        git step so commit & push include the updated file.
+        """Strip any residual "## Letzte Tasks" block left by old Dashboard
+        versions.  The agent maintains "## Letzter Durchlauf" at the top of
+        AGENTS.md via context_instruction (Dashboard > 2026-06-12).
+        Runs before the git step so the cleaned file is what gets pushed.
         """
         if not project_dir or not Path(project_dir).exists():
             return
         agents_path = Path(project_dir) / "AGENTS.md"
-        with session_scope() as db:
-            tasks = (
-                db.query(Task)
-                .filter(
-                    Task.project_id == project_id,
-                    Task.status.in_(["success", "failed"]),
-                )
-                .order_by(Task.finished_at.desc(), Task.created_at.desc())
-                .limit(3)
-                .all()
-            )
-
-        if not tasks:
+        if not agents_path.exists():
             return
 
-        parts = [
-            "## Letzte Tasks",
-            "",
-            "_Automatisch vom Dashboard gepflegt: die letzten 3 Agentenläufe"
-            " (Aufgabe + Endausgabe). Wird nach jedem Task überschrieben._",
-        ]
-        for t in tasks:  # newest first (finished_at DESC, current run is first)
-            ts = t.finished_at.strftime("%Y-%m-%d %H:%M") if t.finished_at else "?"
-            extras = " · ".join(x for x in (t.model, t.effort) if x)
-            head = f"### {ts} — {t.agent}" + (f" ({extras})" if extras else "")
-            head += " — fehlgeschlagen" if t.status == "failed" else ""
-            aufgabe = _embed_md(t.prompt, 600) or "(keine Aufgabe)"
-            ausgabe = _embed_md(t.result_summary, 2000) or "(keine Endausgabe)"
-            parts += ["", head, "", "**Aufgabe:**", "", aufgabe, "", "**Endausgabe:**", "", ausgabe]
-        section = "\n".join(parts).rstrip() + "\n"
-
-        if agents_path.exists():
-            content = agents_path.read_text(encoding="utf-8")
-            m = self._LETZTE_TASKS_RE.search(content)
-            if m:  # replace the existing section (everything from the marker on)
-                content = content[: m.start()]
-            content = content.rstrip() + "\n\n" + section
-        else:
-            content = "# AGENTS.md\n\n" + section
-
-        agents_path.write_text(content, encoding="utf-8")
+        content = agents_path.read_text(encoding="utf-8")
+        m = self._LETZTE_TASKS_RE.search(content)
+        if m:
+            content = content[: m.start()] + content[m.end() :]
+            agents_path.write_text(content, encoding="utf-8")
 
     # -- small DB helpers -------------------------------------------------- #
     def _summary_line(self, task_id: str) -> str:
