@@ -191,3 +191,15 @@ angepasst), alle 82 Smoke-Tests bestanden.
 
 **Nächste Schritte:** Nach `systemctl restart coding-dashboard` wirksam.
 
+### 2026-06-12 13:30 — hermes
+
+**Was getan:** `npm audit fix` im frontend: 10 → 6 Vulnerabilities.
+- **uuid** (moderate): via `overrides: {uuid: "^11.1.1"}` in package.json gefixt.
+- **esbuild/vite** (moderate): `vite@8.0.16` installiert (Vite 8 Major-Upgrade).
+- **minimatch + tar** (high, 6x): keine Fixes verfügbar — stammen aus
+  `@capacitor/assets` → `@trapezedev/project` → `replace`/`xcode`-Ketten im
+  Capacitor-Android-Build-Tooling. Nur Upstream-Fixes möglich.
+Build erfolgreich (`vite build`, 415ms).
+
+**Nächste Schritte:** Nach `systemctl restart coding-dashboard` wirksam.
+
