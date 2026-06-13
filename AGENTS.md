@@ -7,22 +7,24 @@ Kurz halten, aktuell halten.
 
 ### 2026-06-13 — codex
 
-**Was getan:** Session Mode zur shellinabox-artigen TUI-Session umgebaut.
-- Backend startet `session_command` jetzt als TUI-Basisbefehl im Projektordner
-  und hängt nur explizite Startparameter per `shlex.split()` an.
-- PTY-Output wird laufend als roher Transcript in `Task.output` persistiert und
-  per Offset über den Session-WebSocket wiederaufgenommen.
-- WebSocket unterstützt rohe Tastatursequenzen sowie Terminal-Resize.
-- Frontend öffnet Sessions als Dialog in `ProjectDetail` über
-  `SessionTerminalModal`, mit Pfeiltasten/Ctrl+C/Paste und einfachem
-  ANSI/Cursor-Rendering.
-- Session-Ende beendet die Prozessgruppe, committed Änderungen falls vorhanden
-  und pusht danach immer.
+**Was getan:** Schwarzen Bildschirm im Session Mode behoben.
+- `POST /api/sessions` wartet jetzt, bis der `SessionManager` den PTY und den
+  Live-Channel angelegt hat; dadurch kann der Browser-WebSocket nicht mehr vor
+  dem Channel in den Replay-/Done-Pfad fallen.
+- `/api/ws/sessions/{task_id}` wartet bei gerade startenden Sessions kurz auf
+  den Channel, bevor es eine laufende Session als nicht-live behandelt.
+- PTY-/Fork-Startfehler werden in `Task.output`, Status und Summary persistiert,
+  statt nur unsichtbar im Channel zu landen.
+- `SessionTerminalModal` zeigt nun Verbindungs-, Leer- und Fehlerzustände
+  explizit an; WebSocket-/Cloudflare-Fehler sind nicht mehr nur eine schwarze
+  Terminalfläche. Wenn der Mini-Renderer aus TUI-Steuersequenzen keinen sichtbaren
+  Screen erzeugt, wird ein ANSI-bereinigter Text-Fallback angezeigt.
 
-**Ergebnis:** Python-Kompilierung, Frontend-Typecheck, Frontend-Build und
-session-spezifische Verifikation erfolgreich. Voller Smoke-Test ist in dieser
-venv durch einen reproduzierbaren FastAPI/Starlette-`TestClient`-Hänger blockiert
-(minimaler TestClient hängt ebenfalls).
+**Ergebnis:** Session-Start-Race geschlossen und Terminal-UI gegen leeren Output,
+geschlossene WebSockets und fehlenden `ResizeObserver` gehärtet. Python-Kompilierung,
+Frontend-Typecheck, Frontend-Build und ein isolierter Fake-PTY-Session-Check
+waren erfolgreich. Voller Smoke-Test bleibt durch den bekannten
+FastAPI/Starlette-`TestClient`-Hänger blockiert (`timeout 70s`).
 
 ## Zweck
 Self-hosted Dashboard, um Coding-Aufgaben pro Projekt an Claude Code, Hermes oder Codex
@@ -190,6 +192,13 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-13 (Fix):** Session Mode zeigte teils nur einen schwarzen Dialog,
+  weil der Session-WebSocket direkt nach `POST /sessions` verbinden konnte,
+  bevor `SessionManager.start()` seinen Channel registriert hatte. Fix:
+  Session-Start wird bis zur PTY-/Channel-Anlage awaited, der WebSocket wartet
+  kurz auf gerade startende Channels, Startfehler werden persistiert und das
+  Frontend zeigt Verbindungs-/Fehlerzustände statt leerem Schwarz. Erst nach
+  `systemctl restart coding-dashboard` wirksam.
 - **2026-06-13:** Session Mode überarbeitet: startet Agent-TUIs im Projektordner
   über `session_command` ohne Prompt-Injection; Startparameter-Feld wird mit
   `shlex.split()` als argv angehängt. Dialog in `ProjectDetail` statt Seitenwechsel,
