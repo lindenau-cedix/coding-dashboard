@@ -185,6 +185,23 @@ function plainTerminalFallback(raw: string): string {
 
 function keyToBytes(e: React.KeyboardEvent): string | null {
   if (e.metaKey) return null;
+  // NEVER forward Ctrl+V / Ctrl+Shift+V (with or without Alt) to the agent TUI
+  // as the raw \x16 byte. Modern full-screen TUIs (Claude Code, Codex, Hermes,
+  // …) treat Ctrl+V as the OS-clipboard image-paste shortcut and try to read
+  // an image from `arboard` / X11 / Wayland. Our headless PTY has no display
+  // server, so that lookup hangs/fails and the user sees errors like
+  // "Failed to paste image: clipboard unavailable: X11 server connection
+  // timed out because it was unreachable" (Codex), "no image found" (Claude
+  // Code) or a silent no-op (Hermes). Returning `null` here lets the browser
+  // fall through to its default `paste` event so the onPaste handler can
+  // deliver the text as a bracketed paste, which is the only path that works
+  // in a headless PTY. Ctrl+Alt+V is already filtered by the `!e.altKey`
+  // guard below and Ctrl+Insert is harmless (we send \x1b[2~) but also gets
+  // no image handler in the common TUIs.
+  if (e.ctrlKey && !e.metaKey) {
+    const k = e.key.toLowerCase();
+    if (k === "v") return null;
+  }
   if (e.ctrlKey && !e.altKey && e.key.length === 1) {
     const code = e.key.toUpperCase().charCodeAt(0) - 64;
     if (code >= 1 && code <= 26) return String.fromCharCode(code);
@@ -460,7 +477,10 @@ export default function SessionTerminalModal({
   }
 
   function onTerminalPaste(e: React.ClipboardEvent<HTMLDivElement>) {
-    const text = e.clipboardData.getData("text");
+    // Prefer text/plain — anything else (text/html, files, images) would need
+    // OS-clipboard support the headless PTY can't provide, so we drop it
+    // instead of forwarding a paste the TUI can't honour.
+    const text = e.clipboardData.getData("text/plain") || e.clipboardData.getData("text");
     if (!text) return;
     e.preventDefault();
     // Wrap in DEC bracketed-paste sequences so full-screen TUIs (Claude Code,
@@ -468,7 +488,10 @@ export default function SessionTerminalModal({
     // Without this each newline in the pasted text is interpreted as Enter
     // and submits the prompt prematurely. The PTY was put into mode ?2004h
     // by the backend on session start; if the TUI doesn't honour it, the
-    // surrounding escape sequences are still harmless noise.
+    // surrounding escape sequences are still harmless noise. This is reached
+    // only via the browser's own paste event (Ctrl+V / right-click → Paste),
+    // because keyToBytes returns null for Ctrl+V so the browser default
+    // survives and synthesises the paste event with the real clipboard text.
     sendBytes(`\x1b[200~${text}\x1b[201~`);
   }
 
