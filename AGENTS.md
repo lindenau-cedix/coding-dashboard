@@ -5,6 +5,29 @@ Kurz halten, aktuell halten.
 
 ## Letzter Durchlauf
 
+### 2026-06-13 — codex (Session-Paste: Ctrl+V nicht mehr als TUI-Byte)
+
+**Was getan:** Im Session Mode löste Ctrl+V (und Ctrl+Shift+V) bei jeder
+TUI einen Image-Paste-Versuch aus, der in unserem headless PTY ohne X11/
+Wayland-Display scheitert. Codex warf *"Failed to paste image: clipboard
+unavailable: Unknown error while interacting with the clipboard: X11
+server connection timed out because it was unreachable"*, Claude Code
+antwortete mit *"no image found"*, Hermes verwarf den Paste still.
+- `frontend/src/components/SessionTerminalModal.tsx` `keyToBytes()`:
+  Ctrl+V (lowercase und Shift-uppercase) wird jetzt mit `null` returnt,
+  *bevor* der Ctrl+X-Branch `String.fromCharCode(...)` das rohe `\x16`
+  an die TUI schickt. `onTerminalKeyDown` returnt bei `null` ohne
+  `preventDefault()` → Browser-Default überlebt → `paste`-Event feuert
+  → `onTerminalPaste` greift → Bracketed-Paste wird gesendet.
+- `onTerminalPaste` liest jetzt `text/plain` (mit `text`-Fallback) statt
+  nur `text` und droppt alles, was kein Text ist, statt einen Paste
+  weiterzuleiten, den die TUI mangels OS-Clipboard nicht verarbeiten kann.
+
+**Ergebnis:** Ctrl+V im Browser-Terminal-Dialog schickt den Clipboard-Text
+als DEC-Bracketed-Paste an die TUI; die TUI versucht keinen Image-Paste
+mehr und der TUI-Prompt bekommt den Text ganz normal. Python-Compile,
+TypeScript-Typecheck, Vite-Build und Smoke-Tests grün.
+
 ### 2026-06-13 — codex
 
 **Was getan:** Session Mode Paste-Support (Clipboard, auch mehrzeilig)
@@ -224,6 +247,17 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
     `\x1b[200~ ... \x1b[201~` ein. Mehrzeilige Pasten werden damit von
     Claude Code / Codex / Hermes als ein zusammenhängendes Event behandelt
     und nicht in eine Serie von Enter-Submits zerlegt.
+  - **Ctrl+V (und Ctrl+Shift+V) werden NICHT als rohes `\x16` an die TUI
+    geschickt.** `keyToBytes()` returnt für Ctrl+V absichtlich `null`,
+    damit der Browser-Default das `paste`-Event feuert und
+    `onTerminalPaste` den Bracketed-Paste bauen kann. Hintergrund: Die
+    gängigen TUIs (Codex siehe `codex-rs/tui/src/chatwidget/interaction.rs`,
+    Claude Code, Hermes) interpretieren Ctrl+V als Image-Paste-Shortcut
+    und rufen intern `arboard::Clipboard::new()` auf, um ein Bild aus
+    dem OS-Clipboard zu lesen. In unserem headless PTY ohne DISPLAY
+    schlägt das mit "X11 server connection timed out" / "no image
+    found" fehl und der Text-Paste geht verloren. Nur der Bracketed-Paste
+    via Browser-`paste`-Event erreicht die TUI zuverlässig.
   - Frontend: `SessionTerminalModal` öffnet direkt in `ProjectDetail` als Dialog,
     rendert den Transcript über eine kleine ANSI/Cursor-Emulation, sendet
     Pfeiltasten/Enter/Tab/Ctrl+C/Paste als rohe Terminalsequenzen und lädt bei
@@ -259,6 +293,18 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-13 (Fix):** Session-Paste via Ctrl+V schlug bei Codex mit
+  "Failed to paste image: clipboard unavailable: X11 server connection
+  timed out" fehl, Claude Code meldete "no image found", Hermes machte
+  nichts. Ursache: `SessionTerminalModal.keyToBytes()` schickte Ctrl+V
+  als rohes `\x16` an die TUI; die TUIs interpretieren Ctrl+V als
+  Image-Paste-Shortcut und lesen das OS-Clipboard via `arboard` —
+  scheitert im headless PTY ohne X11/Wayland. Fix: `keyToBytes()` returnt
+  für Ctrl+V/Ctrl+Shift+V jetzt `null`; Browser-Default überlebt, das
+  `paste`-Event feuert, `onTerminalPaste` schickt den Text als
+  Bracketed-Paste (`\x1b[200~ ... \x1b[201~`). Resultat: Pasten aus dem
+  Browser funktionieren prompt-treu, ohne dass die TUI ein Bild sucht.
+  Erst nach `update.sh`/`systemctl restart coding-dashboard` wirksam.
 - **2026-06-13 (Feature):** Session Mode: Bracketed Paste (DEC ?2004h +
   `\x1b[200~ ... \x1b[201~`) aktiviert — mehrzeilige Pasten aus dem
   Browser werden in der TUI nicht mehr als Enter-Submits interpretiert.
