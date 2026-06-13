@@ -66,8 +66,8 @@ async def create_session(body: SessionCreate, db: Session = Depends(get_db)) -> 
     db.commit()
     db.refresh(task)
 
-    asyncio.create_task(
-        session_manager.start(
+    try:
+        started = await session_manager.start(
             task.id,
             body.project_id,
             body.agent,
@@ -75,12 +75,16 @@ async def create_session(body: SessionCreate, db: Session = Depends(get_db)) -> 
             body.effort,
             start_args=start_args,
         )
-    )
-    with session_scope() as sdb:
-        t = sdb.get(Task, task.id)
-        if t:
-            t.status = "running"
-            t.started_at = datetime.now(timezone.utc)
+    except ValueError as exc:
+        with session_scope() as sdb:
+            t = sdb.get(Task, task.id)
+            if t:
+                t.status = "error"
+                t.error = str(exc)
+                t.finished_at = datetime.now(timezone.utc)
+        raise HTTPException(400, str(exc))
+    if not started:
+        raise HTTPException(500, "Session konnte nicht gestartet werden.")
 
     return {"task_id": task.id, "status": "running"}
 
@@ -149,6 +153,20 @@ async def ws_session(
     await websocket.accept()
 
     ch = session_manager.get_channel(task_id)
+    if ch is None:
+        # A client can connect immediately after POST /sessions. Give the
+        # just-created background session a short grace period to register its
+        # live channel before falling back to persisted replay.
+        for _ in range(40):
+            with session_scope() as db:
+                task = db.get(Task, task_id)
+                task_status = task.status if task else ""
+            if task_status not in {"queued", "running"}:
+                break
+            await asyncio.sleep(0.05)
+            ch = session_manager.get_channel(task_id)
+            if ch is not None:
+                break
     if ch is None:
         # Session ended or server restarted: replay state from DB.
         with session_scope() as db:

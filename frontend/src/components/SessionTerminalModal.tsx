@@ -4,6 +4,7 @@ import type { Agent, Project, SessionWsMessage, TaskStatus } from "../types";
 import { Button, ErrorText, Spinner, StatusBadge } from "./ui";
 
 const TERMINAL_STATUSES = new Set(["success", "failed", "error", "interrupted", "cancelled"]);
+type ConnectionState = "idle" | "connecting" | "open" | "closed" | "error";
 
 function isDone(status: string): boolean {
   return TERMINAL_STATUSES.has(status);
@@ -174,6 +175,14 @@ function renderTerminal(raw: string, cols: number): string {
   return lines.map((line) => line.join("").replace(/\s+$/, "")).join("\n").replace(/\s+$/, "");
 }
 
+function plainTerminalFallback(raw: string): string {
+  return raw
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "")
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, "")
+    .trim();
+}
+
 function keyToBytes(e: React.KeyboardEvent): string | null {
   if (e.metaKey) return null;
   if (e.ctrlKey && !e.altKey && e.key.length === 1) {
@@ -240,6 +249,7 @@ export default function SessionTerminalModal({
   const [pushed, setPushed] = useState(false);
   const [commitMessage, setCommitMessage] = useState("");
   const [ending, setEnding] = useState(false);
+  const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [terminalSize, setTerminalSize] = useState({ cols: 100, rows: 30 });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -253,6 +263,21 @@ export default function SessionTerminalModal({
     () => renderTerminal(rawOutput, terminalSize.cols),
     [rawOutput, terminalSize.cols],
   );
+  const terminalText = useMemo(() => {
+    if (loading) return "Lädt...";
+    if (screen.trim()) return screen;
+    if (rawOutput.trim()) {
+      return plainTerminalFallback(rawOutput) || "Terminalausgabe enthält nur Steuersequenzen.";
+    }
+    if (connectionState === "connecting") return "Verbinde mit Terminal...";
+    if (connectionState === "open") return "Verbunden. Warte auf erste Ausgabe...";
+    if (connectionState === "error") return "Terminal-Verbindung fehlgeschlagen.";
+    if (connectionState === "closed" && !isDone(status)) {
+      return "Terminal-Verbindung geschlossen. Session erneut öffnen.";
+    }
+    if (isDone(status)) return "Keine Terminalausgabe gespeichert.";
+    return "Terminal wird gestartet...";
+  }, [connectionState, loading, rawOutput, screen, status]);
 
   function appendOutput(data: string, offset?: number) {
     setRawOutput((prev) => {
@@ -275,7 +300,7 @@ export default function SessionTerminalModal({
     const rect = el.getBoundingClientRect();
     const cols = clamp(Math.floor((rect.width - 24) / 8), 20, 300);
     const rows = clamp(Math.floor((rect.height - 24) / 18), 5, 120);
-    setTerminalSize({ cols, rows });
+    setTerminalSize((prev) => (prev.cols === cols && prev.rows === rows ? prev : { cols, rows }));
     ws.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 
@@ -320,17 +345,32 @@ export default function SessionTerminalModal({
     let ws: WebSocket | null = null;
     let closed = false;
     (async () => {
+      setConnectionState("connecting");
       try {
         await ensureCloudflareAccess();
-      } catch {
+      } catch (err) {
+        if (!closed) {
+          setConnectionState("error");
+          setError(err instanceof Error ? err.message : "Terminal-Verbindung konnte nicht vorbereitet werden");
+        }
         return;
       }
       if (closed) return;
       ws = new WebSocket(wsSessionUrl(taskId, rawRef.current.length));
       wsRef.current = ws;
       ws.onopen = () => {
+        setConnectionState("open");
         terminalRef.current?.focus();
         sendResize();
+      };
+      ws.onerror = () => {
+        if (!closed) {
+          setConnectionState("error");
+          setError("Terminal-WebSocket konnte nicht geöffnet werden.");
+        }
+      };
+      ws.onclose = () => {
+        if (!closed) setConnectionState("closed");
       };
       ws.onmessage = (ev) => {
         let msg: SessionWsMessage;
@@ -343,7 +383,9 @@ export default function SessionTerminalModal({
           const out = msg as { data: string; offset?: number };
           appendOutput(out.data, out.offset);
         } else if (msg.type === "status") {
-          setStatus((msg as { status: TaskStatus }).status);
+          const nextStatus = (msg as { status: TaskStatus }).status;
+          setStatus(nextStatus);
+          if (isDone(nextStatus)) setConnectionState("closed");
         } else if (msg.type === "git") {
           setGitOutput((prev) => prev + (msg as { data: string }).data);
         } else if (msg.type === "done") {
@@ -354,6 +396,7 @@ export default function SessionTerminalModal({
             pushed?: boolean;
           };
           setStatus(done.status);
+          setConnectionState("closed");
           setSummary(done.summary || "");
           setCommitHash(done.commit_hash || "");
           setPushed(Boolean(done.pushed));
@@ -377,6 +420,10 @@ export default function SessionTerminalModal({
     if (!el) return;
     const resize = () => sendResize();
     resize();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", resize);
+      return () => window.removeEventListener("resize", resize);
+    }
     const observer = new ResizeObserver(resize);
     observer.observe(el);
     return () => observer.disconnect();
@@ -386,7 +433,7 @@ export default function SessionTerminalModal({
     const el = terminalRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [screen]);
+  }, [terminalText]);
 
   async function endSession() {
     setEnding(true);
@@ -457,7 +504,7 @@ export default function SessionTerminalModal({
             onMouseDown={() => terminalRef.current?.focus()}
             className="min-h-0 flex-1 overflow-auto rounded-lg border border-slate-800 bg-black p-3 font-mono text-[13px] leading-5 whitespace-pre text-green-300 outline-none focus:border-cyan-500"
           >
-            {loading ? "Lädt..." : screen || " "}
+            {terminalText}
           </div>
           {gitOutput && (
             <pre className="max-h-24 overflow-auto rounded-lg border border-slate-800 bg-slate-900 p-3 font-mono text-xs whitespace-pre-wrap text-slate-300">

@@ -438,7 +438,7 @@ class SessionManager:
         model: str,
         effort: str,
         start_args: str = "",
-    ) -> None:
+    ) -> bool:
         """Launch the subprocess for an interactive session using a PTY.
 
         The agent runs in a true interactive shell so keyboard input (Enter,
@@ -471,6 +471,12 @@ class SessionManager:
         self._channels[task_id] = ch
         ch.publish({"type": "status", "status": "running"})
         ch.publish({"type": "started", "task_id": task_id})
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                task.status = "running"
+                if task.started_at is None:
+                    task.started_at = _now()
 
         lock = self._project_lock(project_id)
         self._locks[task_id] = lock
@@ -496,11 +502,8 @@ class SessionManager:
             master_fd, slave_fd = os.openpty()
         except OSError as exc:
             msg = f"[Fehler] PTY konnte nicht erstellt werden: {exc}"
-            ch.publish({"type": "output", "data": msg + "\n"})
-            ch.publish({"type": "status", "status": "error"})
-            ch.publish({"type": "done", "error": msg})
-            ch.close()
-            return
+            self._fail_start(task_id, ch, msg)
+            return False
 
         try:
             fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
@@ -513,11 +516,8 @@ class SessionManager:
             os.close(master_fd)
             os.close(slave_fd)
             msg = f"[Fehler] fork() fehlgeschlagen: {exc}"
-            ch.publish({"type": "output", "data": msg + "\n"})
-            ch.publish({"type": "status", "status": "error"})
-            ch.publish({"type": "done", "error": msg})
-            ch.close()
-            return
+            self._fail_start(task_id, ch, msg)
+            return False
 
         if pid == 0:
             # Child: become session leader, set controlling TTY, redirect stdio.
@@ -544,6 +544,10 @@ class SessionManager:
         else:
             # Parent: close slave, keep master.
             os.close(slave_fd)
+            try:
+                os.set_blocking(master_fd, False)
+            except OSError:
+                pass
 
         proc_info = {"pid": pid, "master_fd": master_fd, "project_id": project_id}
         self._procs[task_id] = proc_info  # type: ignore[assignment]
@@ -553,17 +557,18 @@ class SessionManager:
             master = master_fd
             ch_local = ch
             try:
-                while True:
+                while task_id in self._procs:
                     try:
-                        raw = await asyncio.to_thread(os.read, master, 4096)
+                        raw = os.read(master, 4096)
+                    except BlockingIOError:
+                        await asyncio.sleep(0.05)
+                        continue
                     except OSError:
                         break
                     if not raw:
                         break
                     display = raw.decode("utf-8", errors="replace")
-                    offset = await asyncio.to_thread(
-                        self._append_terminal_output, task_id, display
-                    )
+                    offset = self._append_terminal_output(task_id, display)
                     ch_local.publish({"type": "output", "data": display, "offset": offset})
             except asyncio.CancelledError:
                 pass
@@ -572,6 +577,31 @@ class SessionManager:
                     await self.end_session(task_id, project_id, terminate=False)
 
         asyncio.create_task(pump())
+        return True
+
+    def _fail_start(self, task_id: str, ch: SessionChannel, message: str) -> None:
+        chunk = message + "\n"
+        offset = self._append_terminal_output(task_id, chunk)
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                task.status = "error"
+                task.error = message
+                task.result_summary = message
+                task.exit_code = 127
+                task.finished_at = _now()
+        ch.publish({"type": "output", "data": chunk, "offset": offset})
+        ch.publish({"type": "status", "status": "error"})
+        ch.publish(
+            {
+                "type": "done",
+                "task_id": task_id,
+                "status": "error",
+                "summary": message,
+            }
+        )
+        ch.close()
+        self._channels.pop(task_id, None)
 
     async def send_message(self, task_id: str, content: str) -> None:
         """Forward raw data to the PTY master fd (keyboard strokes, etc.)."""
@@ -585,14 +615,20 @@ class SessionManager:
         import os
         import errno
 
-        data = content.encode("utf-8")
-        try:
-            os.write(master_fd, data)
-        except OSError as exc:
-            if exc.errno == errno.EIO:
-                # PTY slave closed — process is gone
-                pass
-            else:
+        data = memoryview(content.encode("utf-8"))
+        while data:
+            try:
+                written = os.write(master_fd, data)
+                if written <= 0:
+                    await asyncio.sleep(0.01)
+                    continue
+                data = data[written:]
+            except BlockingIOError:
+                await asyncio.sleep(0.01)
+            except OSError as exc:
+                if exc.errno == errno.EIO:
+                    # PTY slave closed — process is gone
+                    return
                 raise
 
     async def resize(self, task_id: str, cols: int, rows: int) -> None:
