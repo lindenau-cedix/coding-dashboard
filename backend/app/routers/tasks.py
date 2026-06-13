@@ -27,6 +27,7 @@ def list_agents() -> list[AgentInfo]:
             display_name=a.display_name,
             enabled=a.enabled,
             supports_goal=bool(a.goal_command),
+            supports_session=bool(a.session_command),
             model_choices=a.model_choices if a.model_args else [],
             effort_choices=a.effort_choices if a.effort_args else [],
         )

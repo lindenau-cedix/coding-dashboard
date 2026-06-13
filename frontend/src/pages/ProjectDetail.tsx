@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
+import SessionTerminalModal from "../components/SessionTerminalModal";
 import TaskConsole from "../components/TaskConsole";
 import TaskImages from "../components/TaskImages";
 import { Button, ErrorText, Modal, Spinner, StatusBadge, formatDate } from "../components/ui";
@@ -20,7 +21,6 @@ function readAsDataUrl(file: File): Promise<string> {
 
 export default function ProjectDetail() {
   const { id = "" } = useParams();
-  const navigate = useNavigate();
   const [project, setProject] = useState<Project | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -33,10 +33,11 @@ export default function ProjectDetail() {
   const [effort, setEffort] = useState("");
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<TaskImagePayload[]>([]);
+  const [sessionStartArgs, setSessionStartArgs] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [submitting, setSubmitting] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
-  const [sessionActiveId, setSessionActiveId] = useState<string | null>(null);
+  const [sessionDialogTaskId, setSessionDialogTaskId] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<Record<string, string>>({});
@@ -57,7 +58,14 @@ export default function ProjectDetail() {
   }, [agents]);
 
   const goalSupported = useMemo(() => agents.some((a) => a.supports_goal), [agents]);
+  const sessionSupported = useMemo(() => agents.some((a) => a.supports_session), [agents]);
   const currentAgent = useMemo(() => agents.find((a) => a.key === agent), [agents, agent]);
+  const modeOptions = useMemo<TaskMode[]>(() => {
+    const options: TaskMode[] = ["task"];
+    if (goalSupported) options.push("goal");
+    if (sessionSupported) options.push("session");
+    return options;
+  }, [goalSupported, sessionSupported]);
 
   function changeAgent(next: string) {
     setAgent(next);
@@ -68,7 +76,11 @@ export default function ProjectDetail() {
   }
   // In goal mode only agents that support it are selectable.
   const selectableAgents = useMemo(
-    () => (mode === "goal" ? agents.filter((a) => a.supports_goal) : agents),
+    () => {
+      if (mode === "goal") return agents.filter((a) => a.supports_goal);
+      if (mode === "session") return agents.filter((a) => a.supports_session);
+      return agents;
+    },
     [agents, mode],
   );
 
@@ -79,6 +91,14 @@ export default function ProjectDetail() {
       if (!current || !current.supports_goal) {
         const first = agents.find((a) => a.supports_goal && a.enabled)
           ?? agents.find((a) => a.supports_goal);
+        if (first) setAgent(first.key);
+      }
+    } else if (next === "session") {
+      setImages([]);
+      const current = agents.find((a) => a.key === agent);
+      if (!current || !current.supports_session) {
+        const first = agents.find((a) => a.supports_session && a.enabled)
+          ?? agents.find((a) => a.supports_session);
         if (first) setAgent(first.key);
       }
     }
@@ -137,7 +157,9 @@ export default function ProjectDetail() {
         setTasks(ts);
         const firstEnabled = ag.find((a) => a.enabled);
         if (firstEnabled) setAgent(firstEnabled.key);
-        const live = ts.find((t) => t.status === "running" || t.status === "queued");
+        const live = ts.find(
+          (t) => !t.is_session && (t.status === "running" || t.status === "queued"),
+        );
         if (live) setActiveTaskId(live.id);
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "Laden fehlgeschlagen");
@@ -173,9 +195,10 @@ export default function ProjectDetail() {
     setSubmitting(true);
     setError("");
     try {
-      const { task_id } = await api.createSession(id, agent, model, effort);
-      setSessionActiveId(task_id);
-      navigate(`/projects/${id}/sessions/${task_id}`);
+      const { task_id } = await api.createSession(id, agent, "", "", sessionStartArgs.trim());
+      setSessionDialogTaskId(task_id);
+      setSessionStartArgs("");
+      await refreshTasks();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Session konnte nicht gestartet werden");
     } finally {
@@ -185,7 +208,7 @@ export default function ProjectDetail() {
 
   async function toggleExpand(task: Task) {
     if (task.is_session || task.mode === "session") {
-      navigate(`/projects/${id}/sessions/${task.id}`);
+      setSessionDialogTaskId(task.id);
       return;
     }
     if (expanded === task.id) {
@@ -286,48 +309,25 @@ export default function ProjectDetail() {
         <h2 className="font-medium text-slate-200">
           {mode === "goal" ? "Neues Ziel" : "Neue Aufgabe"}
         </h2>
-        {goalSupported && (
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-slate-400">Modus:</label>
-            <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-              {(["task", "goal", "session"] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => changeMode(m)}
-                  className={`px-3 py-1.5 text-sm transition ${
-                    mode === m
-                      ? "bg-cyan-600 text-white"
-                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                  }`}
-                >
-                  {m === "goal" ? "Ziel" : m === "session" ? "Session" : "Aufgabe"}
-                </button>
-              ))}
-            </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-sm text-slate-400">Modus:</label>
+          <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
+            {modeOptions.map((m) => (
+              <button
+                key={m}
+                type="button"
+                onClick={() => changeMode(m)}
+                className={`px-3 py-1.5 text-sm transition ${
+                  mode === m
+                    ? "bg-cyan-600 text-white"
+                    : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+                }`}
+              >
+                {m === "goal" ? "Ziel" : m === "session" ? "Session" : "Aufgabe"}
+              </button>
+            ))}
           </div>
-        )}
-        {!goalSupported && (
-          <div className="flex flex-wrap items-center gap-2">
-            <label className="text-sm text-slate-400">Modus:</label>
-            <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-              {(["task", "session"] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => changeMode(m)}
-                  className={`px-3 py-1.5 text-sm transition ${
-                    mode === m
-                      ? "bg-cyan-600 text-white"
-                      : "bg-slate-800 text-slate-300 hover:bg-slate-700"
-                  }`}
-                >
-                  {m === "session" ? "Session" : "Aufgabe"}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        </div>
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className="flex items-center gap-2">
             <label className="text-sm text-slate-400">Agent:</label>
@@ -344,7 +344,7 @@ export default function ProjectDetail() {
               ))}
             </select>
           </span>
-          {(currentAgent?.model_choices?.length ?? 0) > 0 && (
+          {mode !== "session" && (currentAgent?.model_choices?.length ?? 0) > 0 && (
             <span className="flex items-center gap-2">
               <label className="text-sm text-slate-400">Modell:</label>
               <select
@@ -361,7 +361,7 @@ export default function ProjectDetail() {
               </select>
             </span>
           )}
-          {(currentAgent?.effort_choices?.length ?? 0) > 0 && (
+          {mode !== "session" && (currentAgent?.effort_choices?.length ?? 0) > 0 && (
             <span className="flex items-center gap-2">
               <label className="text-sm text-slate-400">Effort:</label>
               <select
@@ -379,24 +379,31 @@ export default function ProjectDetail() {
             </span>
           )}
         </div>
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          onPaste={onPaste}
-          rows={4}
-          disabled={mode === "session"}
-          placeholder={
-            mode === "session"
-              ? "Session-Modus: Nach dem Start chattest du direkt mit dem Agenten im Browser. Dieses Feld wird nicht verwendet."
-              : mode === "goal"
+        {mode === "session" ? (
+          <label className="block">
+            <span className="mb-1 block text-sm text-slate-400">Startparameter</span>
+            <input
+              value={sessionStartArgs}
+              onChange={(e) => setSessionStartArgs(e.target.value)}
+              placeholder='z.B. --model opus oder --resume "session-id"'
+              className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
+            />
+          </label>
+        ) : (
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            onPaste={onPaste}
+            rows={4}
+            placeholder={
+              mode === "goal"
                 ? "Beschreibe das Ziel – der Agent arbeitet im /goal-Modus, bis es erreicht ist…"
                 : "Beschreibe die Aufgabe, die der Agent im Projekt erledigen soll…"
-          }
-          className={`w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500 ${
-            mode === "session" ? "opacity-50 cursor-not-allowed" : ""
-          }`}
-        />
-        {images.length > 0 && (
+            }
+            className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
+          />
+        )}
+        {mode !== "session" && images.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {images.map((img, i) => (
               <div key={`${img.name}-${i}`} className="relative">
@@ -419,36 +426,40 @@ export default function ProjectDetail() {
           </div>
         )}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                if (e.target.files) void addImageFiles(Array.from(e.target.files));
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={images.length >= MAX_IMAGES}
-              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-slate-700 disabled:opacity-50"
-            >
-              📎 Bilder anhängen
-            </button>
-            <span className="text-xs text-slate-500">
-              {images.length > 0
-                ? `${images.length}/${MAX_IMAGES} Bild(er)`
-                : "oder Bild in das Textfeld einfügen (Strg+V)"}
-            </span>
-          </div>
+          {mode !== "session" ? (
+            <div className="flex items-center gap-3">
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/gif,image/webp"
+                multiple
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files) void addImageFiles(Array.from(e.target.files));
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={images.length >= MAX_IMAGES}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-slate-700 disabled:opacity-50"
+              >
+                📎 Bilder anhängen
+              </button>
+              <span className="text-xs text-slate-500">
+                {images.length > 0
+                  ? `${images.length}/${MAX_IMAGES} Bild(er)`
+                  : "oder Bild in das Textfeld einfügen (Strg+V)"}
+              </span>
+            </div>
+          ) : (
+            <span />
+          )}
           <div className="flex items-center gap-3">
             <p className="hidden text-xs text-slate-500 sm:block">
               {mode === "session"
-                ? "Interaktive Session: Du chattest mit dem Agenten. Nach dem Beenden werden Änderungen automatisch committet & gepusht."
+                ? "Interaktive TUI-Session. Nach dem Beenden werden Änderungen automatisch committet & gepusht."
                 : mode === "goal"
                   ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
                   : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
@@ -457,7 +468,7 @@ export default function ProjectDetail() {
               <Button
                 type="button"
                 onClick={() => void startSession()}
-                disabled={submitting || !agent}
+                disabled={submitting || !agent || !currentAgent?.supports_session}
               >
                 {submitting ? "Startet…" : "Session starten"}
               </Button>
@@ -531,7 +542,11 @@ export default function ProjectDetail() {
                     </span>
                   )}
                   <span className="flex-1 truncate text-sm text-slate-400">
-                    {t.prompt}
+                    {t.mode === "session"
+                      ? t.prompt
+                        ? `Start: ${t.prompt}`
+                        : "ohne Startparameter"
+                      : t.prompt}
                   </span>
                   {(t.images?.length ?? 0) > 0 && (
                     <span className="text-xs text-slate-500">📎 {t.images.length}</span>
@@ -626,6 +641,17 @@ export default function ProjectDetail() {
             </Button>
           </div>
         </Modal>
+      )}
+      {sessionDialogTaskId && (
+        <SessionTerminalModal
+          project={project}
+          agents={agents}
+          taskId={sessionDialogTaskId}
+          onClose={() => setSessionDialogTaskId(null)}
+          onEnded={() => {
+            void refreshTasks();
+          }}
+        />
       )}
     </div>
   );

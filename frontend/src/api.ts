@@ -62,9 +62,11 @@ export function wsUrl(path: string): string {
   return `${proto}//${location.host}${path}`;
 }
 
-export function wsSessionUrl(taskId: string): string {
+export function wsSessionUrl(taskId: string, offset = 0): string {
   const token = getToken() ?? "";
-  return wsUrl(`/api/ws/sessions/${taskId}?token=${encodeURIComponent(token)}`);
+  return wsUrl(
+    `/api/ws/sessions/${taskId}?token=${encodeURIComponent(token)}&offset=${Math.max(0, offset)}`,
+  );
 }
 
 export class ApiError extends Error {
@@ -195,12 +197,19 @@ export const api = {
     request<{ ok: boolean; branch: string; output: string }>("POST", `/projects/${id}/pull`),
 
   // Session mode
-  createSession: (projectId: string, agent: string, model = "", effort = "") =>
+  createSession: (
+    projectId: string,
+    agent: string,
+    model = "",
+    effort = "",
+    startArgs = "",
+  ) =>
     request<{ task_id: string; status: string }>("POST", "/sessions", {
       project_id: projectId,
       agent,
       model,
       effort,
+      start_args: startArgs,
     }),
   getSession: (taskId: string) =>
     request<{
@@ -209,6 +218,7 @@ export const api = {
       agent: string;
       model: string;
       effort: string;
+      start_args: string;
       chat_history: SessionMessage[];
       status: string;
       result_summary: string;

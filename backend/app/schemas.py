@@ -24,6 +24,7 @@ class AgentInfo(BaseModel):
     display_name: str
     enabled: bool
     supports_goal: bool = False
+    supports_session: bool = False
     # Selectable models/effort levels ([] = no selector in the UI).
     model_choices: list[str] = []
     effort_choices: list[str] = []
@@ -141,6 +142,9 @@ class SessionCreate(BaseModel):
     agent: str
     model: str = ""
     effort: str = ""
+    # Shell-like argv string. It is parsed with shlex.split and appended to the
+    # configured session_command; no shell is invoked.
+    start_args: str = Field(default="", max_length=1000)
 
 
 class SessionStartResponse(BaseModel):

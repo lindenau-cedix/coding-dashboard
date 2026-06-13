@@ -3,6 +3,27 @@
 Gemeinsamer Kontext für KI-Agenten (Claude Code / Hermes / Codex) und Mitwirkende.
 Kurz halten, aktuell halten.
 
+## Letzter Durchlauf
+
+### 2026-06-13 — codex
+
+**Was getan:** Session Mode zur shellinabox-artigen TUI-Session umgebaut.
+- Backend startet `session_command` jetzt als TUI-Basisbefehl im Projektordner
+  und hängt nur explizite Startparameter per `shlex.split()` an.
+- PTY-Output wird laufend als roher Transcript in `Task.output` persistiert und
+  per Offset über den Session-WebSocket wiederaufgenommen.
+- WebSocket unterstützt rohe Tastatursequenzen sowie Terminal-Resize.
+- Frontend öffnet Sessions als Dialog in `ProjectDetail` über
+  `SessionTerminalModal`, mit Pfeiltasten/Ctrl+C/Paste und einfachem
+  ANSI/Cursor-Rendering.
+- Session-Ende beendet die Prozessgruppe, committed Änderungen falls vorhanden
+  und pusht danach immer.
+
+**Ergebnis:** Python-Kompilierung, Frontend-Typecheck, Frontend-Build und
+session-spezifische Verifikation erfolgreich. Voller Smoke-Test ist in dieser
+venv durch einen reproduzierbaren FastAPI/Starlette-`TestClient`-Hänger blockiert
+(minimaler TestClient hängt ebenfalls).
+
 ## Zweck
 Self-hosted Dashboard, um Coding-Aufgaben pro Projekt an Claude Code, Hermes oder Codex
 zu delegieren: Repo anlegen/importieren → Aufgabe an einen Agenten → Live-Output
@@ -37,7 +58,8 @@ backend/app/
   main.py          App-Factory, lifespan, SPA-Auslieferung (Fallback)
 frontend/src/
   api.ts (REST + apiBase/Token), auth.tsx, types.ts
-  pages/ (Login, Projects, ProjectDetail), components/ (TaskConsole, TaskImages, ui, ...)
+  pages/ (Login, Projects, ProjectDetail, SessionPage-Wrapper),
+  components/ (TaskConsole, SessionTerminalModal, TaskImages, ui, ...)
 deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, nginx, *.example
 ```
 
@@ -88,9 +110,10 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 - **Agent-Config:** `config.yaml`. Platzhalter `{prompt}`, `{project_dir}`,
   `{last_message_file}` (temp. Datei für die letzte Agent-Nachricht).
   `stream_format: claude-json|raw`, `prompt_via: arg|stdin`, `env`, `unset_env`,
-  `goal_command` (optional, aktiviert Ziel-Modus), `model_choices`/`model_args`/
+  `goal_command` (optional, aktiviert Ziel-Modus), `session_command` (optional,
+  aktiviert TUI-Session-Modus), `model_choices`/`model_args`/
   `effort_choices`/`effort_args` (optional, aktivieren die Modell-/Effort-
-  Dropdowns). **Backfill:** Für eingebaute
+  Dropdowns für Task/Goal). **Backfill:** Für eingebaute
   Agenten (`claude`, `hermes`, `codex`) füllt `load_agents_config` fehlende Felder
   aus `default_agents()` auf; die `config.yaml` überschreibt nur explizit gesetzte
   Felder. Alte installer-generierte Configs mit `claude`/`hermes` bekommen neue
@@ -109,7 +132,9 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   {last_message_file} -` mit `prompt_via: stdin` (kein `goal_command`, daher
   kein Ziel-Modus für Codex). `--ask-for-approval` existiert nicht in aktuellen
   Codex-Versionen — das Command ist von sich aus nicht-interaktiv wenn ein
-  Prompt übergeben wird. Raw-Output wird im Runner ANSI-gefiltert.
+  Prompt übergeben wird. Raw-Output wird im Runner ANSI-gefiltert. TUI-Session-
+  Defaults: Claude `claude`, Hermes `hermes chat`, Codex `codex`; zusätzliche
+  Flags nur über das Startparameter-Feld.
 - **AGENTS.md-Aktualisierung:** Nach jedem abgeschlossenen Task (success/failed)
   führt der Agent über die `context_instruction` den Block `## Letzter Durchlauf`
   GANZ AM ANFANG der AGENTS.md (direkt nach dem Titel und dem Zweck-Absatz):
@@ -120,29 +145,38 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   seinen eigenen Abschnitt. Läuft VOR dem Commit/Push-Schritt.
 - **Serialisierung:** pro Projekt ein `asyncio.Lock` (kein Git-Race); verschiedene
   Projekte laufen parallel. Laufende Tasks werden bei Neustart als `interrupted` markiert.
-- **Session Mode (`mode="session"`):** Echte interaktive Terminal-Sessions im Browser
-  (PTY-basiert). Der Agent läuft in einer echten Shell, Tastatureingaben (Enter,
-  Pfeiltasten, Ctrl+C, etc.) werden 1:1 weitergeleitet. Kein Prompt wird injiziert —
-  der Benutzer tippt direkt mit dem Agenten.
-  - `Task.is_session=True`, `Task.chat_history` (leer — Output kommt live per PTY).
+- **Session Mode (`mode="session"`):** Shellinabox-artige TUI-Sessions im Browser
+  (PTY-basiert). Der Agent startet im Projektordner über seinen TUI-Basisbefehl
+  ohne Prompt-Injection; optionale Startparameter kommen aus einem eigenen UI-Feld
+  und werden serverseitig mit `shlex.split()` als argv angehängt (keine Shell).
+  - `Task.is_session=True`, `Task.prompt` speichert die Startparameter,
+    `Task.output` speichert den kompletten rohen TUI-Transcript laufend.
+    `chat_history` bleibt nur für alte Daten kompatibel.
   - Backend: `SessionManager.start()` forked einen PTY (`os.openpty` + `os.fork`),
-    `pump()` liest `os.read(master_fd, 4096)` und published rohe Bytes als
-    `{type:"output",data}` an die `SessionChannel`. `send_message()` schreibt rohe
-    UTF-8-Bytes direkt in den PTY-Master.
-  - Agent-spezifisch: `session_command` in `AgentSpec` — Liste von argv-Tokens ohne
-    Prompt-Injection. Für Claude: `["claude"]`, für Hermes:
-    `["hermes","chat","--yolo","--accept-hooks"]`.
-  - WebSocket `/api/ws/sessions/{task_id}?token=…` leitet `{type:"message",content}`
-    (rohe Typed-Zeichen) an `session_manager.send_message()` weiter.
-  - Frontend: grüner Terminal-Display (`<pre className="text-green-400">`) zeigt
-    `terminalOutput` live, Input leitet alle Tastendrücke weiter.
-  - Nach `end_session`: PTY-Process via `os.killpg(pid, SIGTERM)` beendet,
-    `result_summary = "Interaktive Session beendet"`, dann Git-Commit+Push.
-  - **Reload unterbricht die Session NICHT** — die `SessionChannel` bleibt im
-    Backend-Speicher; der Client kann die WS-Verbindung verlieren und neu verbinden.
-  - Route `/projects/:id/sessions/:taskId` für aktive und vergangene Sessions.
+    setzt `TERM=xterm-256color`, startet `session_command + start_args`, liest rohe
+    Bytes aus dem PTY und appended sie mit Offset in `Task.output`. Output-Events
+    sind `{type:"output", data, offset}`.
+  - Agent-spezifisch: `session_command` in `AgentSpec` ist der TUI-Basisbefehl.
+    Built-ins: Claude `["claude"]`, Hermes `["hermes","chat"]`, Codex `["codex"]`.
+    Modell-/Effort-Dropdowns werden im Session Mode nicht injiziert; dafür sind
+    explizite Startparameter gedacht.
+  - WebSocket `/api/ws/sessions/{task_id}?token=…&offset=N` leitet
+    `{type:"message",content}` als rohe UTF-8-Bytes an den PTY weiter und akzeptiert
+    `{type:"resize",cols,rows}` für `TIOCSWINSZ` + `SIGWINCH`.
+  - Frontend: `SessionTerminalModal` öffnet direkt in `ProjectDetail` als Dialog,
+    rendert den Transcript über eine kleine ANSI/Cursor-Emulation, sendet
+    Pfeiltasten/Enter/Tab/Ctrl+C/Paste als rohe Terminalsequenzen und lädt bei
+    Reopen den gespeicherten `Task.output` weiter. Die alte Session-Route ist nur
+    noch ein Wrapper auf denselben Dialog.
+  - Fenster schließen / Dialog schließen beendet die Session NICHT. Solange der
+    Backend-Prozess lebt, kann die Session aus der Historie wieder geöffnet werden.
+  - Nach `end_session`: PTY-Prozessgruppe via `os.killpg(pid, SIGTERM)` beendet
+    (manuelles Beenden zählt als success), `result_summary =
+    "Interaktive TUI-Session beendet"`, danach Git-Commit falls Änderungen und
+    Push immer analog zum normalen Task.
   - **Limitation:** Nach `systemctl restart coding-dashboard` sind laufende Sessions
-    beendet (Server-Prozess weg) — ein bekanntes Limitation.
+    beendet (Server-Prozess weg); der bis dahin persistierte Transcript bleibt in
+    `Task.output`.
 
 ## Konventionen
 - Secrets nur via env (`CD_*`). GitHub-Token nie persistieren.
@@ -156,6 +190,13 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-13:** Session Mode überarbeitet: startet Agent-TUIs im Projektordner
+  über `session_command` ohne Prompt-Injection; Startparameter-Feld wird mit
+  `shlex.split()` als argv angehängt. Dialog in `ProjectDetail` statt Seitenwechsel,
+  rohe Tastaturweiterleitung inkl. Pfeiltasten/Ctrl+C/Paste, Resize-Events,
+  ANSI/Cursor-Rendering und persistenter `Task.output`-Transcript mit Offset-Replay.
+  Nach Session-Ende: Git-Commit falls Änderungen und Push immer. Erst nach
+  `systemctl restart coding-dashboard` wirksam.
 - **2026-06-12 (Fix):** `_write_codex_config` strippte beim Lesen die
   Anführungszeichen von allen Werten (`strip('"')`), schrieb sie aber nur
   für `model`/`model_reasoning_effort` zurück — `service_tier = "default"`
@@ -208,30 +249,3 @@ voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Ru
   neustarten, das killt den eigenen Lauf.
 - Codex-`model_choices` (gpt-5.1-codex…) sind Stand 2026-06; bei neuen
   Codex-Releases ggf. in `default_agents()` / config.yaml nachziehen.
-
-## Letzter Durchlauf
-
-_Der Agent führt diesen Block bei jedem Durchlauf selbst: kurze Zusammenfassung
-der Aufgabe, der wichtigsten Änderung/Erkenntnis und des Ergebnisses.
-Das Dashboard entfernt lediglich noch alte "Letzte Tasks"-Blöcke (vor 2026-06-12)._
-
-### 2026-06-12 14:30 — hermes
-
-**Was getan:** Session Mode auf PTY-Basis umgestellt — der Agent läuft jetzt in
-einer echten interaktiven Shell im Browser.
-- Neues Feld `session_command` in `AgentSpec` (config.py): Agent-spezifische
-  argv-Liste ohne Prompt-Injection. Claude: `["claude"]`, Hermes:
-  `["hermes","chat","--yolo","--accept-hooks"]`.
-- `SessionManager.start()` nutzt jetzt `os.openpty()` + `os.fork()` statt
-  `asyncio.subprocess_exec` mit Pipes. Das Child wird Session Leader mit
-  `setsid()` + `TIOCSCTTY`, stdio auf den PTY-Slave umgeleitet.
-- `pump()` liest rohe Bytes mit `os.read(master_fd, 4096)` aus dem PTY-Master
-  und published sie als `{type:"output",data}`.
-- `send_message()` schreibt rohe UTF-8-Bytes direkt in den PTY-Master.
-- `end_session()` nutzt `os.killpg(pid, SIGTERM)` statt proc.terminate().
-- Frontend: grüner `<pre>`-Terminal statt Chat-Bubbles, alle Tastendrücke
-  (Pfeiltasten, Ctrl+C, etc.) werden 1:1 durchgereicht.
-- Backend-Smoke-Tests: 12/12 bestanden. Frontend-Build erfolgreich.
-
-**Nächste Schritte:** Nach `systemctl restart coding-dashboard` wirksam.
-

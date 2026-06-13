@@ -343,6 +343,7 @@ def test_config_backfill() -> None:
     )
     check("backfill: codex added to legacy config", codex.command[:2] == ["codex", "exec"], str(codex.command))
     check("backfill: codex prompt via stdin", codex.prompt_via == "stdin", codex.prompt_via)
+    check("backfill: codex session command", codex.session_command == ["codex"], str(codex.session_command))
     check("backfill: claude model choices", "opus" in claude.model_choices, str(claude.model_choices))
     check("backfill: claude effort args", claude.effort_args == ["--effort", "{effort}"], str(claude.effort_args))
     check(
@@ -441,6 +442,11 @@ def test_api_and_task() -> None:
         check("agents require auth", client.get("/api/agents").status_code == 401)
         agents = client.get("/api/agents", headers=H).json()
         check("fake agent listed", any(a["key"] == "fake" for a in agents), str(agents))
+        check(
+            "agents expose session support",
+            any(a["key"] == "fake" and a.get("supports_session") is False for a in agents),
+            str(agents),
+        )
 
         check(
             "projects empty",
@@ -605,6 +611,8 @@ def test_session_api_and_manager() -> None:
     q = ch.subscribe()
     got = q.get_nowait()
     check("subscribed queue receives published message", got == {"type": "output", "data": "hello"}, str(got))
+    q_no_replay = ch.subscribe(replay=False)
+    check("session channel can subscribe without replay", q_no_replay.empty())
     ch.close()
 
     # SessionManager.start with invalid agent raises ValueError.
@@ -620,19 +628,35 @@ def test_session_api_and_manager() -> None:
 
 def test_session_end_flow() -> None:
     """Smoke test for end_session: creates a task record, calls end_session,
-    verifies Task is updated with chat_history, result_summary, and marked done."""
-    from app.database import session_scope, engine
+    verifies Task is updated with output transcript, result_summary, and marked done."""
+    from app.database import init_db, session_scope, engine
     from app.models import Task, Project
     from app.task_runner import session_manager
-    import asyncio, json
+    import asyncio
     from sqlalchemy.orm import Session
 
-    # Use an existing project from the DB.
+    init_db()
+    # Use an existing project from the DB or create a minimal local repo.
     with Session(engine) as db:
         proj_row = db.query(Project).first()
         if proj_row is None:
-            check("session end test skipped (no project)", True, "")
-            return
+            remote = TMP / "session-remote.git"
+            work = TMP / "session-work"
+            run(["git", "init", "--bare", str(remote)])
+            git_ops.clone(str(remote), work, token="")
+            git_ops.ensure_identity(work, "Tester", "t@example.com")
+            (work / "README.md").write_text("# session\n", encoding="utf-8")
+            git_ops.commit_all(work, "init", "Tester", "t@example.com")
+            git_ops.push(work, "main", token="")
+            proj_row = Project(
+                name="SessionProj",
+                slug="session-proj",
+                local_path=str(work),
+                default_branch="main",
+                clone_url=str(remote),
+            )
+            db.add(proj_row)
+            db.commit()
         pid = proj_row.id
 
     task = Task(project_id=pid, agent="fake", prompt="", mode="session",
@@ -643,13 +667,10 @@ def test_session_end_flow() -> None:
         db.refresh(task)
         tid = task.id
 
-    # Pre-populate chat_history.
+    # Pre-populate the terminal transcript.
     with session_scope() as db:
         t = db.get(Task, tid)
-        t.chat_history = json.dumps([
-            {"role": "user", "content": "hello", "timestamp": "2026-01-01T00:00:00Z"},
-            {"role": "assistant", "content": "hi there", "timestamp": "2026-01-01T00:00:01Z"},
-        ])
+        t.output = "hello from terminal\r\nagent prompt> "
         db.commit()
 
     # end_session should succeed (process already dead → catch path).
@@ -665,8 +686,7 @@ def test_session_end_flow() -> None:
             check("task exists after end_session", False, "task is None")
             return
         check("task marked finished after end_session", t.finished_at is not None, str(t.finished_at))
-        history = json.loads(t.chat_history or "[]")
-        check("task chat_history preserved", len(history) == 2, str(len(history)))
+        check("task terminal output preserved", "hello from terminal" in (t.output or ""), t.output or "")
 
 
 def main() -> int:

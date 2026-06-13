@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import tempfile
 import traceback
 from collections import OrderedDict
@@ -377,10 +378,11 @@ class SessionChannel:
         for q in list(self.subscribers):
             q.put_nowait(msg)
 
-    def subscribe(self) -> asyncio.Queue:
+    def subscribe(self, replay: bool = True) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
-        for msg in self.buffer:
-            q.put_nowait(msg)
+        if replay:
+            for msg in self.buffer:
+                q.put_nowait(msg)
         if self.closed:
             q.put_nowait({"type": "_eof"})
         else:
@@ -398,14 +400,12 @@ class SessionChannel:
 
 
 class SessionManager:
-    """Manages interactive agent sessions (long-running subprocess, user chats over WS).
+    """Manage interactive agent TUIs running in PTYs.
 
-    Each session owns a subprocess whose stdout is streamed to all WS subscribers.
-    Messages from the user are written to the subprocess's stdin.  When the user ends
-    the session, the subprocess is terminated and a final Task is saved:
-    - output = full chat_history JSON
-    - result_summary = last assistant message (or tail of transcript)
-    Then git commit + push runs, and the Task is marked finished.
+    Each session owns a process attached to a real terminal. Raw keyboard bytes
+    from the browser are written to the PTY master; raw PTY output is streamed
+    to subscribers and appended to Task.output as the durable transcript. Closing
+    the browser only closes the WebSocket, not the process.
     """
 
     def __init__(self) -> None:
@@ -414,6 +414,8 @@ class SessionManager:
         self._procs: dict[str, dict] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._project_locks: dict[str, asyncio.Lock] = {}
+        self._task_projects: dict[str, str] = {}
+        self._ending: set[str] = set()
 
     def _project_lock(self, project_id: str) -> asyncio.Lock:
         lock = self._project_locks.get(project_id)
@@ -435,19 +437,22 @@ class SessionManager:
         agent_key: str,
         model: str,
         effort: str,
+        start_args: str = "",
     ) -> None:
         """Launch the subprocess for an interactive session using a PTY.
 
         The agent runs in a true interactive shell so keyboard input (Enter,
-        arrow keys, Ctrl-C, etc.) is forwarded faithfully.  No prompt is
-        injected -- the user talks to the agent directly over the WebSocket.
+        arrow keys, Ctrl-C, etc.) is forwarded faithfully. No prompt is
+        injected; the configured session_command is only extended with the
+        user-supplied start_args parsed as argv.
         """
         import os
         import signal
         import fcntl
+        import struct
         import termios
 
-        from .agents import _build_env, _write_claude_settings
+        from .agents import _build_env
 
         agents = get_agents_config()
         spec = agents.agents.get(agent_key)
@@ -469,27 +474,22 @@ class SessionManager:
 
         lock = self._project_lock(project_id)
         self._locks[task_id] = lock
+        self._task_projects[task_id] = project_id
 
-        # Build session command from session_command template.
+        # Build the interactive TUI command. Session mode intentionally does not
+        # inject prompt/model/effort args; explicit start parameters are the
+        # single source of argv additions and are still executed without a shell.
         cmd = []
         for tok in spec.session_command:
             tok = tok.replace("{project_dir}", project_dir)
             cmd.append(tok)
-
-        # Inject model/effort args (same logic as _build_command).
-        extra: list[str] = []
-        if model and spec.model_args:
-            extra += [t.replace("{model}", model) for t in spec.model_args]
-        if effort and spec.effort_args:
-            extra += [t.replace("{effort}", effort) for t in spec.effort_args]
-        if extra:
-            cmd += extra
+        if start_args.strip():
+            cmd += [tok.replace("{project_dir}", project_dir) for tok in shlex.split(start_args)]
 
         env = _build_env(spec)
+        env.setdefault("TERM", "xterm-256color")
+        env.setdefault("COLORTERM", "truecolor")
         cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", project_dir) or project_dir
-
-        if effort and agent_key == "claude":
-            _write_claude_settings(effort)
 
         # Fork a PTY for the subprocess.
         try:
@@ -502,9 +502,10 @@ class SessionManager:
             ch.close()
             return
 
-        # Make slave non-blocking so read() doesn't hang forever.
-        flags = fcntl.fcntl(slave_fd, fcntl.F_GETFL)
-        fcntl.fcntl(slave_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+        except OSError:
+            pass
 
         try:
             pid = os.fork()
@@ -531,17 +532,20 @@ class SessionManager:
             os.dup2(slave_fd, 1)
             os.dup2(slave_fd, 2)
             os.close(slave_fd)
-            os.chdir(cwd or str(Path.home()))
-            # Reset signal mask, set clean env.
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
-            os.execvpe(cmd[0], cmd, env)
+            try:
+                os.chdir(cwd or project_dir or str(Path.home()))
+                # Reset signal handlers, set clean env.
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+                os.execvpe(cmd[0], cmd, env)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Fehler] Session-Kommando konnte nicht gestartet werden: {exc}", flush=True)
+                os._exit(127)
         else:
             # Parent: close slave, keep master.
             os.close(slave_fd)
-            proc = None  # managed manually via pid
 
-        proc_info = {"pid": pid, "master_fd": master_fd}
+        proc_info = {"pid": pid, "master_fd": master_fd, "project_id": project_id}
         self._procs[task_id] = proc_info  # type: ignore[assignment]
 
         async def pump() -> None:
@@ -551,15 +555,21 @@ class SessionManager:
             try:
                 while True:
                     try:
-                        raw = os.read(master, 4096)
+                        raw = await asyncio.to_thread(os.read, master, 4096)
                     except OSError:
                         break
                     if not raw:
                         break
                     display = raw.decode("utf-8", errors="replace")
-                    ch_local.publish({"type": "output", "data": display})
+                    offset = await asyncio.to_thread(
+                        self._append_terminal_output, task_id, display
+                    )
+                    ch_local.publish({"type": "output", "data": display, "offset": offset})
             except asyncio.CancelledError:
                 pass
+            finally:
+                if task_id in self._procs and task_id not in self._ending:
+                    await self.end_session(task_id, project_id, terminate=False)
 
         asyncio.create_task(pump())
 
@@ -577,7 +587,7 @@ class SessionManager:
 
         data = content.encode("utf-8")
         try:
-            n = os.write(master_fd, data)
+            os.write(master_fd, data)
         except OSError as exc:
             if exc.errno == errno.EIO:
                 # PTY slave closed — process is gone
@@ -585,78 +595,116 @@ class SessionManager:
             else:
                 raise
 
+    async def resize(self, task_id: str, cols: int, rows: int) -> None:
+        """Resize the PTY so full-screen TUIs can lay themselves out."""
+        proc_info = self._procs.get(task_id)
+        if proc_info is None:
+            return
+        cols = max(20, min(cols, 300))
+        rows = max(5, min(rows, 120))
+
+        import fcntl
+        import os
+        import signal
+        import struct
+        import termios
+
+        master_fd = proc_info["master_fd"]
+        pid = proc_info["pid"]
+        try:
+            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            os.killpg(pid, signal.SIGWINCH)
+        except OSError:
+            pass
+
     async def end_session(
         self,
         task_id: str,
         project_id: str,
         commit_message: str = "",
+        terminate: bool = True,
     ) -> dict:
-        """Terminate the PTY process, commit+push, persist chat_history."""
+        """End the PTY session, persist transcript, then commit and push."""
         import os
         import signal
 
-        proc_info = self._procs.pop(task_id, None)
-        ch = self._channels.pop(task_id, None)
-        lock = self._locks.pop(task_id, None)
+        if task_id in self._ending:
+            return self._session_result(task_id)
+        self._ending.add(task_id)
 
-        # Terminate PTY process group.
+        if not project_id:
+            project_id = self._task_projects.get(task_id, "")
+        if not project_id:
+            with session_scope() as db:
+                task = db.get(Task, task_id)
+                if task:
+                    project_id = task.project_id
+
+        proc_info = self._procs.pop(task_id, None)
+        ch = self._channels.get(task_id)
+        lock = self._locks.pop(task_id, None)
+        if lock is None and project_id:
+            lock = self._project_lock(project_id)
+
         exit_code = 0
         status = "success"
         if proc_info is not None:
             master_fd = proc_info["master_fd"]
             pid = proc_info["pid"]
-            try:
-                # Kill the process group (including any children).
-                os.killpg(pid, signal.SIGTERM)
-            except OSError:
-                pass
+            if terminate:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+            for _ in range(10):
+                try:
+                    pid_ret, code = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pid_ret = pid
+                    code = 0
+                except OSError:
+                    pid_ret = pid
+                    code = 0
+                if pid_ret != 0:
+                    if os.WIFEXITED(code):
+                        exit_code = os.WEXITSTATUS(code)
+                    elif os.WIFSIGNALED(code):
+                        exit_code = -os.WTERMSIG(code)
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                if terminate:
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        os.waitpid(pid, 0)
+                    except (ChildProcessError, OSError):
+                        pass
+                    exit_code = -signal.SIGKILL
             try:
                 os.close(master_fd)
             except OSError:
                 pass
-            # Reap child.
-            try:
-                pid_ret, code = os.waitpid(pid, os.WNOHANG)
-                if pid_ret != 0:
-                    exit_code = os.WEXITSTATUS(code) if os.WIFEXITED(code) else -1
-                    if exit_code != 0:
-                        status = "failed"
-            except ChildProcessError:
-                pass
-            except OSError:
-                pass
+            if not terminate and exit_code != 0:
+                status = "failed"
 
-        # Build full chat history from DB.
-        chat_history = self._get_chat_history(task_id)
-        chat_history_json = json.dumps(chat_history, ensure_ascii=False)
-
-        # PTY sessions don't have structured summaries — use a fixed placeholder.
-        summary = "Interaktive Session beendet"
-
-        output_text = chat_history_json
+        output_text = self._get_terminal_output(task_id)
+        summary = "Interaktive TUI-Session beendet"
 
         settings = get_settings()
-        # Update Task record.
         with session_scope() as db:
             task = db.get(Task, task_id)
             if task:
                 task.output = output_text
                 task.result_summary = summary or "Session beendet"
-                task.chat_history = chat_history_json
                 task.status = status
                 task.exit_code = exit_code
                 task.finished_at = _now()
 
-        if ch:
-            ch.publish({"type": "status", "status": status})
-            ch.publish({"type": "done", "task_id": task_id, "status": status, "summary": summary})
-            ch.close()
-        else:
-            # No channel means this was a fresh join — just close any stray channel.
-            pass
-
-        # Git commit + push.
         commit_hash = ""
+        commit_created = False
         pushed = False
         project_dir = ""
         branch = settings.default_branch
@@ -671,60 +719,123 @@ class SessionManager:
 
         if project_dir and Path(project_dir).exists() and lock:
             async with lock:
-                try:
-                    await asyncio.to_thread(
-                        git_ops.ensure_identity,
-                        project_dir,
-                        settings.git_author_name,
-                        settings.git_author_email,
-                    )
-                    changes = await asyncio.to_thread(git_ops.has_changes, project_dir)
-                    if changes:
-                        msg = commit_message or (
-                            f"Session: {summary[:72] if summary else 'interaktive Session'}"
-                        )
-                        commit_hash = await asyncio.to_thread(
-                            git_ops.commit_all,
-                            project_dir,
-                            msg,
-                            settings.git_author_name,
-                            settings.git_author_email,
-                        )
-                        if commit_hash:
-                            await asyncio.to_thread(
-                                git_ops.push, project_dir, branch, settings.github_token
-                            )
-                            pushed = True
-                except Exception as exc:
-                    if ch:
-                        ch.publish({"type": "git", "data": f"[git] Fehler: {exc}\n"})
-                    commit_hash = ""
-                    pushed = False
+                (
+                    commit_hash,
+                    commit_created,
+                    pushed,
+                    git_messages,
+                ) = self._finish_session_git(
+                    project_dir,
+                    branch,
+                    settings.github_token,
+                    settings.git_author_name,
+                    settings.git_author_email,
+                    commit_message.strip() or f"Session: {summary}",
+                )
+                if ch:
+                    for message in git_messages:
+                        ch.publish({"type": "git", "data": message})
 
         with session_scope() as db:
             task = db.get(Task, task_id)
             if task:
                 task.commit_hash = commit_hash or ""
-                task.commit_message = commit_message or ""
-                task.commit_created = bool(commit_hash)
+                task.commit_message = (
+                    commit_message.strip() or (f"Session: {summary}" if commit_created else "")
+                )
+                task.commit_created = commit_created
                 task.pushed = pushed
+
+        if ch:
+            ch.publish({"type": "status", "status": status})
+            ch.publish(
+                {
+                    "type": "done",
+                    "task_id": task_id,
+                    "status": status,
+                    "summary": summary,
+                    "commit_hash": commit_hash,
+                    "pushed": pushed,
+                }
+            )
+            ch.close()
+        self._channels.pop(task_id, None)
+        self._task_projects.pop(task_id, None)
+        self._ending.discard(task_id)
 
         return {"status": status, "summary": summary, "commit_hash": commit_hash, "pushed": pushed}
 
-    def _append_chat_history(self, task_id: str, msg_entry: dict) -> None:
-        with session_scope() as db:
-            task = db.get(Task, task_id)
-            if task:
-                history: list = json.loads(task.chat_history or "[]")
-                history.append(msg_entry)
-                task.chat_history = json.dumps(history, ensure_ascii=False)
+    def _finish_session_git(
+        self,
+        project_dir: str,
+        branch: str,
+        token: str,
+        author_name: str,
+        author_email: str,
+        commit_message: str,
+    ) -> tuple[str, bool, bool, list[str]]:
+        commit_hash = ""
+        commit_created = False
+        pushed = False
+        messages: list[str] = []
+        try:
+            git_ops.ensure_identity(project_dir, author_name, author_email)
+            if git_ops.has_changes(project_dir):
+                commit_hash = git_ops.commit_all(
+                    project_dir,
+                    commit_message,
+                    author_name,
+                    author_email,
+                )
+                if commit_hash:
+                    commit_created = True
+                    messages.append(
+                        f"[git] commit {commit_hash[:8]}: {commit_message.splitlines()[0]}\n"
+                    )
+            else:
+                messages.append("[git] keine Aenderungen zu committen\n")
+            try:
+                git_ops.push(project_dir, branch, token)
+                pushed = True
+                if not commit_hash:
+                    commit_hash = git_ops.head_commit(project_dir)
+                messages.append(f"[git] push -> origin/{branch} OK\n")
+            except Exception as exc:  # noqa: BLE001
+                messages.append(f"[git] push fehlgeschlagen: {exc}\n")
+        except Exception as exc:  # noqa: BLE001
+            messages.append(f"[git] Fehler: {exc}\n")
+            commit_hash = ""
+            commit_created = False
+            pushed = False
+        return commit_hash, commit_created, pushed, messages
 
-    def _get_chat_history(self, task_id: str) -> list[dict]:
+    def _append_terminal_output(self, task_id: str, chunk: str) -> int:
         with session_scope() as db:
             task = db.get(Task, task_id)
             if task:
-                return json.loads(task.chat_history or "[]")
-        return []
+                current = task.output or ""
+                task.output = current + chunk
+                return len(current)
+        return 0
+
+    def _get_terminal_output(self, task_id: str) -> str:
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                return task.output or ""
+        return ""
+
+    def _session_result(self, task_id: str) -> dict:
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                return {
+                    "status": task.status,
+                    "summary": task.result_summary,
+                    "commit_hash": task.commit_hash,
+                    "pushed": task.pushed,
+                }
+        return {"status": "error", "summary": "", "commit_hash": "", "pushed": False}
 
 
 # --------------------------------------------------------------------------- #

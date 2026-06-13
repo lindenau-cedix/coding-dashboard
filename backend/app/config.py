@@ -94,8 +94,8 @@ class AgentSpec(BaseModel):
     # goal).  ``None`` => the agent has no goal mode.
     goal_command: Optional[str] = None
     # If set, this agent supports interactive session mode: the command is
-    # invoked in a PTY so the agent runs in a proper interactive shell.
-    # No prompt is injected -- the user talks to the agent directly.
+    # invoked in a PTY so the agent runs in its interactive TUI. No prompt is
+    # injected -- optional user supplied start parameters are appended as argv.
     session_command: Optional[list[str]] = None
     # Optional model/effort selection. ``*_choices`` is what the UI offers (an
     # empty list hides the selector); ``*_args`` are the argv tokens injected
@@ -170,7 +170,7 @@ def default_agents() -> dict[str, AgentSpec]:
             stream_format="raw",
             env={"HERMES_ACCEPT_HOOKS": "1", "NO_COLOR": "1"},
             unset_env=["PYTHONPATH", "PYTHONHOME"],
-            session_command=["hermes", "chat", "--yolo", "--accept-hooks"],
+            session_command=["hermes", "chat"],
         ),
         "codex": AgentSpec(
             key="codex",
@@ -198,6 +198,7 @@ def default_agents() -> dict[str, AgentSpec]:
             stream_format="raw",
             env={"NO_COLOR": "1"},
             unset_env=["PYTHONPATH", "PYTHONHOME"],
+            session_command=["codex"],
             model_choices=[
                 "gpt-5.4",
                 "gpt-5.5",

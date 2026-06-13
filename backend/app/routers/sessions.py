@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -38,15 +39,22 @@ async def create_session(body: SessionCreate, db: Session = Depends(get_db)) -> 
     spec = cfg.agents.get(body.agent)
     if spec is None or not spec.enabled:
         raise HTTPException(400, f"Unknown or disabled agent: {body.agent}")
+    if not spec.session_command:
+        raise HTTPException(400, f"Agent {spec.display_name} unterstützt keinen Session-Modus.")
     if body.model and body.model not in (spec.model_choices or []):
         raise HTTPException(400, f"Model '{body.model}' not supported by {spec.display_name}.")
     if body.effort and body.effort not in (spec.effort_choices or []):
         raise HTTPException(400, f"Effort '{body.effort}' not supported.")
+    start_args = body.start_args.strip()
+    try:
+        shlex.split(start_args)
+    except ValueError as exc:
+        raise HTTPException(400, f"Startparameter können nicht geparst werden: {exc}")
 
     task = Task(
         project_id=body.project_id,
         agent=body.agent,
-        prompt="",
+        prompt=start_args,
         mode="session",
         model=body.model,
         effort=body.effort,
@@ -59,7 +67,14 @@ async def create_session(body: SessionCreate, db: Session = Depends(get_db)) -> 
     db.refresh(task)
 
     asyncio.create_task(
-        session_manager.start(task.id, body.project_id, body.agent, body.model, body.effort)
+        session_manager.start(
+            task.id,
+            body.project_id,
+            body.agent,
+            body.model,
+            body.effort,
+            start_args=start_args,
+        )
     )
     with session_scope() as sdb:
         t = sdb.get(Task, task.id)
@@ -84,6 +99,7 @@ async def get_session(task_id: str, db: Session = Depends(get_db)) -> dict:
         "agent": task.agent,
         "model": task.model,
         "effort": task.effort,
+        "start_args": task.prompt or "",
         "chat_history": json.loads(task.chat_history or "[]"),
         "status": task.status,
         "result_summary": task.result_summary,
@@ -114,7 +130,12 @@ async def end_session(task_id: str, body: SessionEndRequest, db: Session = Depen
 # --------------------------------------------------------------------------- #
 
 @router.websocket("/ws/sessions/{task_id}")
-async def ws_session(websocket: WebSocket, task_id: str, token: str = Query(default="")) -> None:
+async def ws_session(
+    websocket: WebSocket,
+    task_id: str,
+    token: str = Query(default=""),
+    offset: int = Query(default=0, ge=0),
+) -> None:
     """WebSocket for an interactive session.
 
     Client sends: {type: "message"|"end", content?: string, commit_message?: string}
@@ -136,6 +157,10 @@ async def ws_session(websocket: WebSocket, task_id: str, token: str = Query(defa
                 await websocket.send_json({"type": "error", "message": "Session nicht gefunden"})
                 await websocket.close()
                 return
+            if task.output and offset < len(task.output):
+                await websocket.send_json(
+                    {"type": "output", "data": task.output[offset:], "offset": offset}
+                )
             chat = json.loads(task.chat_history or "[]")
             for msg in chat:
                 await websocket.send_json(
@@ -146,7 +171,13 @@ async def ws_session(websocket: WebSocket, task_id: str, token: str = Query(defa
         await websocket.close()
         return
 
-    queue = ch.subscribe()
+    queue = ch.subscribe(replay=False)
+    with session_scope() as db:
+        task = db.get(Task, task_id)
+        if task and task.output and offset < len(task.output):
+            await websocket.send_json(
+                {"type": "output", "data": task.output[offset:], "offset": offset}
+            )
     send_task = asyncio.create_task(_ws_send(websocket, queue))
     receive_task = asyncio.create_task(_ws_receive(websocket, task_id))
 
@@ -184,6 +215,11 @@ async def _ws_receive(websocket: WebSocket, task_id: str) -> None:
                 content = data.get("content", "")
                 if content:
                     await session_manager.send_message(task_id, content)
+            elif msg_type == "resize":
+                cols = int(data.get("cols") or 0)
+                rows = int(data.get("rows") or 0)
+                if cols > 0 and rows > 0:
+                    await session_manager.resize(task_id, cols=cols, rows=rows)
             elif msg_type == "end":
                 commit_msg = data.get("commit_message", "")
                 asyncio.create_task(

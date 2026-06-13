@@ -3,6 +3,7 @@ export interface Agent {
   display_name: string;
   enabled: boolean;
   supports_goal: boolean;
+  supports_session: boolean;
   /** Selectable models/effort levels; empty array = no selector. */
   model_choices: string[];
   effort_choices: string[];
@@ -73,7 +74,7 @@ export interface SessionMessage {
 /** WebSocket message envelope for session mode. */
 export type SessionWsMessage =
   | { type: "started"; task_id: string }
-  | { type: "output"; data: string }
+  | { type: "output"; data: string; offset?: number }
   | { type: "message"; role: "user" | "assistant"; content: string }
   | { type: "status"; status: string }
   | { type: "done"; task_id: string; status: string; summary?: string }
