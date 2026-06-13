@@ -552,6 +552,16 @@ class SessionManager:
         proc_info = {"pid": pid, "master_fd": master_fd, "project_id": project_id}
         self._procs[task_id] = proc_info  # type: ignore[assignment]
 
+        # Enable DEC private mode 2004 (bracketed paste) up front so paste from
+        # the browser is treated as a single event by full-screen TUIs (Claude
+        # Code, Codex, Hermes, …) — otherwise newlines in pasted text are
+        # interpreted as Enter and submit the prompt prematurely. Most modern
+        # TUIs enable this themselves; we do it again for any that don't.
+        try:
+            os.write(master_fd, b"\x1b[?2004h")
+        except OSError:
+            pass
+
         async def pump() -> None:
             """Pump raw PTY output -> channel, forever until process closes."""
             master = master_fd

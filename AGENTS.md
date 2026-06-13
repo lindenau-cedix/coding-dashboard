@@ -7,6 +7,35 @@ Kurz halten, aktuell halten.
 
 ### 2026-06-13 — codex
 
+**Was getan:** Session Mode Paste-Support (Clipboard, auch mehrzeilig)
+sowie Commit/Push-Status in der Historie-Header-Zeile.
+- Backend `task_runner.SessionManager.start()` schreibt direkt nach
+  PTY-Aufbau einmal `\x1b[?2004h` an die TUI, um DEC Bracketed Paste
+  Mode (Modus 2004) zu aktivieren. TUIs, die das nicht selbst tun,
+  akzeptieren Pasten damit trotzdem als ein zusammenhängendes Event;
+  TUIs, die es schon aktiviert haben, sind idempotent.
+- Frontend `SessionTerminalModal.onTerminalPaste` umschließt den
+  ausgelesenen Clipboard-Text mit `\x1b[200~ ... \x1b[201~`. Dadurch
+  interpretieren Claude Code, Codex, Hermes etc. einen mehrzeiligen
+  Paste nicht mehr als eine Serie von Enter-Submits. Ohne diese
+  Sequenzen löste jeder `\n` im Paste einen Submit der (möglicherweise
+  halb-)fertigen Eingabe aus.
+- Frontend `ProjectDetail` zeigt in der Header-Zeile jedes
+  Historie-Eintrags jetzt `⎇ <commit-hash>` (als Link zur
+  GitHub-Commit-Seite, falls vorhanden) sowie `gepusht ✓` (grün) oder
+  `nicht gepusht` (amber). Für laufende/queued Tasks erscheint ein
+  dezenter `—` als Platzhalter. Das gilt für alle Tasks, nicht nur
+  Sessions — gleicher Look wie die Footer-Zeile in
+  `SessionTerminalModal` direkt nach `end_session`.
+
+**Ergebnis:** Pasten aus dem Browser in eine laufende TUI-Session
+funktionieren mehrzeilig und prompt-treu, und der Git-Status jedes
+abgeschlossenen Tasks ist ohne Aufklappen des Eintrags sichtbar.
+Python-Compile, Frontend-Typecheck, Frontend-Build und der volle
+Smoke-Test (96 Checks) sind grün.
+
+### 2026-06-13 — codex
+
 **Was getan:** Schwarzen Bildschirm im Session Mode behoben.
 - `POST /api/sessions` wartet jetzt, bis der `SessionManager` den PTY und den
   Live-Channel angelegt hat; dadurch kann der Browser-WebSocket nicht mehr vor
@@ -189,6 +218,12 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   - WebSocket `/api/ws/sessions/{task_id}?token=…&offset=N` leitet
     `{type:"message",content}` als rohe UTF-8-Bytes an den PTY weiter und akzeptiert
     `{type:"resize",cols,rows}` für `TIOCSWINSZ` + `SIGWINCH`.
+  - **Bracketed Paste:** `SessionManager.start()` aktiviert direkt nach
+    PTY-Aufbau einmal DEC-Modus `?2004h`. `SessionTerminalModal.onTerminalPaste`
+    wickelt den ausgelesenen Clipboard-Text zusätzlich in
+    `\x1b[200~ ... \x1b[201~` ein. Mehrzeilige Pasten werden damit von
+    Claude Code / Codex / Hermes als ein zusammenhängendes Event behandelt
+    und nicht in eine Serie von Enter-Submits zerlegt.
   - Frontend: `SessionTerminalModal` öffnet direkt in `ProjectDetail` als Dialog,
     rendert den Transcript über eine kleine ANSI/Cursor-Emulation, sendet
     Pfeiltasten/Enter/Tab/Ctrl+C/Paste als rohe Terminalsequenzen und lädt bei
@@ -224,6 +259,16 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-13 (Feature):** Session Mode: Bracketed Paste (DEC ?2004h +
+  `\x1b[200~ ... \x1b[201~`) aktiviert — mehrzeilige Pasten aus dem
+  Browser werden in der TUI nicht mehr als Enter-Submits interpretiert.
+  Backend aktiviert den PTY-Modus idempotent beim Start,
+  `SessionTerminalModal.onTerminalPaste` umschließt den Text.
+  Zusätzlich zeigt die Historie-Header-Zeile in `ProjectDetail` für
+  jeden Task Commit-Hash (als Link, falls GitHub-Repo gepflegt) und
+  `gepusht ✓` / `nicht gepusht` — gleicher Look wie die
+  `SessionTerminalModal`-Footer-Zeile direkt nach `end_session`. Wirksam
+  nach `update.sh` / `systemctl restart coding-dashboard`.
 - **2026-06-13 (Fix):** Session-WebSocket schlug sofort fehl mit
   `TypeError: HTTPBearer.__call__() missing 1 required positional argument:
   'request'`. Ursache: `routers/sessions.py` definierte
