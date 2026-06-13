@@ -552,6 +552,33 @@ export default function ProjectDetail() {
                     <span className="text-xs text-slate-500">📎 {t.images.length}</span>
                   )}
                   <span className="text-xs text-slate-500">{formatDate(t.created_at)}</span>
+                  {t.commit_hash ? (
+                    <span className="flex items-center gap-1 text-xs text-slate-500">
+                      {commitUrl(project, t.commit_hash) ? (
+                        <a
+                          href={commitUrl(project, t.commit_hash)!}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-300 hover:text-cyan-400"
+                          title={t.commit_hash}
+                        >
+                          ⎇ {t.commit_hash.slice(0, 8)}
+                        </a>
+                      ) : (
+                        <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-300">
+                          ⎇ {t.commit_hash.slice(0, 8)}
+                        </span>
+                      )}
+                      <span
+                        className={t.pushed ? "text-emerald-400" : "text-amber-400"}
+                        title={t.pushed ? "Erfolgreich gepusht" : "Nicht gepusht"}
+                      >
+                        {t.pushed ? "gepusht ✓" : "nicht gepusht"}
+                      </span>
+                    </span>
+                  ) : t.status === "running" || t.status === "queued" ? (
+                    <span className="text-xs text-slate-600">—</span>
+                  ) : null}
                   <span className="text-slate-600">{expanded === t.id ? "▲" : "▼"}</span>
                 </button>
 

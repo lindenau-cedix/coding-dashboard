@@ -463,7 +463,13 @@ export default function SessionTerminalModal({
     const text = e.clipboardData.getData("text");
     if (!text) return;
     e.preventDefault();
-    sendBytes(text);
+    // Wrap in DEC bracketed-paste sequences so full-screen TUIs (Claude Code,
+    // Codex, Hermes, …) treat the whole clipboard as a single paste event.
+    // Without this each newline in the pasted text is interpreted as Enter
+    // and submits the prompt prematurely. The PTY was put into mode ?2004h
+    // by the backend on session start; if the TUI doesn't honour it, the
+    // surrounding escape sequences are still harmless noise.
+    sendBytes(`\x1b[200~${text}\x1b[201~`);
   }
 
   return (
