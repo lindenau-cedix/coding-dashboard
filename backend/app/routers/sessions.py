@@ -16,7 +16,12 @@ from ..models import Project, Task
 from ..schemas import SessionCreate, SessionEndRequest, SessionStartResponse
 from ..task_runner import session_manager
 
-router = APIRouter(tags=["sessions"], dependencies=[Depends(get_current_user)])
+# NOTE: We deliberately do NOT use router-level ``dependencies=`` here, because
+# the ``@router.websocket(...)`` endpoint below cannot satisfy ``HTTPBearer`` (it
+# needs a real ``Request`` with a Bearer header, which WebSocket handshakes
+# don't provide). The WebSocket does its own auth via ``user_from_token(token)``.
+# Each HTTP route below declares ``Depends(get_current_user)`` explicitly.
+router = APIRouter(tags=["sessions"])
 
 
 # --------------------------------------------------------------------------- #
@@ -24,7 +29,11 @@ router = APIRouter(tags=["sessions"], dependencies=[Depends(get_current_user)])
 # --------------------------------------------------------------------------- #
 
 @router.post("/sessions", response_model=SessionStartResponse, status_code=status.HTTP_201_CREATED)
-async def create_session(body: SessionCreate, db: Session = Depends(get_db)) -> dict:
+async def create_session(
+    body: SessionCreate,
+    db: Session = Depends(get_db),
+    _user: str = Depends(get_current_user),
+) -> dict:
     """Create a new interactive session task and start the subprocess.
 
     A Task record is created immediately (status=queued then running), the
@@ -90,7 +99,11 @@ async def create_session(body: SessionCreate, db: Session = Depends(get_db)) -> 
 
 
 @router.get("/sessions/{task_id}", response_model=dict)
-async def get_session(task_id: str, db: Session = Depends(get_db)) -> dict:
+async def get_session(
+    task_id: str,
+    db: Session = Depends(get_db),
+    _user: str = Depends(get_current_user),
+) -> dict:
     """Return session task metadata including current chat_history."""
     task = db.get(Task, task_id)
     if task is None:
@@ -113,7 +126,12 @@ async def get_session(task_id: str, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/sessions/{task_id}/end")
-async def end_session(task_id: str, body: SessionEndRequest, db: Session = Depends(get_db)) -> dict:
+async def end_session(
+    task_id: str,
+    body: SessionEndRequest,
+    db: Session = Depends(get_db),
+    _user: str = Depends(get_current_user),
+) -> dict:
     """End the interactive session: stop subprocess, commit+push, persist chat_history."""
     with session_scope() as sdb:
         task = sdb.get(Task, task_id)
