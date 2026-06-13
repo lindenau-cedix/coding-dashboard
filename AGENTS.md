@@ -26,6 +26,30 @@ Frontend-Typecheck, Frontend-Build und ein isolierter Fake-PTY-Session-Check
 waren erfolgreich. Voller Smoke-Test bleibt durch den bekannten
 FastAPI/Starlette-`TestClient`-Hänger blockiert (`timeout 70s`).
 
+### 2026-06-13 — codex (Session-WebSocket: HTTPBearer-Crash gefixt)
+
+**Was getan:** "Terminal-WebSocket konnte nicht geöffnet werden" + "Terminal-
+Verbindung geschlossen" im Session Mode behoben.
+- `routers/sessions.py` hatte `dependencies=[Depends(get_current_user)]` auf
+  Router-Ebene. `get_current_user` ruft intern `HTTPBearer` auf, das einen
+  echten `Request` mit Bearer-Header braucht. Bei WebSocket-Handshakes ist
+  dieser Request `None` → `TypeError: HTTPBearer.__call__() missing 1 required
+  positional argument: 'request'` → WebSocket schließt sofort ohne Daten
+  → Browser sah `onerror` + `onclose`.
+- Fix: Router-level `dependencies=` entfernt. Die drei HTTP-Routen
+  (`POST /sessions`, `GET /sessions/{task_id}`, `POST /sessions/{task_id}/end`)
+  hängen `Depends(get_current_user)` jetzt explizit an die Funktionssignatur.
+  Der `@router.websocket("/ws/sessions/{task_id}")` macht weiterhin seine
+  eigene Auth via `user_from_token(token)` (Query-Param).
+- Verifiziert: Patch-Routing-Tree der WebSocket-Route ist jetzt leer (kein
+  HTTPBearer mehr), HTTP-Routen behalten Auth, alle 47 Smoke-Tests grün.
+
+**Ergebnis:** Session Mode ist nach dem nächsten `update.sh`/`systemctl restart
+coding-dashboard` wieder voll interaktiv. Vorher lief die PTY im Hintergrund
+weiter und sammelte Output in `Task.output` — der Browser konnte nur den
+bereits persistierten Transcript anzeigen, aber keine Tasten senden, weil der
+WebSocket sofort mit dem TypeError abbrach.
+
 ## Zweck
 Self-hosted Dashboard, um Coding-Aufgaben pro Projekt an Claude Code, Hermes oder Codex
 zu delegieren: Repo anlegen/importieren → Aufgabe an einen Agenten → Live-Output
@@ -186,12 +210,30 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   SQLite-DBs additiv in `database._SQLITE_COLUMN_ADDITIONS` eintragen (idempotentes
   `ALTER TABLE ADD COLUMN`, läuft nach `create_all` in `init_db`).
 - Backend-Endpunkte, die `asyncio.create_task` nutzen, müssen `async def` sein.
+- **Router mit WebSocket-Endpoints dürfen keine `HTTPBearer`/`HTTP...`-
+  Security-Dependencies auf Router-Ebene haben.** FastAPI versucht diese
+  für `@router.websocket(...)`-Routen aufzulösen, aber WebSocket-Handshakes
+  haben keinen echten `Request` → `TypeError: HTTPBearer.__call__() missing
+  1 required positional argument: 'request'` → WebSocket schließt sofort.
+  WebSockets authentifizieren sich über `user_from_token(token)` (Query-Param)
+  innerhalb der Route; HTTP-Routen im selben Router bekommen
+  `Depends(get_current_user)` explizit in der Signatur.
 
 ## Tests
 `backend/tests/smoke.py` (ohne externe Dienste): Security, Parser, Agent-Runner,
 voller Git-Commit/Push-Zyklus gegen lokales Bare-Repo, REST + kompletter Task-Run.
 
 ## Offene Punkte / mögliche Next Steps
+- **2026-06-13 (Fix):** Session-WebSocket schlug sofort fehl mit
+  `TypeError: HTTPBearer.__call__() missing 1 required positional argument:
+  'request'`. Ursache: `routers/sessions.py` definierte
+  `dependencies=[Depends(get_current_user)]` auf Router-Ebene — FastAPI
+  versucht diese auch für `@router.websocket(...)`-Routen aufzulösen, was
+  ohne `Request`-Objekt scheitert. Fix: Router-level `dependencies=`
+  entfernt, HTTP-Routen bekommen `Depends(get_current_user)` explizit
+  in der Signatur, WebSocket auth'd sich weiterhin manuell via
+  `user_from_token(token)`. Erst nach `update.sh`/`systemctl restart
+  coding-dashboard` wirksam.
 - **2026-06-13 (Fix):** Session Mode zeigte teils nur einen schwarzen Dialog,
   weil der Session-WebSocket direkt nach `POST /sessions` verbinden konnte,
   bevor `SessionManager.start()` seinen Channel registriert hatte. Fix:
