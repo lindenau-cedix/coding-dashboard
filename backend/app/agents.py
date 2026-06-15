@@ -304,9 +304,95 @@ class _ClaudeJSONParser:
         return self._summary
 
 
+class _CodexParser:
+    """Declutter ``codex exec`` output for the web console.
+
+    ``codex exec --color never`` prefixes every event with an ISO timestamp,
+    prints a metadata banner (workdir/model/provider/sandbox/…), echoes the
+    FULL prompt back under ``User instructions:`` (which in our case includes
+    the long shared context instruction), and appends ``tokens used:`` footers.
+    This parser strips that noise and turns the event markers into clean,
+    readable prefixes while keeping the agent's reasoning, commands and answer.
+    The exact final answer still comes from ``--output-last-message`` (handled
+    by the runner), so ``summary()`` stays empty here.
+    """
+
+    # "[2026-06-13T20:00:01] <event>" — codex stamps every top-level event.
+    _TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2}T[\d:.,+\-Zz]+\]\s?(.*)$")
+    # Metadata banner field lines / separators emitted near the top.
+    _BANNER_RE = re.compile(
+        r"^(-{3,}|workdir|model|provider|approval|sandbox|reasoning effort"
+        r"|reasoning summaries|session|rollout|version)\b",
+        re.IGNORECASE,
+    )
+    _FOOTER_RE = re.compile(r"^tokens used\b", re.IGNORECASE)
+
+    def __init__(self) -> None:
+        self.is_error = False
+        self._summary = ""
+        # While echoing the user prompt back we drop everything until the next event.
+        self._skip_prompt_echo = False
+        # The metadata banner (workdir/model/sandbox/…) only appears at the very
+        # top.  Once a real event has streamed we stop banner-matching so answer
+        # text that happens to start with "model"/"session"/… is never dropped.
+        self._past_header = False
+
+    def feed(self, line: str) -> str:
+        line = _ANSI_RE.sub("", line).rstrip("\n")
+        m = self._TS_RE.match(line)
+        if m is not None:
+            return self._event(m.group(1).strip())
+        # Continuation line (no timestamp): part of the current section.
+        if self._skip_prompt_echo:
+            return ""
+        if not self._past_header and self._BANNER_RE.match(line.strip()):
+            return ""
+        return line + "\n"
+
+    def _event(self, rest: str) -> str:
+        low = rest.lower()
+        # The version banner ("OpenAI Codex v0.139.0 …") and metadata separators.
+        if not self._past_header and (
+            low.startswith("openai codex") or self._BANNER_RE.match(rest)
+        ):
+            self._skip_prompt_echo = False
+            return ""
+        if low.startswith("user instructions"):
+            self._skip_prompt_echo = True
+            self._past_header = True
+            return ""
+        if self._FOOTER_RE.match(rest):
+            self._skip_prompt_echo = False
+            return ""
+        # From here on we're past the prompt echo and the header banner.
+        self._skip_prompt_echo = False
+        self._past_header = True
+        if low == "thinking":
+            return "\n[denkt nach]\n"
+        if low == "codex":
+            # Marker introducing the final answer; drop it, keep what follows.
+            return ""
+        if low.startswith("exec "):
+            return self._format_exec(rest[5:].strip())
+        return rest + "\n"
+
+    @staticmethod
+    def _format_exec(body: str) -> str:
+        """``bash -lc 'ls -la' in /proj`` -> ``$ ls -la``."""
+        body = re.sub(r"\s+in\s+\S+$", "", body)
+        m = re.match(r"^bash -lc ['\"](.*)['\"]$", body, re.DOTALL)
+        cmd = m.group(1) if m else body
+        return f"$ {cmd}\n"
+
+    def summary(self) -> str:
+        return self._summary
+
+
 def _make_parser(stream_format: str):
     if stream_format == "claude-json":
         return _ClaudeJSONParser()
+    if stream_format == "codex":
+        return _CodexParser()
     return _RawParser()
 
 

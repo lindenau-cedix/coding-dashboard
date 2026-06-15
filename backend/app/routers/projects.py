@@ -14,7 +14,14 @@ from ..auth import get_current_user
 from ..config import get_settings
 from ..database import get_db
 from ..models import Project, Task
-from ..schemas import ProjectCreate, ProjectDetail, ProjectOut
+from ..schemas import (
+    DirListing,
+    FileContent,
+    FileEntry,
+    ProjectCreate,
+    ProjectDetail,
+    ProjectOut,
+)
 
 router = APIRouter(
     prefix="/projects",
@@ -159,6 +166,104 @@ def get_agents_md(project_id: str, db: Session = Depends(get_db)) -> dict:
     if not path.exists():
         return {"exists": False, "content": ""}
     return {"exists": True, "content": path.read_text(encoding="utf-8", errors="replace")}
+
+
+# --------------------------------------------------------------------------- #
+# File browser
+# --------------------------------------------------------------------------- #
+
+# Directory entries never shown in the browser.
+_FILE_BROWSER_HIDDEN = {".git"}
+# Read endpoint limits: refuse to inline anything larger, clip text at this size.
+_MAX_TEXT_BYTES = 512 * 1024
+
+
+def _project_root(db: Session, project_id: str) -> Path:
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if not project.local_path:
+        raise HTTPException(409, "Kein lokales Repo vorhanden.")
+    root = Path(project.local_path).resolve()
+    if not root.is_dir():
+        raise HTTPException(409, "Projektverzeichnis nicht gefunden.")
+    return root
+
+
+def _resolve_within(root: Path, rel: str) -> Path:
+    """Resolve a client-supplied relative path inside ``root`` (no traversal)."""
+    rel = (rel or "").strip().lstrip("/")
+    target = (root / rel).resolve()
+    if target != root and root not in target.parents:
+        raise HTTPException(400, "Pfad liegt außerhalb des Projekts.")
+    return target
+
+
+@router.get("/{project_id}/files", response_model=DirListing)
+def list_files(
+    project_id: str, path: str = Query(default=""), db: Session = Depends(get_db)
+) -> DirListing:
+    """List one directory of the project's working tree (relative to the root)."""
+    root = _project_root(db, project_id)
+    target = _resolve_within(root, path)
+    if not target.is_dir():
+        raise HTTPException(404, "Verzeichnis nicht gefunden.")
+    entries: list[FileEntry] = []
+    try:
+        children = sorted(
+            target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
+        )
+    except OSError as exc:
+        raise HTTPException(500, f"Verzeichnis nicht lesbar: {exc}")
+    for child in children:
+        if child.name in _FILE_BROWSER_HIDDEN:
+            continue
+        is_dir = child.is_dir()
+        try:
+            size = 0 if is_dir else child.stat().st_size
+        except OSError:
+            size = 0
+        entries.append(
+            FileEntry(
+                name=child.name,
+                path=child.relative_to(root).as_posix(),
+                is_dir=is_dir,
+                size=size,
+            )
+        )
+    return DirListing(path=target.relative_to(root).as_posix() if target != root else "", entries=entries)
+
+
+@router.get("/{project_id}/file", response_model=FileContent)
+def read_file(
+    project_id: str, path: str = Query(...), db: Session = Depends(get_db)
+) -> FileContent:
+    """Return the (text) content of one file for the side-by-side viewer."""
+    root = _project_root(db, project_id)
+    target = _resolve_within(root, path)
+    if not target.is_file():
+        raise HTTPException(404, "Datei nicht gefunden.")
+    rel = target.relative_to(root).as_posix()
+    try:
+        size = target.stat().st_size
+        # Read at most one chunk + 1 byte; never pull a huge file into memory.
+        with target.open("rb") as fh:
+            raw = fh.read(_MAX_TEXT_BYTES + 1)
+    except OSError as exc:
+        raise HTTPException(403, f"Datei nicht lesbar: {exc}")
+    truncated = size > _MAX_TEXT_BYTES or len(raw) > _MAX_TEXT_BYTES
+    chunk = raw[:_MAX_TEXT_BYTES]
+    # A NUL byte in the first chunk is a reliable binary signal.
+    if b"\x00" in chunk:
+        return FileContent(path=rel, size=size, is_binary=True, truncated=truncated, content="")
+    try:
+        text = chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = chunk.decode("latin-1")
+        except UnicodeDecodeError:
+            return FileContent(path=rel, size=size, is_binary=True, truncated=truncated, content="")
+    return FileContent(path=rel, size=size, is_binary=False, truncated=truncated, content=text)
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
