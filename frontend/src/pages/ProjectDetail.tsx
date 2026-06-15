@@ -385,9 +385,14 @@ export default function ProjectDetail() {
             <input
               value={sessionStartArgs}
               onChange={(e) => setSessionStartArgs(e.target.value)}
-              placeholder='z.B. --model opus oder --resume "session-id"'
+              placeholder='z.B. --model opus, --resume "session-id" oder bei Codex: resume "session-id"'
               className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
             />
+            <span className="mt-1 block text-xs text-slate-500">
+              Eine beendete Session kann per Resume-Parameter fortgesetzt werden – sie
+              startet automatisch im ursprünglichen Ordner. Parallele Sessions im selben
+              Projekt laufen in einer isolierten Arbeitskopie.
+            </span>
           </label>
         ) : (
           <textarea
