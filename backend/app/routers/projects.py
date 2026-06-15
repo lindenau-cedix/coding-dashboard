@@ -177,6 +177,9 @@ async def delete_project(
             raise HTTPException(502, f"GitHub: {exc.message}")
     if project.local_path:
         shutil.rmtree(project.local_path, ignore_errors=True)
+    # Remove any isolated per-session worktrees created for parallel sessions.
+    worktrees_dir = get_settings().data_dir.resolve() / "session_worktrees" / project_id
+    shutil.rmtree(worktrees_dir, ignore_errors=True)
     for (task_id,) in db.query(Task.id).filter(Task.project_id == project_id):
         uploads.delete_images(task_id)
     db.delete(project)

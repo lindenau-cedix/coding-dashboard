@@ -8,6 +8,7 @@ TaskManager (agent -> file change -> commit -> push -> history).
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -689,6 +690,213 @@ def test_session_end_flow() -> None:
         check("task terminal output preserved", "hello from terminal" in (t.output or ""), t.output or "")
 
 
+def test_worktrees() -> None:
+    """Isolated worktrees let parallel sessions work without clobbering files."""
+    remote = TMP / "wt-remote.git"
+    repo = TMP / "wt-repo"
+    run(["git", "init", "--bare", str(remote)])
+    git_ops.clone(str(remote), repo, token="")
+    git_ops.ensure_identity(repo, "T", "t@example.com")
+    (repo / "a.txt").write_text("base", encoding="utf-8")
+    git_ops.commit_all(repo, "init", "T", "t@example.com")
+    git_ops.push(repo, "main", token="")
+
+    check("is_git_repo true for repo", git_ops.is_git_repo(repo))
+    check("is_git_repo false for plain dir", not git_ops.is_git_repo(TMP / "no-such-dir"))
+
+    wt1 = TMP / "wt-1"
+    wt2 = TMP / "wt-2"
+    git_ops.add_worktree(repo, wt1)
+    git_ops.add_worktree(repo, wt2)
+    check("worktree 1 checked out", (wt1 / "a.txt").exists())
+    check("two parallel worktrees coexist", (wt2 / "a.txt").exists())
+
+    (wt1 / "b.txt").write_text("only in wt1", encoding="utf-8")
+    check(
+        "worktrees are file-isolated",
+        not (wt2 / "b.txt").exists() and not (repo / "b.txt").exists(),
+    )
+
+    # A detached worktree can still commit and push to the default branch.
+    git_ops.commit_all(wt1, "from worktree", "T", "t@example.com")
+    git_ops.push(wt1, "main", token="")
+    remote_files = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
+    check("worktree commit pushed to remote", "b.txt" in remote_files, remote_files)
+
+    # Re-adding an already-populated worktree path is a no-op (resume reuse).
+    git_ops.add_worktree(repo, wt2)
+    check("re-add existing worktree is a no-op", (wt2 / "a.txt").exists())
+
+    git_ops.remove_worktree(repo, wt1)
+    check("worktree removed", not wt1.exists())
+
+
+def test_session_dirs() -> None:
+    """Resume-parameter parsing + recorded-cwd resolution from agent stores."""
+    from app.session_dirs import parse_resume_request, resolve_recorded_cwd
+
+    # --- parse: claude / hermes flag style ---
+    r = parse_resume_request("claude", ["--resume", "abc123"])
+    check("parse claude --resume <id>", bool(r) and r.kind == "id" and r.session_id == "abc123", str(r))
+    r = parse_resume_request("claude", ["-r", "xyz"])
+    check("parse claude -r <id>", bool(r) and r.kind == "id" and r.session_id == "xyz", str(r))
+    r = parse_resume_request("claude", ["--resume=foo"])
+    check("parse claude --resume=<id>", bool(r) and r.kind == "id" and r.session_id == "foo", str(r))
+    r = parse_resume_request("claude", ["--continue"])
+    check("parse claude --continue", bool(r) and r.kind == "continue", str(r))
+    r = parse_resume_request("claude", ["--resume"])
+    check("parse claude bare --resume -> continue", bool(r) and r.kind == "continue", str(r))
+    r = parse_resume_request("claude", ["--model", "opus", "--effort", "high"])
+    check("parse claude no resume -> None", r is None, str(r))
+
+    # --- parse: codex subcommand style ---
+    r = parse_resume_request("codex", ["resume", "019ec73d"])
+    check("parse codex resume <id>", bool(r) and r.kind == "id" and r.session_id == "019ec73d", str(r))
+    r = parse_resume_request("codex", ["resume", "--last"])
+    check("parse codex resume --last", bool(r) and r.kind == "last", str(r))
+    r = parse_resume_request("codex", ["resume"])
+    check("parse codex bare resume -> continue", bool(r) and r.kind == "continue", str(r))
+    r = parse_resume_request("codex", ["--model", "gpt-5.4"])
+    check("parse codex no resume -> None", r is None, str(r))
+
+    # --- resolve: claude reads cwd from the session jsonl ---
+    home = TMP / "fakehome"
+    cdir = home / ".claude" / "projects" / "-work-dirA"
+    cdir.mkdir(parents=True, exist_ok=True)
+    (cdir / "sid-claude.jsonl").write_text(
+        json.dumps({"type": "summary", "content": "hi"}) + "\n"
+        + json.dumps({"type": "user", "cwd": "/work/dirA"}) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        "resolve claude cwd from store",
+        resolve_recorded_cwd("claude", "sid-claude", home=home) == "/work/dirA",
+        str(resolve_recorded_cwd("claude", "sid-claude", home=home)),
+    )
+    check(
+        "resolve claude unknown id -> None",
+        resolve_recorded_cwd("claude", "does-not-exist", home=home) is None,
+    )
+
+    # --- resolve: codex reads cwd from session_meta ---
+    xdir = home / ".codex" / "sessions" / "2026" / "06" / "14"
+    xdir.mkdir(parents=True, exist_ok=True)
+    (xdir / "rollout-2026-06-14T00-00-00-uuid-codex-1.jsonl").write_text(
+        json.dumps(
+            {"type": "session_meta", "payload": {"id": "uuid-codex-1", "cwd": "/work/dirB"}}
+        ) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        "resolve codex cwd from store",
+        resolve_recorded_cwd("codex", "uuid-codex-1", home=home) == "/work/dirB",
+        str(resolve_recorded_cwd("codex", "uuid-codex-1", home=home)),
+    )
+    check(
+        "resolve codex unknown id -> None",
+        resolve_recorded_cwd("codex", "nope-zzz", home=home) is None,
+    )
+    # Substring collision: a SHORTER id is contained in the longer rollout's
+    # filename. The id inside session_meta must be verified, so the short id
+    # (which has no matching session) must NOT resolve to the long one's cwd.
+    check(
+        "resolve codex rejects filename substring collision",
+        resolve_recorded_cwd("codex", "uuid-codex", home=home) is None,
+        str(resolve_recorded_cwd("codex", "uuid-codex", home=home)),
+    )
+
+
+def test_session_workdir_resolution() -> None:
+    """SessionManager picks project dir, isolates parallel sessions, resumes."""
+    import asyncio
+
+    from app.database import init_db, session_scope
+    from app.models import Task
+    from app.session_dirs import ResumeRequest
+    from app.task_runner import SessionManager
+
+    init_db()
+    remote = TMP / "swr-remote.git"
+    proj = TMP / "swr-proj"
+    run(["git", "init", "--bare", str(remote)])
+    git_ops.clone(str(remote), proj, token="")
+    git_ops.ensure_identity(proj, "T", "t@example.com")
+    (proj / "r.txt").write_text("x", encoding="utf-8")
+    git_ops.commit_all(proj, "init", "T", "t@example.com")
+    git_ops.push(proj, "main", token="")
+
+    sm = SessionManager()
+    pid = "swr-project"
+
+    def resolve(task_id, agent, req):
+        return asyncio.run(sm._resolve_session_workdir(task_id, pid, str(proj), agent, req))
+
+    # New session, project folder free -> use the project folder, no note.
+    wd, note = resolve("t1", "claude", None)
+    check("free primary -> project dir", wd == str(proj) and note == "", f"{wd!r} {note!r}")
+
+    # Project folder busy with a live session -> isolated worktree for the next.
+    sm._procs["t1"] = {"project_id": pid, "workdir": str(proj), "pid": 0, "master_fd": -1}
+    wd2, note2 = resolve("t2", "claude", None)
+    check(
+        "busy primary -> isolated worktree",
+        wd2 != str(proj) and Path(wd2).exists() and "Isolierte" in note2,
+        f"{wd2!r} {note2!r}",
+    )
+    check("worktree lives under session_worktrees", "session_worktrees" in wd2, wd2)
+    check("worktree is a real checkout", (Path(wd2) / "r.txt").exists(), wd2)
+
+    # Resume "continue" re-uses the most recent prior session directory.
+    with session_scope() as db:
+        db.add(
+            Task(
+                project_id=pid,
+                agent="claude",
+                prompt="",
+                mode="session",
+                is_session=True,
+                status="success",
+                chat_history="[]",
+                workdir=str(proj),
+            )
+        )
+    check("last session workdir found (same agent)", sm._last_session_workdir(pid, "claude") == str(proj))
+    check(
+        "last session workdir ignores other agents",
+        sm._last_session_workdir(pid, "codex") is None,
+        str(sm._last_session_workdir(pid, "codex")),
+    )
+    wd3, note3 = resolve("t3", "claude", ResumeRequest("continue"))
+    check(
+        "continue -> last session dir",
+        wd3 == str(proj) and "letzten Session" in note3,
+        f"{wd3!r} {note3!r}",
+    )
+    # A codex continue must NOT inherit claude's directory. With the primary
+    # folder free, it falls through to the project dir instead of reusing the
+    # claude session's workdir (which a same-agent continue would).
+    sm._procs.pop("t1", None)
+    wd4, note4 = resolve("t4", "codex", ResumeRequest("continue"))
+    check(
+        "continue is agent-scoped",
+        wd4 == str(proj) and "letzten Session" not in note4,
+        f"{wd4!r} {note4!r}",
+    )
+
+    # end_session cleans up an isolated worktree once its work is pushed, but
+    # keeps it when the push failed (so commits are never stranded).
+    asyncio.run(sm._cleanup_worktree_if_done(wd2, str(proj), True, None))
+    check("pushed worktree reclaimed on end", not Path(wd2).exists(), wd2)
+
+    git_ops.add_worktree(str(proj), wd2)  # simulate a second isolated session
+    asyncio.run(sm._cleanup_worktree_if_done(wd2, str(proj), False, None))
+    check("unpushed worktree kept for recovery", Path(wd2).exists(), wd2)
+    asyncio.run(sm._cleanup_worktree_if_done(str(proj), str(proj), True, None))
+    check("project folder never reclaimed", Path(proj).exists())
+
+    git_ops.remove_worktree(str(proj), wd2)
+
+
 def main() -> int:
     try:
         test_security()
@@ -703,6 +911,9 @@ def main() -> int:
         test_api_and_task()
         test_session_api_and_manager()
         test_session_end_flow()
+        test_worktrees()
+        test_session_dirs()
+        test_session_workdir_resolution()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 
