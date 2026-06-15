@@ -117,6 +117,7 @@ async def get_session(
         "model": task.model,
         "effort": task.effort,
         "start_args": task.prompt or "",
+        "workdir": task.workdir or "",
         "chat_history": json.loads(task.chat_history or "[]"),
         "status": task.status,
         "result_summary": task.result_summary,

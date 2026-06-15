@@ -35,6 +35,7 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "is_session": "BOOLEAN NOT NULL DEFAULT 0",
         "chat_history": "TEXT NOT NULL DEFAULT ''",
         "merge_state": "VARCHAR(32) NOT NULL DEFAULT ''",
+        "workdir": "VARCHAR(1024) NOT NULL DEFAULT ''",
     },
 }
 
