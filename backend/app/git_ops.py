@@ -107,3 +107,55 @@ def push(repo_dir: str | Path, branch: str, token: str) -> None:
 def pull(repo_dir: str | Path, branch: str, token: str) -> str:
     result = _run(["pull", "origin", branch], cwd=repo_dir, token=token, check=False)
     return result.stdout.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Worktrees — isolated checkouts so several interactive sessions can run in
+# parallel on the same repo without clobbering each other's files / index.
+# --------------------------------------------------------------------------- #
+def is_git_repo(path: str | Path) -> bool:
+    """True if ``path`` is inside a git work tree (and has a valid HEAD)."""
+    if not path or not Path(path).exists():
+        return False
+    try:
+        inside = _run(["rev-parse", "--is-inside-work-tree"], cwd=path, check=False)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+        # A repo with no commits has no HEAD to base a worktree on.
+        return _run(["rev-parse", "--verify", "HEAD"], cwd=path, check=False).returncode == 0
+    except OSError:
+        return False
+
+
+def add_worktree(repo_dir: str | Path, worktree_path: str | Path, ref: str = "HEAD") -> None:
+    """Create a detached worktree of ``ref`` at ``worktree_path``.
+
+    Detached on purpose: parallel session worktrees never own a branch, so git
+    never refuses a second worktree for "branch already checked out", and the
+    auto-commit step can still ``push HEAD:<default_branch>`` on exit. If a
+    stale registration for the same path exists it is pruned and retried.
+    """
+    worktree_path = Path(worktree_path)
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    if worktree_path.exists() and any(worktree_path.iterdir()):
+        # Already populated (e.g. resuming into a kept worktree): nothing to do.
+        return
+    args = ["worktree", "add", "--detach", str(worktree_path), ref]
+    proc = _run(args, cwd=repo_dir, check=False)
+    if proc.returncode != 0:
+        # Most common cause: a previously-removed worktree dir still registered.
+        _run(["worktree", "prune"], cwd=repo_dir, check=False)
+        proc = _run(args, cwd=repo_dir, check=False)
+        if proc.returncode != 0:
+            raise GitError((proc.stderr or proc.stdout or "git worktree add failed").strip())
+
+
+def remove_worktree(repo_dir: str | Path, worktree_path: str | Path) -> None:
+    """Remove a worktree (force, since it may hold uncommitted/ignored files)."""
+    _run(["worktree", "remove", "--force", str(worktree_path)], cwd=repo_dir, check=False)
+    _run(["worktree", "prune"], cwd=repo_dir, check=False)
+
+
+def prune_worktrees(repo_dir: str | Path) -> None:
+    """Drop registrations for worktrees whose directories no longer exist."""
+    _run(["worktree", "prune"], cwd=repo_dir, check=False)
