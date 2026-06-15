@@ -237,6 +237,7 @@ export const api = {
       model: string;
       effort: string;
       start_args: string;
+      workdir?: string;
       chat_history: SessionMessage[];
       status: string;
       result_summary: string;

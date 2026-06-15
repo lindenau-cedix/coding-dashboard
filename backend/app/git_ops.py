@@ -117,12 +117,14 @@ def pull(repo_dir: str | Path, branch: str, token: str) -> str:
 # --------------------------------------------------------------------------- #
 # Worktrees & branch merging
 #
-# Concurrent tasks/sessions for one project each run in their own git worktree
-# on a dedicated branch so they never clobber each other's working tree.  The
-# project's main checkout (``local_path``) stays on the default branch and is
-# only touched — briefly, under a per-project lock — to merge a finished branch
-# back in and push.  Worktrees share the repo object store and refs, so a branch
-# created in a worktree can be merged from the main checkout without a fetch.
+# Two kinds of worktree share this code.  Isolated *tasks* get their own branch
+# (``add_worktree(..., branch=...)``) off the project's HEAD; when the run
+# finishes the branch is merged back into the main checkout — briefly, under a
+# per-project lock — and pushed.  Parallel interactive *sessions* instead get a
+# *detached* worktree (no ``branch``) so git never refuses a second checkout of
+# the same branch and the auto-commit step can still ``push HEAD:<default>``.
+# Worktrees share the repo object store and refs, so a branch created in one can
+# be merged from the main checkout without a fetch.
 # --------------------------------------------------------------------------- #
 
 def branch_exists(repo_dir: str | Path, branch: str) -> bool:
@@ -134,20 +136,60 @@ def branch_exists(repo_dir: str | Path, branch: str) -> bool:
     return proc.returncode == 0
 
 
+def is_git_repo(path: str | Path) -> bool:
+    """True if ``path`` is inside a git work tree (and has a valid HEAD)."""
+    if not path or not Path(path).exists():
+        return False
+    try:
+        inside = _run(["rev-parse", "--is-inside-work-tree"], cwd=path, check=False)
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+        # A repo with no commits has no HEAD to base a worktree on.
+        return _run(["rev-parse", "--verify", "HEAD"], cwd=path, check=False).returncode == 0
+    except OSError:
+        return False
+
+
 def add_worktree(
-    repo_dir: str | Path, worktree_dir: str | Path, branch: str, base_ref: str
+    repo_dir: str | Path,
+    worktree_path: str | Path,
+    branch: str | None = None,
+    base_ref: str = "HEAD",
 ) -> None:
-    """Create a new worktree at ``worktree_dir`` on a fresh ``branch`` off ``base_ref``."""
-    _run(["worktree", "add", "-b", branch, str(worktree_dir), base_ref], cwd=repo_dir)
+    """Create a worktree at ``worktree_path`` off ``base_ref``.
+
+    With ``branch`` set, the worktree owns a fresh branch (``-b``) — used for an
+    isolated task that is merged back on completion.  Without it the worktree is
+    *detached*, so several parallel sessions can share the repo without git
+    refusing a second checkout of the same branch.  A stale registration for the
+    path (or a populated detached dir from a resumed session) is handled.
+    """
+    worktree_path = Path(worktree_path)
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    if branch is None and worktree_path.exists() and any(worktree_path.iterdir()):
+        # Already populated (e.g. resuming into a kept worktree): nothing to do.
+        return
+    if branch is not None:
+        args = ["worktree", "add", "-b", branch, str(worktree_path), base_ref]
+    else:
+        args = ["worktree", "add", "--detach", str(worktree_path), base_ref]
+    proc = _run(args, cwd=repo_dir, check=False)
+    if proc.returncode != 0:
+        # Most common cause: a previously-removed worktree dir still registered.
+        _run(["worktree", "prune"], cwd=repo_dir, check=False)
+        proc = _run(args, cwd=repo_dir, check=False)
+        if proc.returncode != 0:
+            raise GitError((proc.stderr or proc.stdout or "git worktree add failed").strip())
 
 
-def remove_worktree(repo_dir: str | Path, worktree_dir: str | Path) -> None:
-    """Detach a worktree and prune its admin entry (best effort)."""
-    _run(["worktree", "remove", "--force", str(worktree_dir)], cwd=repo_dir, check=False)
+def remove_worktree(repo_dir: str | Path, worktree_path: str | Path) -> None:
+    """Remove a worktree (force, since it may hold uncommitted/ignored files)."""
+    _run(["worktree", "remove", "--force", str(worktree_path)], cwd=repo_dir, check=False)
     _run(["worktree", "prune"], cwd=repo_dir, check=False)
 
 
 def prune_worktrees(repo_dir: str | Path) -> None:
+    """Drop registrations for worktrees whose directories no longer exist."""
     _run(["worktree", "prune"], cwd=repo_dir, check=False)
 
 

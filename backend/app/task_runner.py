@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import git_ops, uploads
+from . import git_ops, session_dirs, uploads
 from .agents import run_agent
 from .config import get_agents_config, get_settings
 from .database import session_scope
@@ -617,8 +617,6 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._task_projects: dict[str, str] = {}
-        # task_id -> (project_dir, worktree_dir, branch) for isolated sessions.
-        self._worktrees: dict[str, tuple[str, str, str]] = {}
         self._ending: set[str] = set()
 
     def _project_lock(self, project_id: str) -> asyncio.Lock:
@@ -673,6 +671,20 @@ class SessionManager:
                 project_dir = project.local_path
                 base_branch = project.default_branch or base_branch
 
+        # Resolve the working directory before anything else. A resume must run
+        # in the directory where the session was created (agents key saved
+        # sessions by cwd); a new session may get its own isolated worktree so
+        # several sessions can run in parallel. ``workdir_note`` is shown to the
+        # user so it is obvious which folder the agent is operating in.
+        try:
+            argv_extra = shlex.split(start_args) if start_args.strip() else []
+        except ValueError:
+            argv_extra = []
+        resume_req = session_dirs.parse_resume_request(agent_key, argv_extra)
+        workdir, workdir_note = await self._resolve_session_workdir(
+            task_id, project_id, project_dir, agent_key, resume_req
+        )
+
         ch = SessionChannel(task_id)
         self._channels[task_id] = ch
         ch.publish({"type": "status", "status": "running"})
@@ -681,6 +693,7 @@ class SessionManager:
             task = db.get(Task, task_id)
             if task:
                 task.status = "running"
+                task.workdir = workdir
                 if task.started_at is None:
                     task.started_at = _now()
 
@@ -688,64 +701,21 @@ class SessionManager:
         self._locks[task_id] = lock
         self._task_projects[task_id] = project_id
 
-        # Run the session in its own worktree+branch so multiple sessions (and
-        # tasks) for one project don't share a working tree.  The branch is
-        # merged back into the default branch when the session ends.  Fall back
-        # to the main checkout if worktree setup fails.
-        run_dir = project_dir
-        run_branch = base_branch
-        if project_dir and Path(project_dir).exists():
-            try:
-                branch = f"cd/session/{task_id[:8]}"
-                worktree_dir = _worktrees_root() / task_id
-
-                def setup() -> None:
-                    if worktree_dir.exists():
-                        git_ops.remove_worktree(project_dir, worktree_dir)
-                        shutil.rmtree(worktree_dir, ignore_errors=True)
-                    if git_ops.branch_exists(project_dir, branch):
-                        git_ops.delete_branch(project_dir, branch, force=True)
-                    worktree_dir.parent.mkdir(parents=True, exist_ok=True)
-                    # Start from HEAD (concrete local commit), not base_branch:
-                    # `worktree add -b X <dir> <name>` DWIMs to origin/<name> and
-                    # ignores -b when no local ref <name> exists. See _setup_worktree.
-                    git_ops.add_worktree(project_dir, worktree_dir, branch, "HEAD")
-
-                async with lock:
-                    await asyncio.to_thread(setup)
-                run_dir = str(worktree_dir)
-                run_branch = branch
-                self._worktrees[task_id] = (project_dir, run_dir, branch)
-                ch.publish(
-                    {"type": "git", "data": f"[git] Branch {branch} (isolierter Worktree)\n"}
-                )
-            except Exception as exc:  # noqa: BLE001
-                ch.publish(
-                    {
-                        "type": "git",
-                        "data": f"[git] Worktree fehlgeschlagen ({exc}); nutze Hauptverzeichnis\n",
-                    }
-                )
-                run_dir, run_branch = project_dir, base_branch
-        with session_scope() as db:
-            task = db.get(Task, task_id)
-            if task:
-                task.branch = run_branch
-
         # Build the interactive TUI command. Session mode intentionally does not
         # inject prompt/model/effort args; explicit start parameters are the
         # single source of argv additions and are still executed without a shell.
+        # ``{project_dir}`` resolves to the chosen working directory so a session
+        # in an isolated worktree references that worktree, not the shared repo.
         cmd = []
         for tok in spec.session_command:
-            tok = tok.replace("{project_dir}", run_dir)
-            cmd.append(tok)
-        if start_args.strip():
-            cmd += [tok.replace("{project_dir}", run_dir) for tok in shlex.split(start_args)]
+            cmd.append(tok.replace("{project_dir}", workdir))
+        if argv_extra:
+            cmd += [tok.replace("{project_dir}", workdir) for tok in argv_extra]
 
         env = _build_env(spec)
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("COLORTERM", "truecolor")
-        cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", run_dir) or run_dir
+        cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", workdir) or workdir
 
         # Fork a PTY for the subprocess.
         try:
@@ -799,8 +769,19 @@ class SessionManager:
             except OSError:
                 pass
 
-        proc_info = {"pid": pid, "master_fd": master_fd, "project_id": project_id}
+        proc_info = {
+            "pid": pid,
+            "master_fd": master_fd,
+            "project_id": project_id,
+            "workdir": workdir,
+        }
         self._procs[task_id] = proc_info  # type: ignore[assignment]
+
+        # Surface the working directory (resume target / isolated worktree) so it
+        # is visible in the terminal transcript and persisted with the session.
+        if workdir_note:
+            offset = self._append_terminal_output(task_id, workdir_note)
+            ch.publish({"type": "output", "data": workdir_note, "offset": offset})
 
         # Enable DEC private mode 2004 (bracketed paste) up front so paste from
         # the browser is treated as a single event by full-screen TUIs (Claude
@@ -862,6 +843,141 @@ class SessionManager:
         )
         ch.close()
         self._channels.pop(task_id, None)
+
+    # --- session working-directory resolution ------------------------------- #
+    async def _resolve_session_workdir(
+        self,
+        task_id: str,
+        project_id: str,
+        project_dir: str,
+        agent_key: str,
+        resume_req: "session_dirs.ResumeRequest | None",
+    ) -> tuple[str, str]:
+        """Choose the directory a session runs in.
+
+        Returns ``(workdir, note)``; ``note`` is a short human-readable line for
+        the terminal (empty when the plain project folder is used).
+
+        The *decision* runs synchronously (fast in-memory / DB / small-file
+        reads) so the ``_primary_busy`` check stays atomic, but the only
+        genuinely expensive step — a ``git worktree`` checkout, which scales with
+        repo size — is off-loaded with :func:`asyncio.to_thread` so it never
+        blocks the event loop (and thus other live sessions' PTY pumps). Those
+        checkouts always target a *unique* worktree path, so off-loading them
+        introduces no race for the shared project folder.
+        """
+        # 1. Resume of a SPECIFIC session: run where that session lives so the
+        #    agent CLI (which keys conversations by cwd) finds it again.
+        if resume_req is not None and resume_req.session_id:
+            recorded = session_dirs.resolve_recorded_cwd(agent_key, resume_req.session_id)
+            if recorded:
+                if not Path(recorded).exists():
+                    await asyncio.to_thread(self._recreate_worktree, project_dir, recorded)
+                if Path(recorded).exists():
+                    return recorded, f"[resume] Verzeichnis der Session: {recorded}\n"
+
+        # 2. Resume "last"/"continue" (directory-bound): re-use the most recent
+        #    prior session directory of the SAME agent for this project.
+        if resume_req is not None:
+            prev = self._last_session_workdir(project_id, agent_key)
+            if prev:
+                return prev, f"[resume] Verzeichnis der letzten Session: {prev}\n"
+
+        # 3. New session. If the project folder is already busy with a live
+        #    session, give this one its own worktree so they don't clobber each
+        #    other; otherwise use the project folder directly (keeps git history
+        #    linear in the common single-session case).
+        if (
+            project_dir
+            and self._primary_busy(project_id, project_dir)
+            and git_ops.is_git_repo(project_dir)
+        ):
+            worktree = await asyncio.to_thread(
+                self._make_session_worktree, project_id, task_id, project_dir
+            )
+            if worktree:
+                return worktree, f"[parallel] Isolierte Arbeitskopie: {worktree}\n"
+
+        return project_dir, ""
+
+    def _primary_busy(self, project_id: str, project_dir: str) -> bool:
+        """True if a live session already occupies the project's main folder."""
+        return any(
+            info.get("project_id") == project_id and info.get("workdir") == project_dir
+            for info in self._procs.values()
+        )
+
+    def _worktrees_root(self) -> Path:
+        return get_settings().data_dir.resolve() / "session_worktrees"
+
+    def _make_session_worktree(
+        self, project_id: str, task_id: str, project_dir: str
+    ) -> str | None:
+        path = self._worktrees_root() / project_id / task_id
+        try:
+            git_ops.add_worktree(project_dir, path)
+        except Exception:  # noqa: BLE001
+            return None
+        return str(path)
+
+    def _is_session_worktree(self, path: str) -> bool:
+        return bool(path) and path.startswith(str(self._worktrees_root()))
+
+    async def _cleanup_worktree_if_done(
+        self,
+        git_dir: str,
+        project_local_path: str,
+        pushed: bool,
+        ch: "SessionChannel | None",
+    ) -> None:
+        """Remove an isolated session worktree after its work reached the remote.
+
+        No-op for the shared project folder and for worktrees with unpushed work
+        (kept for recovery). Best effort: failures never abort end_session.
+        """
+        if not pushed or not self._is_session_worktree(git_dir):
+            return
+        if not project_local_path or not Path(project_local_path).exists():
+            return
+        try:
+            await asyncio.to_thread(
+                git_ops.remove_worktree, project_local_path, git_dir
+            )
+            if ch:
+                ch.publish(
+                    {"type": "git", "data": "[git] Isolierte Arbeitskopie aufgeraeumt\n"}
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _recreate_worktree(self, project_dir: str, target: str) -> None:
+        """Best-effort re-create a pruned session worktree at ``target``."""
+        if not target.startswith(str(self._worktrees_root())):
+            return
+        if project_dir and git_ops.is_git_repo(project_dir):
+            try:
+                git_ops.add_worktree(project_dir, target)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _last_session_workdir(self, project_id: str, agent_key: str) -> str | None:
+        with session_scope() as db:
+            rows = (
+                db.query(Task)
+                .filter(
+                    Task.project_id == project_id,
+                    Task.agent == agent_key,
+                    Task.is_session.is_(True),
+                    Task.workdir != "",
+                )
+                .order_by(Task.created_at.desc())
+                .limit(20)
+                .all()
+            )
+            for t in rows:
+                if t.workdir and Path(t.workdir).exists():
+                    return t.workdir
+        return None
 
     async def send_message(self, task_id: str, content: str) -> None:
         """Forward raw data to the PTY master fd (keyboard strokes, etc.)."""
@@ -1002,62 +1118,51 @@ class SessionManager:
         commit_hash = ""
         commit_created = False
         pushed = False
-        merge_state = ""
-        project_dir = ""
-        base_branch = settings.default_branch
+        git_dir = ""
+        project_local_path = ""
+        branch = settings.default_branch
         with session_scope() as db:
             proj = db.get(Project, project_id)
             if proj:
-                project_dir = proj.local_path
-                base_branch = proj.default_branch or base_branch
+                branch = proj.default_branch or branch
+                project_local_path = proj.local_path
+            t = db.get(Task, task_id)
+            if t:
+                t.branch = branch
+                # Commit/push from the directory the session actually ran in
+                # (an isolated worktree for parallel sessions, else local_path).
+                git_dir = t.workdir or project_local_path
+            elif proj:
+                git_dir = project_local_path
 
-        wt = self._worktrees.pop(task_id, None)
-        commit_msg = commit_message.strip() or f"Session: {summary}"
-        if wt and Path(wt[1]).exists() and lock:
-            _proj_dir, worktree_dir, branch = wt
-            async with lock:
-                res = await asyncio.to_thread(
-                    _merge_worktree_branch,
-                    project_dir,
-                    worktree_dir,
-                    branch,
-                    base_branch,
-                    settings.github_token,
-                    settings.git_author_name,
-                    settings.git_author_email,
-                    commit_msg,
-                    commit_msg.splitlines()[0] if commit_msg else "Session",
-                )
-            commit_hash = res["commit_hash"]
-            commit_created = res["commit_created"]
-            pushed = res["pushed"]
-            merge_state = res["merge_state"]
-            if ch:
-                for message in res["messages"]:
-                    ch.publish({"type": "git", "data": message})
-        elif project_dir and Path(project_dir).exists() and lock:
-            # Fallback: no worktree (e.g. server restart) — commit+push in place.
-            with session_scope() as db:
-                t = db.get(Task, task_id)
-                if t and not t.branch:
-                    t.branch = base_branch
+        if git_dir and Path(git_dir).exists() and lock:
             async with lock:
                 (
                     commit_hash,
                     commit_created,
                     pushed,
                     git_messages,
-                ) = self._finish_session_git(
-                    project_dir,
-                    base_branch,
+                ) = await asyncio.to_thread(
+                    self._finish_session_git,
+                    git_dir,
+                    branch,
                     settings.github_token,
                     settings.git_author_name,
                     settings.git_author_email,
-                    commit_msg,
+                    commit_message.strip() or f"Session: {summary}",
                 )
                 if ch:
                     for message in git_messages:
                         ch.publish({"type": "git", "data": message})
+
+                # Reclaim an isolated per-session worktree once its work is safely
+                # on the remote. If the push FAILED we keep the worktree so the
+                # commits are not stranded — a later resume re-enters it and can
+                # retry the push. (The agent's conversation lives in its own
+                # store, so a clean worktree is recreated on resume regardless.)
+                await self._cleanup_worktree_if_done(
+                    git_dir, project_local_path, pushed, ch
+                )
 
         with session_scope() as db:
             task = db.get(Task, task_id)
@@ -1068,7 +1173,6 @@ class SessionManager:
                 )
                 task.commit_created = commit_created
                 task.pushed = pushed
-                task.merge_state = merge_state
 
         if ch:
             ch.publish({"type": "status", "status": status})

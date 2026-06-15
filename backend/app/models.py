@@ -65,6 +65,11 @@ class Task(Base):
     # Session mode: full chat history as JSON list of {role, content, timestamp}.
     # Updated live after each user turn; final state becomes Task.output on end.
     chat_history: Mapped[str] = mapped_column(Text, default="")
+    # Session mode: the directory the agent actually ran in. For a normal session
+    # this is the project's local_path; for a parallel session it is an isolated
+    # git worktree. Resuming a session re-uses the matching directory so the
+    # agent CLI finds its saved conversation (it keys sessions by cwd).
+    workdir: Mapped[str] = mapped_column(String(1024), default="")
 
     # queued | running | success | failed | error | interrupted | cancelled
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
