@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, commitUrl, ensureCloudflareAccess, wsSessionUrl } from "../api";
 import type { Agent, Project, SessionWsMessage, TaskStatus } from "../types";
-import { Button, ErrorText, Spinner, StatusBadge } from "./ui";
+import { Button, ErrorText, IconButton, Spinner, StatusBadge } from "./ui";
 
 const TERMINAL_STATUSES = new Set(["success", "failed", "error", "interrupted", "cancelled"]);
 type ConnectionState = "idle" | "connecting" | "open" | "closed" | "error";
@@ -268,6 +268,7 @@ export default function SessionTerminalModal({
   const [ending, setEnding] = useState(false);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   const [terminalSize, setTerminalSize] = useState({ cols: 100, rows: 30 });
+  const [expanded, setExpanded] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const rawRef = useRef("");
@@ -496,8 +497,18 @@ export default function SessionTerminalModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-3 backdrop-blur-sm">
-      <div className="flex h-[min(860px,calc(100vh-1.5rem))] w-full max-w-6xl flex-col rounded-xl border border-slate-700 bg-slate-950 shadow-2xl">
+    <div
+      className={`fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm ${
+        expanded ? "p-0" : "p-3"
+      }`}
+    >
+      <div
+        className={`flex w-full flex-col border border-slate-700 bg-slate-950 shadow-2xl ${
+          expanded
+            ? "h-full max-w-none rounded-none"
+            : "h-[min(860px,calc(100vh-1.5rem))] max-w-6xl rounded-xl"
+        }`}
+      >
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -512,6 +523,12 @@ export default function SessionTerminalModal({
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <IconButton
+              label={expanded ? "Vollbild verlassen" : "Vollbild"}
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? "🗗" : "⛶"}
+            </IconButton>
             <Button variant="ghost" onClick={onClose}>
               Schließen
             </Button>

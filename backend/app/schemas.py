@@ -96,6 +96,7 @@ class TaskOut(BaseModel):
     result_summary: str
     error: str
     branch: str
+    merge_state: str = ""
     commit_hash: str
     commit_message: str
     commit_created: bool
@@ -121,6 +122,38 @@ class TaskOut(BaseModel):
 
 class TaskDetail(TaskOut):
     output: str
+
+
+class RunningTaskOut(TaskOut):
+    """A running/queued task enriched with its project's name/slug for the
+    cross-project dashboard on the start page."""
+
+    project_name: str = ""
+    project_slug: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# File browser
+# --------------------------------------------------------------------------- #
+
+class FileEntry(BaseModel):
+    name: str
+    path: str  # POSIX path relative to the project root
+    is_dir: bool
+    size: int = 0
+
+
+class DirListing(BaseModel):
+    path: str  # the listed directory, relative to the project root ("" = root)
+    entries: list[FileEntry]
+
+
+class FileContent(BaseModel):
+    path: str
+    size: int
+    is_binary: bool
+    truncated: bool = False
+    content: str = ""
 
 
 # --------------------------------------------------------------------------- #
