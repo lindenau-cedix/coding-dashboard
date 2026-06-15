@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import NewProjectModal from "../components/NewProjectModal";
+import RunningAgents from "../components/RunningAgents";
 import { Button, ErrorText, Spinner, formatDate } from "../components/ui";
 import type { Project } from "../types";
 
@@ -42,6 +43,8 @@ export default function Projects() {
       </div>
 
       <ErrorText>{error}</ErrorText>
+
+      <RunningAgents />
 
       {projects === null ? (
         <div className="flex justify-center py-16 text-slate-500">

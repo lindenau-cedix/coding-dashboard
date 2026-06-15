@@ -1,10 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
+import FileBrowser from "../components/FileBrowser";
 import SessionTerminalModal from "../components/SessionTerminalModal";
 import TaskConsole from "../components/TaskConsole";
 import TaskImages from "../components/TaskImages";
-import { Button, ErrorText, Modal, Spinner, StatusBadge, formatDate } from "../components/ui";
+import {
+  Button,
+  ErrorText,
+  FullscreenShell,
+  IconButton,
+  Modal,
+  Spinner,
+  StatusBadge,
+  formatDate,
+} from "../components/ui";
 import type { Agent, Project, Task, TaskImagePayload, TaskMode } from "../types";
 
 const MAX_IMAGES = 6;
@@ -36,14 +46,19 @@ export default function ProjectDetail() {
   const [sessionStartArgs, setSessionStartArgs] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  // Multiple tasks/goals can run at once (each on its own branch); show a live
+  // console for every one that's active.
+  const [activeTaskIds, setActiveTaskIds] = useState<string[]>([]);
   const [sessionDialogTaskId, setSessionDialogTaskId] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<Record<string, string>>({});
+  const [fsOutput, setFsOutput] = useState<{ task: Task; text: string } | null>(null);
 
   const [showAgentsMd, setShowAgentsMd] = useState(false);
   const [agentsMd, setAgentsMd] = useState<string | null>(null);
+  const agentsMdLoaded = useRef(false);
+  const [showFiles, setShowFiles] = useState(false);
   const [pulling, setPulling] = useState(false);
   const [pullDialog, setPullDialog] = useState<{ open: boolean; output: string; success: boolean }>({
     open: false,
@@ -157,10 +172,10 @@ export default function ProjectDetail() {
         setTasks(ts);
         const firstEnabled = ag.find((a) => a.enabled);
         if (firstEnabled) setAgent(firstEnabled.key);
-        const live = ts.find(
-          (t) => !t.is_session && (t.status === "running" || t.status === "queued"),
-        );
-        if (live) setActiveTaskId(live.id);
+        const live = ts
+          .filter((t) => !t.is_session && (t.status === "running" || t.status === "queued"))
+          .map((t) => t.id);
+        if (live.length) setActiveTaskIds(live);
       } catch (err) {
         if (active) setError(err instanceof Error ? err.message : "Laden fehlgeschlagen");
       } finally {
@@ -179,7 +194,7 @@ export default function ProjectDetail() {
     setError("");
     try {
       const task = await api.createTask(id, agent, prompt.trim(), mode, model, effort, images);
-      setActiveTaskId(task.id);
+      setActiveTaskIds((ids) => [task.id, ...ids.filter((x) => x !== task.id)]);
       setPrompt("");
       setImages([]);
       await refreshTasks();
@@ -233,10 +248,28 @@ export default function ProjectDetail() {
       try {
         const res = await api.agentsMd(id);
         setAgentsMd(res.exists ? res.content : "(AGENTS.md existiert noch nicht)");
+        agentsMdLoaded.current = true;
       } catch {
         setAgentsMd("(AGENTS.md konnte nicht geladen werden)");
       }
     }
+  }
+
+  /** Re-fetch AGENTS.md after a run so the displayed context stays current.
+   *  Only refetches once it has been loaded at least once (panel opened). */
+  async function reloadAgentsMd() {
+    if (!agentsMdLoaded.current) return;
+    try {
+      const res = await api.agentsMd(id);
+      setAgentsMd(res.exists ? res.content : "(AGENTS.md existiert noch nicht)");
+    } catch {
+      /* keep previous content */
+    }
+  }
+
+  function onTaskDone() {
+    void refreshTasks();
+    void reloadAgentsMd();
   }
 
   async function pull() {
@@ -485,16 +518,33 @@ export default function ProjectDetail() {
         </div>
       </form>
 
-      {/* Live console */}
-      {activeTaskId && (
+      {/* Live consoles (one per active task/goal — they run in parallel) */}
+      {activeTaskIds.length > 0 && (
         <div className="space-y-2">
-          <h2 className="font-medium text-slate-200">Live-Ausgabe</h2>
-          <TaskConsole
-            taskId={activeTaskId}
-            onDone={() => {
-              void refreshTasks();
-            }}
-          />
+          <h2 className="font-medium text-slate-200">
+            Live-Ausgabe{activeTaskIds.length > 1 ? ` (${activeTaskIds.length})` : ""}
+          </h2>
+          <div className="space-y-3">
+            {activeTaskIds.map((tid) => {
+              const t = tasks.find((x) => x.id === tid);
+              const label = t
+                ? `${agentName[t.agent] ?? t.agent}${t.mode === "goal" ? " · Ziel" : ""} — ${
+                    t.prompt ? t.prompt.slice(0, 80) : ""
+                  }`
+                : undefined;
+              return (
+                <TaskConsole
+                  key={tid}
+                  taskId={tid}
+                  title={label}
+                  onDone={onTaskDone}
+                  onDismiss={() =>
+                    setActiveTaskIds((ids) => ids.filter((x) => x !== tid))
+                  }
+                />
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -512,6 +562,18 @@ export default function ProjectDetail() {
             {agentsMd ?? "Lädt…"}
           </pre>
         )}
+      </div>
+
+      {/* File browser */}
+      <div className="space-y-2">
+        <button
+          onClick={() => setShowFiles((v) => !v)}
+          className="flex w-full items-center justify-between rounded-2xl border border-slate-800 bg-slate-900 px-5 py-3 text-left text-sm font-medium text-slate-200"
+        >
+          <span>📂 Dateien durchsuchen</span>
+          <span className="text-slate-500">{showFiles ? "▲" : "▼"}</span>
+        </button>
+        {showFiles && <FileBrowser projectId={id} />}
       </div>
 
       {/* History */}
@@ -539,6 +601,11 @@ export default function ProjectDetail() {
                   {t.mode === "session" && (
                     <span className="rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-medium text-purple-300">
                       Session
+                    </span>
+                  )}
+                  {t.merge_state === "conflict" && (
+                    <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300">
+                      Merge-Konflikt
                     </span>
                   )}
                   <span className="flex-1 truncate text-sm text-slate-400">
@@ -620,6 +687,14 @@ export default function ProjectDetail() {
                         <span>kein Commit</span>
                       )}
                       <span>{t.pushed ? "gepusht ✓" : "nicht gepusht"}</span>
+                      {t.merge_state === "merged" && (
+                        <span className="text-emerald-400">gemerged → {project.default_branch}</span>
+                      )}
+                      {t.merge_state === "conflict" && (
+                        <span className="text-amber-400" title="Branch blieb erhalten für manuellen Merge">
+                          Merge-Konflikt · Branch {t.branch}
+                        </span>
+                      )}
                       {t.exit_code !== null && <span>exit {t.exit_code}</span>}
                       {t.model && (
                         <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-300">
@@ -640,7 +715,21 @@ export default function ProjectDetail() {
                     )}
 
                     <div>
-                      <div className="text-xs uppercase tracking-wide text-slate-500">Ausgabe</div>
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs uppercase tracking-wide text-slate-500">
+                          Ausgabe
+                        </div>
+                        {outputs[t.id] !== undefined && (
+                          <IconButton
+                            label="Vollbild"
+                            onClick={() =>
+                              setFsOutput({ task: t, text: outputs[t.id] ?? "" })
+                            }
+                          >
+                            ⛶
+                          </IconButton>
+                        )}
+                      </div>
                       <pre className="mt-1 max-h-96 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs whitespace-pre-wrap text-slate-300">
                         {outputs[t.id] ?? "Lädt…"}
                       </pre>
@@ -679,6 +768,23 @@ export default function ProjectDetail() {
             void refreshTasks();
           }}
         />
+      )}
+
+      {fsOutput && (
+        <FullscreenShell
+          title={
+            <span className="flex items-center gap-2">
+              <StatusBadge status={fsOutput.task.status} />
+              {agentName[fsOutput.task.agent] ?? fsOutput.task.agent}
+              <span className="truncate text-slate-400">{fsOutput.task.prompt}</span>
+            </span>
+          }
+          onClose={() => setFsOutput(null)}
+        >
+          <pre className="min-h-0 flex-1 overflow-auto rounded-lg bg-slate-950 p-4 font-mono text-sm leading-relaxed whitespace-pre-wrap text-slate-300">
+            {fsOutput.text || "(keine Ausgabe)"}
+          </pre>
+        </FullscreenShell>
       )}
     </div>
   );

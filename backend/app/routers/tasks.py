@@ -12,10 +12,32 @@ from ..auth import get_current_user
 from ..config import get_agents_config
 from ..database import get_db
 from ..models import Project, Task
-from ..schemas import AgentInfo, TaskCreate, TaskDetail, TaskOut
+from ..schemas import AgentInfo, RunningTaskOut, TaskCreate, TaskDetail, TaskOut
 from ..task_runner import manager
 
 router = APIRouter(tags=["tasks"], dependencies=[Depends(get_current_user)])
+
+
+@router.get("/running", response_model=list[RunningTaskOut])
+def list_running(db: Session = Depends(get_db)) -> list[RunningTaskOut]:
+    """All currently running/queued tasks, goals and sessions across every
+    project — backs the live dashboard on the start page."""
+    projects = {p.id: p for p in db.query(Project).all()}
+    rows = (
+        db.query(Task)
+        .filter(Task.status.in_(["running", "queued"]))
+        .order_by(Task.created_at.desc())
+        .all()
+    )
+    out: list[RunningTaskOut] = []
+    for t in rows:
+        item = RunningTaskOut.model_validate(t)
+        proj = projects.get(t.project_id)
+        if proj:
+            item.project_name = proj.name
+            item.project_slug = proj.slug
+        out.append(item)
+    return out
 
 
 @router.get("/agents", response_model=list[AgentInfo])

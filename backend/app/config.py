@@ -87,7 +87,7 @@ class AgentSpec(BaseModel):
     display_name: str
     command: list[str]
     prompt_via: Literal["arg", "stdin"] = "arg"
-    stream_format: Literal["claude-json", "raw", "lines"] = "raw"
+    stream_format: Literal["claude-json", "codex", "raw", "lines"] = "raw"
     # If set, this agent supports "goal mode": instead of a one-off task prompt
     # the user states a goal and the agent works until it is reached.  The
     # template wraps the user's goal text before it is sent (``{prompt}`` is the
@@ -195,7 +195,7 @@ def default_agents() -> dict[str, AgentSpec]:
                 "-",
             ],
             prompt_via="stdin",
-            stream_format="raw",
+            stream_format="codex",
             env={"NO_COLOR": "1"},
             unset_env=["PYTHONPATH", "PYTHONHOME"],
             session_command=["codex"],
