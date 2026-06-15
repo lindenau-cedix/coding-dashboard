@@ -54,6 +54,8 @@ export interface Task {
   result_summary: string;
   error: string;
   branch: string;
+  /** "" (n/a) | "merged" (landed on default branch) | "conflict" (branch kept for manual merge). */
+  merge_state?: string;
   commit_hash: string;
   commit_message: string;
   commit_created: boolean;
@@ -62,6 +64,35 @@ export interface Task {
   started_at: string | null;
   finished_at: string | null;
   output?: string;
+}
+
+/** A running/queued task enriched with its project's name/slug (start-page dashboard). */
+export interface RunningTask extends Task {
+  project_name: string;
+  project_slug: string;
+}
+
+/** One entry in a project directory listing. */
+export interface FileEntry {
+  name: string;
+  /** POSIX path relative to the project root. */
+  path: string;
+  is_dir: boolean;
+  size: number;
+}
+
+export interface DirListing {
+  /** The listed directory, relative to the project root ("" = root). */
+  path: string;
+  entries: FileEntry[];
+}
+
+export interface FileContent {
+  path: string;
+  size: number;
+  is_binary: boolean;
+  truncated: boolean;
+  content: string;
 }
 
 /** One turn in a session chat history. */

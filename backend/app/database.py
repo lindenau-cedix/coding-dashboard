@@ -34,6 +34,7 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "images": "TEXT NOT NULL DEFAULT ''",
         "is_session": "BOOLEAN NOT NULL DEFAULT 0",
         "chat_history": "TEXT NOT NULL DEFAULT ''",
+        "merge_state": "VARCHAR(32) NOT NULL DEFAULT ''",
     },
 }
 

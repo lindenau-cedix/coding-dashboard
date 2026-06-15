@@ -5,6 +5,59 @@ Kurz halten, aktuell halten.
 
 ## Letzter Durchlauf
 
+### 2026-06-14 — claude (6 Features: Codex-Output, Fullscreen, AGENTS.md-Refresh, Filebrowser, Parallel-Branches, Agenten-Dashboard)
+
+**Was getan:** Sechs Features geplant und implementiert.
+1. **Schönerer Codex-Output:** Neuer `stream_format: "codex"` mit
+   `_CodexParser` in `agents.py`. Strippt `[ISO-Timestamp]`-Präfixe, den
+   Start-Banner (workdir/model/provider/approval/sandbox/reasoning/session/
+   version/`---`) nur am Kopf (`_past_header`-Gate, damit Antworttext, der
+   zufällig mit `model`/`session` beginnt, überlebt), den `tokens used`-Footer
+   und das `User instructions:`-Prompt-Echo. `bash -lc 'cmd' in /dir` wird zu
+   `$ cmd`. Registriert in `_make_parser`; `config.py` setzt codex auf
+   `stream_format="codex"`, Literal um `"codex"` erweitert.
+2. **Fullscreen für Live-/Historie-/Session-Output:** Neues `FullscreenShell`
+   (Portal + Esc-to-close) und `IconButton` in `ui.tsx`. `TaskConsole` bekommt
+   Fullscreen-Toggle (+ `title`/`onDismiss`); `SessionTerminalModal` einen
+   `expanded`-Zustand (Container-Klassen-Swap); `ProjectDetail` ein
+   Fullscreen-Overlay (`fsOutput`) für Historie-Ausgaben.
+3. **AGENTS.md-Anzeige aktualisiert automatisch nach einem Run:**
+   `ProjectDetail` hält `agentsMdLoaded`-Ref + `reloadAgentsMd()`; `onTaskDone()`
+   triggert den Reload, sobald ein Task fertig ist.
+4. **Filebrowser pro Projekt mit Seitenvorschau:** Neue Routen
+   `GET /projects/{id}/files` (Verzeichnis-Listing, versteckt `.git`) und
+   `GET /projects/{id}/file` (Text-Inhalt, NUL→binär, latin-1-Fallback,
+   512-KB-Deckel, gepufferter Read statt `read_bytes()`, OSError→403).
+   Traversal-Guard `_resolve_within`. Neue Schemas `FileEntry`/`DirListing`/
+   `FileContent`, `api.listFiles`/`readFile`, neue `FileBrowser.tsx`
+   (Seite-an-Seite, Breadcrumb, reqId-Race-Guard, Fullscreen-Viewer) in
+   `ProjectDetail` eingebunden.
+5. **Mehrere Tasks/Goals/Sessions parallel auf eigenen Branches + Merge:**
+   Kern-Umbau in `task_runner.py`. Jeder isolierte Lauf bekommt ein
+   git-worktree auf Branch `cd/<mode>/<task_id[:8]>` (Startpunkt `"HEAD"`,
+   nicht `main` — sonst greift DWIM und legt versehentlich `main` an). Der
+   Agentenlauf passiert AUSSERHALB des Projekt-Locks (echte Parallelität);
+   nur worktree-add und merge sind kurze kritische Sektionen unter dem Lock.
+   `_merge_worktree_branch`: commit im worktree → merge in den Projekt-Checkout
+   → push `HEAD:base_branch` → cleanup. Konflikt bricht ab, behält+pusht den
+   Feature-Branch (Default-Branch bleibt sauber); Solo-Läufe fast-forwarden
+   (kein Merge-Commit-Lärm). Neue git_ops-Helfer (`add_worktree`,
+   `remove_worktree`, `merge_branch`, `branch_exists`, `push_ref`,
+   `delete_branch`, `prune_worktrees`). `Task.merge_state`-Spalte (additiv).
+   SessionManager analog (worktree-cwd + Merge-back in `end_session`).
+   `reset_interrupted` räumt den worktrees-Root auf.
+6. **Startseiten-Dashboard laufender Agenten:** `GET /tasks/running`
+   (`RunningTaskOut` mit project_name/slug), neue `RunningAgents.tsx`
+   (pollt alle 3 s), in `Projects.tsx` über dem Grid eingebunden.
+
+**Ergebnis:** Alle sechs Features umgesetzt. `read_file` liest jetzt nur noch
+einen begrenzten Chunk (kein Voll-Einlesen großer Dateien) und fängt OSError
+als 403 ab. `smoke.py` um `test_codex_parser`, `test_worktree_merge`
+(clean-FF, zweiter Merge, Konfliktpfad) und Filebrowser-/`/running`-Checks
+erweitert. Python-Compile, **120 Smoke-Checks**, Frontend-Typecheck und
+Vite-Build grün. Wirksam nach `update.sh` / `systemctl restart
+coding-dashboard`. Noch NICHT committet/gepusht.
+
 ### 2026-06-13 — codex (Session-Paste: Ctrl+V nicht mehr als TUI-Byte)
 
 **Was getan:** Im Session Mode löste Ctrl+V (und Ctrl+Shift+V) bei jeder

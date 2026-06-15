@@ -1,4 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { useEffect } from "react";
+import { createPortal } from "react-dom";
 import type { TaskStatus } from "../types";
 
 type Variant = "primary" | "ghost" | "danger" | "subtle";
@@ -100,6 +102,72 @@ export function Modal({
         {children}
       </div>
     </div>
+  );
+}
+
+/** Small square icon button (e.g. the fullscreen toggle on consoles). */
+export function IconButton({
+  label,
+  onClick,
+  children,
+  className = "",
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-800 text-slate-300 transition hover:bg-slate-700 hover:text-cyan-300 ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Full-viewport overlay used to expand a console/terminal/output to fullscreen.
+ *  Rendered via a portal so it escapes any clipping/scroll container.  Esc closes. */
+export function FullscreenShell({
+  title,
+  onClose,
+  children,
+  headerRight,
+}: {
+  title: ReactNode;
+  onClose: () => void;
+  children: ReactNode;
+  headerRight?: ReactNode;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="fixed inset-0 z-[60] flex flex-col bg-slate-950">
+      <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-2.5">
+        <div className="min-w-0 truncate text-sm font-medium text-slate-200">{title}</div>
+        <div className="flex items-center gap-2">
+          {headerRight}
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-slate-700 px-3 py-1 text-sm text-slate-300 hover:bg-slate-800"
+          >
+            Schließen ✕
+          </button>
+        </div>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">{children}</div>
+    </div>,
+    document.body,
   );
 }
 

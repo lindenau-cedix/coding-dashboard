@@ -21,7 +21,12 @@ Commit & Push und vollständiger Historie. Erreichbar über **Web** und
 | Aufgaben an **Hermes, Claude oder Codex** stellen, ausführen, Ergebnis anzeigen | Agent-Runner spawnt die CLI, **streamt Output live** per WebSocket |
 | Agenten pflegen eine **gemeinsame `.md`** als Kontextübergabe | jeder Task bekommt eine Instruktion angehängt, `AGENTS.md` zu lesen & zu aktualisieren |
 | Nach jeder Aufgabe bei Änderungen **ohne Rückfrage pushen** | nach jedem Task: `git add -A` → commit → `git push` (automatisch) |
-| **Historie** aus Aufgaben, Ausgabe & Commit | jede Task in SQLite: Prompt, Output, Status, Commit-Hash, Push-Status, Zeiten |
+| **Mehrere Tasks/Goals/Sessions gleichzeitig** pro Projekt | jeder Lauf in eigenem **git-Worktree + Branch**, am Ende Merge in den Default-Branch (Konflikt → Branch bleibt erhalten) |
+| **Dashboard aller laufenden Agenten** auf der Startseite | `GET /api/running` (projektübergreifend), Live-Polling im Frontend |
+| **Dateibrowser** je Projekt mit seitlicher Vorschau | `GET /api/projects/{id}/files` + `/file` (read-only, traversalsicher) |
+| **Fullscreen** für Live-, Historie- & Session-Ausgabe | Portal-Overlay (`FullscreenShell`) auf Konsolen, Terminal & Datei-Viewer |
+| **Saubere Codex-Ausgabe** | `stream_format: codex` entfernt Timestamps, Banner, Prompt-Echo & Token-Footer |
+| **Historie** aus Aufgaben, Ausgabe & Commit | jede Task in SQLite: Prompt, Output, Status, Commit-Hash, Push-Status, Merge-Status, Zeiten |
 | Backend als **systemd-Service** (Ubuntu) | `deploy/coding-dashboard.service` + `install.sh` |
 | Erreichbar via **Web & Android** | React-SPA + **Capacitor**-APK aus derselben Codebasis |
 | Webserver auf **demselben Server** | nginx (Static + Reverse-Proxy) via `install.sh` |
@@ -131,9 +136,9 @@ agents:
     env: { HERMES_ACCEPT_HOOKS: "1", NO_COLOR: "1" }
     unset_env: ["PYTHONPATH", "PYTHONHOME"]   # Backend-venv nicht in Hermes leaken
   codex:
-    command: ["codex", "exec", "--cd", "{project_dir}", "--sandbox", "workspace-write", "--ask-for-approval", "never", "--color", "never", "--ephemeral", "-"]
+    command: ["codex", "exec", "--cd", "{project_dir}", "--sandbox", "workspace-write", "--color", "never", "--ephemeral", "--output-last-message", "{last_message_file}", "-"]
     prompt_via: stdin
-    stream_format: raw
+    stream_format: codex   # entfernt Timestamps, Metadaten-Banner, Prompt-Echo & Token-Footer
     env: { NO_COLOR: "1" }
     unset_env: ["PYTHONPATH", "PYTHONHOME"]
 ```

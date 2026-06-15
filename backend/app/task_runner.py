@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import tempfile
 import traceback
 from collections import OrderedDict
@@ -105,11 +106,93 @@ class TaskChannel:
         self.subscribers.clear()
 
 
+def _worktrees_root() -> Path:
+    return get_settings().data_dir / "worktrees"
+
+
+def _merge_worktree_branch(
+    project_dir: str,
+    worktree_dir: str,
+    branch: str,
+    base_branch: str,
+    token: str,
+    author_name: str,
+    author_email: str,
+    commit_message: str,
+    first_line: str,
+) -> dict:
+    """Commit the worktree's branch, merge it into the default branch, push, clean up.
+
+    Synchronous (run via ``asyncio.to_thread``) and always invoked under the
+    per-project lock so the default-branch checkout in ``project_dir`` is touched
+    by only one task/session at a time.  Shared by TaskManager and SessionManager.
+    On a merge conflict the feature branch is kept and pushed for manual merge.
+    """
+    commit_hash = ""
+    commit_created = False
+    pushed = False
+    merge_state = ""
+    messages: list[str] = []
+    try:
+        git_ops.ensure_identity(worktree_dir, author_name, author_email)
+        if git_ops.has_changes(worktree_dir):
+            commit_hash = git_ops.commit_all(
+                worktree_dir, commit_message, author_name, author_email
+            ) or ""
+            if commit_hash:
+                commit_created = True
+                messages.append(f"[git] commit {commit_hash[:8]}: {first_line}\n")
+        else:
+            messages.append("[git] keine Aenderungen zu committen\n")
+
+        merged, _out = git_ops.merge_branch(
+            project_dir, branch, f"Merge {branch} (Coding Dashboard)"
+        )
+        if merged:
+            merge_state = "merged"
+            messages.append(f"[git] merge {branch} -> {base_branch} OK\n")
+            try:
+                git_ops.push(project_dir, base_branch, token)
+                pushed = True
+                messages.append(f"[git] push -> origin/{base_branch} OK\n")
+                if not commit_hash:
+                    commit_hash = git_ops.head_commit(project_dir)
+            except Exception as exc:  # noqa: BLE001
+                messages.append(f"[git] push fehlgeschlagen: {exc}\n")
+        else:
+            merge_state = "conflict"
+            messages.append(
+                f"[git] Merge-Konflikt: {branch} bleibt erhalten (manueller Merge nötig)\n"
+            )
+            try:
+                git_ops.push_ref(project_dir, branch, branch, token)
+                messages.append(f"[git] Branch {branch} -> origin gepusht\n")
+            except Exception as exc:  # noqa: BLE001
+                messages.append(f"[git] Branch-Push fehlgeschlagen: {exc}\n")
+    except Exception as exc:  # noqa: BLE001
+        messages.append(f"[git] Fehler: {exc}\n")
+    finally:
+        git_ops.remove_worktree(project_dir, worktree_dir)
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+        if merge_state == "merged":
+            git_ops.delete_branch(project_dir, branch, force=True)
+    return {
+        "commit_hash": commit_hash,
+        "commit_created": commit_created,
+        "pushed": pushed,
+        "merge_state": merge_state,
+        "messages": messages,
+    }
+
+
 class TaskManager:
     def __init__(self, max_channels: int = 100) -> None:
         self._channels: "OrderedDict[str, TaskChannel]" = OrderedDict()
         self._locks: dict[str, asyncio.Lock] = {}
         self._running: dict[str, asyncio.Task] = {}
+        # task_id -> (project_dir, worktree_dir, branch) for isolated runs so a
+        # cancel/crash can still detach the worktree.
+        self._worktrees: dict[str, tuple[str, str, str]] = {}
         self._max_channels = max_channels
 
     def _project_lock(self, project_id: str) -> asyncio.Lock:
@@ -156,12 +239,14 @@ class TaskManager:
         try:
             await self._run_inner(task_id, project_id, ch)
         except asyncio.CancelledError:
+            self._cleanup_worktree(task_id)
             self._mark(task_id, status="cancelled", error="Abgebrochen.", finished=True)
             ch.publish({"type": "output", "data": "\n[abgebrochen]\n"})
             ch.publish({"type": "status", "status": "cancelled"})
             self._publish_done(ch, task_id)
             raise
         except Exception as exc:  # noqa: BLE001
+            self._cleanup_worktree(task_id)
             tb = traceback.format_exc()
             self._mark(task_id, status="error", error=f"{exc}\n{tb}", finished=True)
             ch.publish({"type": "output", "data": f"\n[interner Fehler] {exc}\n"})
@@ -169,6 +254,18 @@ class TaskManager:
             self._publish_done(ch, task_id)
         finally:
             ch.close()
+
+    def _cleanup_worktree(self, task_id: str) -> None:
+        """Best-effort detach of an isolated run's worktree (cancel/crash path)."""
+        info = self._worktrees.pop(task_id, None)
+        if not info:
+            return
+        project_dir, worktree_dir, _branch = info
+        try:
+            git_ops.remove_worktree(project_dir, worktree_dir)
+        except Exception:  # noqa: BLE001
+            pass
+        shutil.rmtree(worktree_dir, ignore_errors=True)
 
     async def _run_inner(self, task_id: str, project_id: str, ch: TaskChannel) -> None:
         settings = get_settings()
@@ -203,47 +300,152 @@ class TaskManager:
             self._publish_done(ch, task_id)
             return
 
-        lock = self._project_lock(project_id)
-        if lock.locked():
-            ch.publish(
-                {"type": "output", "data": "[warten] Ein anderer Task fuer dieses Projekt laeuft noch...\n"}
-            )
-        async with lock:
-            self._mark(task_id, status="running", started=True)
-            ch.publish({"type": "status", "status": "running"})
+        self._mark(task_id, status="running", started=True)
+        ch.publish({"type": "status", "status": "running"})
 
-            image_paths = uploads.image_paths(task_id, image_names)
-            if image_paths:
-                ch.publish(
-                    {"type": "output", "data": f"[bilder] {len(image_paths)} Bild(er) angehängt\n"}
+        # Run in an isolated worktree on a dedicated branch so multiple tasks
+        # for the same project run in parallel without clobbering each other's
+        # working tree.  The branch is merged back into the default branch (and
+        # pushed) once the agent finishes.  If worktree setup is impossible
+        # (no repo / git error) we fall back to running directly in project_dir.
+        run_dir = project_dir
+        run_branch = branch
+        isolated = False
+        if project_dir and Path(project_dir).exists():
+            try:
+                run_dir, run_branch = await self._setup_worktree(
+                    project_id, task_id, project_dir, branch, mode, ch
                 )
-            full_prompt = build_agent_prompt(
-                spec, prompt, mode, agents.context_instruction, image_paths=image_paths
+                isolated = True
+            except Exception as exc:  # noqa: BLE001
+                ch.publish(
+                    {
+                        "type": "git",
+                        "data": f"[git] Worktree fehlgeschlagen ({exc}); nutze Hauptverzeichnis\n",
+                    }
+                )
+                run_dir, run_branch = project_dir, branch
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                task.branch = run_branch
+
+        image_paths = uploads.image_paths(task_id, image_names)
+        if image_paths:
+            ch.publish(
+                {"type": "output", "data": f"[bilder] {len(image_paths)} Bild(er) angehängt\n"}
+            )
+        full_prompt = build_agent_prompt(
+            spec, prompt, mode, agents.context_instruction, image_paths=image_paths
+        )
+
+        async def on_output(chunk: str) -> None:
+            ch.publish({"type": "output", "data": chunk})
+
+        result = await run_agent(
+            spec, full_prompt, run_dir, on_output, model=model, effort=effort
+        )
+
+        status = "success" if not result.is_error else "failed"
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                task.output = result.transcript
+                task.result_summary = result.summary
+                task.exit_code = result.exit_code
+                task.status = status
+        ch.publish({"type": "status", "status": status})
+
+        self._mark(task_id, finished=True)
+        self._update_agents_md(project_id, run_dir)
+
+        if isolated:
+            await self._finalize_isolated(
+                task_id, project_id, project_dir, run_dir, run_branch, branch, settings,
+                spec.display_name, ch,
+            )
+        else:
+            async with self._project_lock(project_id):
+                await self._git_step(
+                    task_id, project_dir, branch, settings, spec.display_name, ch
+                )
+
+        self._publish_done(ch, task_id)
+
+    async def _setup_worktree(
+        self,
+        project_id: str,
+        task_id: str,
+        project_dir: str,
+        base_branch: str,
+        mode: str,
+        ch: TaskChannel,
+    ) -> tuple[str, str]:
+        """Create a fresh worktree+branch for this task off the current checkout.
+
+        The start point is ``HEAD`` of the project's main checkout (not the
+        named default branch): ``git worktree add -b X <dir> <name>`` silently
+        DWIMs to ``origin/<name>`` and ignores ``-b`` when no local ref ``<name>``
+        exists, which would put every task on the same branch.  ``HEAD`` always
+        resolves to a concrete local commit, so the new branch is created cleanly.
+        """
+        branch = f"cd/{mode}/{task_id[:8]}"
+        worktree_dir = _worktrees_root() / task_id
+
+        def setup() -> None:
+            if worktree_dir.exists():
+                git_ops.remove_worktree(project_dir, worktree_dir)
+                shutil.rmtree(worktree_dir, ignore_errors=True)
+            if git_ops.branch_exists(project_dir, branch):
+                git_ops.delete_branch(project_dir, branch, force=True)
+            worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+            git_ops.add_worktree(project_dir, worktree_dir, branch, "HEAD")
+
+        async with self._project_lock(project_id):
+            await asyncio.to_thread(setup)
+        self._worktrees[task_id] = (project_dir, str(worktree_dir), branch)
+        ch.publish({"type": "git", "data": f"[git] Branch {branch} (isolierter Worktree)\n"})
+        return str(worktree_dir), branch
+
+    async def _finalize_isolated(
+        self,
+        task_id: str,
+        project_id: str,
+        project_dir: str,
+        worktree_dir: str,
+        branch: str,
+        base_branch: str,
+        settings,
+        agent_name: str,
+        ch: TaskChannel,
+    ) -> None:
+        """Commit the worktree branch, merge it into the default branch, push, clean up."""
+        token = settings.github_token
+        first_line = self._summary_line(task_id)
+        msg = (
+            f"{first_line}\n\nAutomatischer Commit durch Coding Dashboard "
+            f"({agent_name}).\nTask-ID: {task_id}"
+        )
+
+        def finish() -> dict:
+            return _merge_worktree_branch(
+                project_dir, worktree_dir, branch, base_branch, token,
+                settings.git_author_name, settings.git_author_email, msg, first_line,
             )
 
-            async def on_output(chunk: str) -> None:
-                ch.publish({"type": "output", "data": chunk})
-
-            result = await run_agent(
-                spec, full_prompt, project_dir, on_output, model=model, effort=effort
-            )
-
-            status = "success" if not result.is_error else "failed"
-            with session_scope() as db:
-                task = db.get(Task, task_id)
-                if task:
-                    task.output = result.transcript
-                    task.result_summary = result.summary
-                    task.exit_code = result.exit_code
-                    task.status = status
-            ch.publish({"type": "status", "status": status})
-
-            self._mark(task_id, finished=True)
-            self._update_agents_md(project_id, project_dir)
-
-            await self._git_step(task_id, project_dir, branch, settings, spec.display_name, ch)
-
-            self._publish_done(ch, task_id)
+        async with self._project_lock(project_id):
+            res = await asyncio.to_thread(finish)
+        self._worktrees.pop(task_id, None)
+        for message in res["messages"]:
+            ch.publish({"type": "git", "data": message})
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                task.commit_hash = res["commit_hash"] or ""
+                task.commit_message = first_line if res["commit_created"] else ""
+                task.commit_created = res["commit_created"]
+                task.pushed = res["pushed"]
+                task.merge_state = res["merge_state"]
 
     async def _git_step(
         self,
@@ -415,6 +617,8 @@ class SessionManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._project_locks: dict[str, asyncio.Lock] = {}
         self._task_projects: dict[str, str] = {}
+        # task_id -> (project_dir, worktree_dir, branch) for isolated sessions.
+        self._worktrees: dict[str, tuple[str, str, str]] = {}
         self._ending: set[str] = set()
 
     def _project_lock(self, project_id: str) -> asyncio.Lock:
@@ -462,10 +666,12 @@ class SessionManager:
             raise ValueError(f"Agent {agent_key} does not support session mode")
 
         project_dir = ""
+        base_branch = get_settings().default_branch
         with session_scope() as db:
             project = db.get(Project, project_id)
             if project:
                 project_dir = project.local_path
+                base_branch = project.default_branch or base_branch
 
         ch = SessionChannel(task_id)
         self._channels[task_id] = ch
@@ -482,20 +688,64 @@ class SessionManager:
         self._locks[task_id] = lock
         self._task_projects[task_id] = project_id
 
+        # Run the session in its own worktree+branch so multiple sessions (and
+        # tasks) for one project don't share a working tree.  The branch is
+        # merged back into the default branch when the session ends.  Fall back
+        # to the main checkout if worktree setup fails.
+        run_dir = project_dir
+        run_branch = base_branch
+        if project_dir and Path(project_dir).exists():
+            try:
+                branch = f"cd/session/{task_id[:8]}"
+                worktree_dir = _worktrees_root() / task_id
+
+                def setup() -> None:
+                    if worktree_dir.exists():
+                        git_ops.remove_worktree(project_dir, worktree_dir)
+                        shutil.rmtree(worktree_dir, ignore_errors=True)
+                    if git_ops.branch_exists(project_dir, branch):
+                        git_ops.delete_branch(project_dir, branch, force=True)
+                    worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+                    # Start from HEAD (concrete local commit), not base_branch:
+                    # `worktree add -b X <dir> <name>` DWIMs to origin/<name> and
+                    # ignores -b when no local ref <name> exists. See _setup_worktree.
+                    git_ops.add_worktree(project_dir, worktree_dir, branch, "HEAD")
+
+                async with lock:
+                    await asyncio.to_thread(setup)
+                run_dir = str(worktree_dir)
+                run_branch = branch
+                self._worktrees[task_id] = (project_dir, run_dir, branch)
+                ch.publish(
+                    {"type": "git", "data": f"[git] Branch {branch} (isolierter Worktree)\n"}
+                )
+            except Exception as exc:  # noqa: BLE001
+                ch.publish(
+                    {
+                        "type": "git",
+                        "data": f"[git] Worktree fehlgeschlagen ({exc}); nutze Hauptverzeichnis\n",
+                    }
+                )
+                run_dir, run_branch = project_dir, base_branch
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                task.branch = run_branch
+
         # Build the interactive TUI command. Session mode intentionally does not
         # inject prompt/model/effort args; explicit start parameters are the
         # single source of argv additions and are still executed without a shell.
         cmd = []
         for tok in spec.session_command:
-            tok = tok.replace("{project_dir}", project_dir)
+            tok = tok.replace("{project_dir}", run_dir)
             cmd.append(tok)
         if start_args.strip():
-            cmd += [tok.replace("{project_dir}", project_dir) for tok in shlex.split(start_args)]
+            cmd += [tok.replace("{project_dir}", run_dir) for tok in shlex.split(start_args)]
 
         env = _build_env(spec)
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("COLORTERM", "truecolor")
-        cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", project_dir) or project_dir
+        cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", run_dir) or run_dir
 
         # Fork a PTY for the subprocess.
         try:
@@ -752,18 +1002,45 @@ class SessionManager:
         commit_hash = ""
         commit_created = False
         pushed = False
+        merge_state = ""
         project_dir = ""
-        branch = settings.default_branch
+        base_branch = settings.default_branch
         with session_scope() as db:
             proj = db.get(Project, project_id)
             if proj:
                 project_dir = proj.local_path
-                branch = proj.default_branch or branch
-            t = db.get(Task, task_id)
-            if t:
-                t.branch = branch
+                base_branch = proj.default_branch or base_branch
 
-        if project_dir and Path(project_dir).exists() and lock:
+        wt = self._worktrees.pop(task_id, None)
+        commit_msg = commit_message.strip() or f"Session: {summary}"
+        if wt and Path(wt[1]).exists() and lock:
+            _proj_dir, worktree_dir, branch = wt
+            async with lock:
+                res = await asyncio.to_thread(
+                    _merge_worktree_branch,
+                    project_dir,
+                    worktree_dir,
+                    branch,
+                    base_branch,
+                    settings.github_token,
+                    settings.git_author_name,
+                    settings.git_author_email,
+                    commit_msg,
+                    commit_msg.splitlines()[0] if commit_msg else "Session",
+                )
+            commit_hash = res["commit_hash"]
+            commit_created = res["commit_created"]
+            pushed = res["pushed"]
+            merge_state = res["merge_state"]
+            if ch:
+                for message in res["messages"]:
+                    ch.publish({"type": "git", "data": message})
+        elif project_dir and Path(project_dir).exists() and lock:
+            # Fallback: no worktree (e.g. server restart) — commit+push in place.
+            with session_scope() as db:
+                t = db.get(Task, task_id)
+                if t and not t.branch:
+                    t.branch = base_branch
             async with lock:
                 (
                     commit_hash,
@@ -772,11 +1049,11 @@ class SessionManager:
                     git_messages,
                 ) = self._finish_session_git(
                     project_dir,
-                    branch,
+                    base_branch,
                     settings.github_token,
                     settings.git_author_name,
                     settings.git_author_email,
-                    commit_message.strip() or f"Session: {summary}",
+                    commit_msg,
                 )
                 if ch:
                     for message in git_messages:
@@ -791,6 +1068,7 @@ class SessionManager:
                 )
                 task.commit_created = commit_created
                 task.pushed = pushed
+                task.merge_state = merge_state
 
         if ch:
             ch.publish({"type": "status", "status": status})
@@ -893,10 +1171,22 @@ session_manager = SessionManager()
 
 
 def reset_interrupted() -> None:
-    """On startup, mark any task still 'running'/'queued' as 'interrupted'."""
+    """On startup, mark any task still 'running'/'queued' as 'interrupted' and
+    clean up worktrees that interrupted runs left behind."""
     with session_scope() as db:
         rows = db.query(Task).filter(Task.status.in_(["running", "queued"])).all()
         for t in rows:
             t.status = "interrupted"
             if t.finished_at is None:
                 t.finished_at = _now()
+        project_dirs = [
+            p.local_path for p in db.query(Project).all() if p.local_path
+        ]
+    # Drop the on-disk worktree dirs, then prune the now-stale admin entries.
+    shutil.rmtree(_worktrees_root(), ignore_errors=True)
+    for project_dir in project_dirs:
+        if Path(project_dir).exists():
+            try:
+                git_ops.prune_worktrees(project_dir)
+            except Exception:  # noqa: BLE001
+                pass

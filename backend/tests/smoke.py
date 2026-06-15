@@ -113,6 +113,51 @@ def test_parser() -> None:
     check("parser passes through non-json", "not-json-line" in out, out)
 
 
+def test_codex_parser() -> None:
+    from app.agents import _CodexParser
+
+    transcript = (
+        "[2026-06-13T20:00:00] OpenAI Codex v0.139.0 (research preview)\n"
+        "--------\n"
+        "workdir: /proj\n"
+        "model: gpt-5.5\n"
+        "provider: openai\n"
+        "approval: never\n"
+        "sandbox: workspace-write\n"
+        "reasoning effort: medium\n"
+        "--------\n"
+        "[2026-06-13T20:00:01] User instructions:\n"
+        "Bitte erledige die Aufgabe.\n"
+        "GEHEIMER LANGER KONTEXT der nicht in der Konsole landen soll.\n"
+        "\n"
+        "[2026-06-13T20:00:05] thinking\n"
+        "Ich schaue mir die Dateien an.\n"
+        "[2026-06-13T20:00:06] exec bash -lc 'ls -la' in /proj\n"
+        "[2026-06-13T20:00:07] bash -lc 'ls -la' succeeded in 12ms:\n"
+        "total 0\n"
+        "[2026-06-13T20:00:20] codex\n"
+        "Fertig: Die Aufgabe wurde erledigt.\n"
+        "model selection wurde angepasst.\n"  # answer line starting with a banner keyword
+        "[2026-06-13T20:00:21] tokens used: 4321\n"
+    )
+    p = _CodexParser()
+    out = "".join(p.feed(line + "\n") for line in transcript.splitlines())
+    check("codex strips timestamps", "[2026-06-13T20:00" not in out, out)
+    check("codex drops version banner", "OpenAI Codex" not in out, out)
+    check("codex drops metadata banner", "workdir:" not in out and "sandbox:" not in out, out)
+    check("codex drops echoed prompt", "GEHEIMER LANGER KONTEXT" not in out, out)
+    check("codex drops token footer", "tokens used" not in out, out)
+    check("codex keeps thinking text", "schaue mir die Dateien" in out, out)
+    check("codex formats exec as shell", "$ ls -la" in out, out)
+    check("codex keeps final answer", "Die Aufgabe wurde erledigt" in out, out)
+    check("codex drops bare codex marker", "\ncodex\n" not in out, out)
+    check(
+        "codex keeps answer line starting with banner keyword",
+        "model selection wurde angepasst" in out,
+        out,
+    )
+
+
 def test_command_building() -> None:
     spec = AgentSpec(
         key="c",
@@ -364,6 +409,76 @@ def test_config_backfill() -> None:
     check("backfill: custom-only config stays explicit", set(custom.agents) == {"fake"}, str(sorted(custom.agents)))
 
 
+def test_worktree_merge() -> None:
+    """Isolated-worktree merge flow: a task branch merges back into the default
+    branch and pushes; two concurrent branches both land; a conflicting branch
+    is kept (merge_state='conflict') instead of corrupting the default branch."""
+    from app.task_runner import _merge_worktree_branch
+
+    remote = TMP / "wt-remote.git"
+    proj = TMP / "wt-proj"
+    run(["git", "init", "--bare", str(remote)])
+    git_ops.clone(str(remote), proj, token="")
+    git_ops.ensure_identity(proj, "Tester", "t@example.com")
+    (proj / "base.txt").write_text("base\n", encoding="utf-8")
+    git_ops.commit_all(proj, "init", "Tester", "t@example.com")
+    git_ops.push(proj, "main", token="")
+
+    # One clean branch via a worktree -> merges and pushes.
+    wt1 = TMP / "wt1"
+    git_ops.add_worktree(proj, wt1, "cd/task/aaa", "HEAD")
+    (wt1 / "feature_a.txt").write_text("A\n", encoding="utf-8")
+    git_ops.ensure_identity(wt1, "Tester", "t@example.com")
+    res1 = _merge_worktree_branch(
+        str(proj), str(wt1), "cd/task/aaa", "main", "",
+        "Tester", "t@example.com", "feature A", "feature A",
+    )
+    check("worktree branch merged", res1["merge_state"] == "merged", str(res1["messages"]))
+    check("worktree merge pushed", res1["pushed"] is True, str(res1["messages"]))
+    check("worktree dir removed after merge", not wt1.exists(), str(wt1))
+    files = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
+    check("merged feature on remote", "feature_a.txt" in files, files)
+
+    # A second clean branch off the (now-advanced) checkout also lands.
+    wt2 = TMP / "wt2"
+    git_ops.add_worktree(proj, wt2, "cd/task/bbb", "HEAD")
+    (wt2 / "feature_b.txt").write_text("B\n", encoding="utf-8")
+    git_ops.ensure_identity(wt2, "Tester", "t@example.com")
+    res2 = _merge_worktree_branch(
+        str(proj), str(wt2), "cd/task/bbb", "main", "",
+        "Tester", "t@example.com", "feature B", "feature B",
+    )
+    check("second worktree merged", res2["merge_state"] == "merged", str(res2["messages"]))
+    files2 = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
+    check("both features on remote", "feature_a.txt" in files2 and "feature_b.txt" in files2, files2)
+
+    # A conflicting branch: edit base.txt in a worktree AND on the default branch
+    # so the merge cannot apply -> kept as conflict, default branch untouched.
+    wt3 = TMP / "wt3"
+    git_ops.add_worktree(proj, wt3, "cd/task/ccc", "HEAD")
+    (wt3 / "base.txt").write_text("worktree change\n", encoding="utf-8")
+    git_ops.ensure_identity(wt3, "Tester", "t@example.com")
+    git_ops.commit_all(wt3, "wt edit", "Tester", "t@example.com")
+    (proj / "base.txt").write_text("main change\n", encoding="utf-8")
+    git_ops.commit_all(proj, "main edit", "Tester", "t@example.com")
+    head_before = git_ops.head_commit(proj)
+    res3 = _merge_worktree_branch(
+        str(proj), str(wt3), "cd/task/ccc", "main", "",
+        "Tester", "t@example.com", "conflicting", "conflicting",
+    )
+    check("conflict detected", res3["merge_state"] == "conflict", str(res3["messages"]))
+    check(
+        "default branch untouched on conflict",
+        git_ops.head_commit(proj) == head_before,
+        f"{git_ops.head_commit(proj)} vs {head_before}",
+    )
+    check(
+        "default branch has no conflict markers",
+        "<<<<<<<" not in (proj / "base.txt").read_text(encoding="utf-8"),
+        (proj / "base.txt").read_text(encoding="utf-8"),
+    )
+
+
 def test_git_cycle() -> None:
     remote = TMP / "remote.git"
     work = TMP / "work"
@@ -596,6 +711,39 @@ def test_api_and_task() -> None:
         hist = client.get(f"/api/projects/{pid}/tasks", headers=H).json()
         check("history lists task", any(t["id"] == tid for t in hist), str(len(hist)))
 
+        # File browser: list root, traversal blocked, read a text file.
+        listing = client.get(f"/api/projects/{pid}/files", headers=H)
+        check("file listing ok", listing.status_code == 200, str(listing.status_code))
+        names = [e["name"] for e in listing.json().get("entries", [])]
+        check("file listing has README", "README.md" in names, str(names))
+        check("file listing hides .git", ".git" not in names, str(names))
+        traversal = client.get(
+            f"/api/projects/{pid}/files", headers=H, params={"path": "../.."}
+        )
+        check("file traversal blocked -> 400", traversal.status_code == 400, str(traversal.status_code))
+        readf = client.get(
+            f"/api/projects/{pid}/file", headers=H, params={"path": "README.md"}
+        )
+        check("file read ok", readf.status_code == 200, str(readf.status_code))
+        check(
+            "file read returns content",
+            readf.json().get("content", "").startswith("# proj") and not readf.json().get("is_binary"),
+            str(readf.json())[:200],
+        )
+        missing = client.get(
+            f"/api/projects/{pid}/file", headers=H, params={"path": "nope.txt"}
+        )
+        check("file read missing -> 404", missing.status_code == 404, str(missing.status_code))
+
+        # Running dashboard: completed tasks must not appear as running.
+        running = client.get("/api/running", headers=H)
+        check("running endpoint ok", running.status_code == 200, str(running.status_code))
+        check(
+            "finished task not in running",
+            all(r["id"] != tid for r in running.json()),
+            str(running.json()),
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Session mode
@@ -693,12 +841,14 @@ def main() -> int:
     try:
         test_security()
         test_parser()
+        test_codex_parser()
         test_command_building()
         test_final_output()
         test_agent_runner()
         test_goal_mode()
         test_images()
         test_config_backfill()
+        test_worktree_merge()
         test_git_cycle()
         test_api_and_task()
         test_session_api_and_manager()

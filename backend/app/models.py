@@ -74,6 +74,9 @@ class Task(Base):
     error: Mapped[str] = mapped_column(Text, default="")
 
     branch: Mapped[str] = mapped_column(String(128), default="")
+    # Result of merging this task's branch back into the default branch:
+    # "" (n/a) | "merged" (landed on default) | "conflict" (branch kept for manual merge).
+    merge_state: Mapped[str] = mapped_column(String(32), default="")
     commit_hash: Mapped[str] = mapped_column(String(64), default="")
     commit_message: Mapped[str] = mapped_column(Text, default="")
     commit_created: Mapped[bool] = mapped_column(Boolean, default=False)
