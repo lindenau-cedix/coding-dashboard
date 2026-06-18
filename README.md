@@ -5,10 +5,12 @@ Ein selbst-gehostetes Dashboard, um Coding-Aufgaben an **Claude Code**,
 Commit & Push und vollständiger Historie. Erreichbar über **Web** und
 **Android-App**.
 
-> **Wichtig:** Dieses Repo enthält Code **und Installations-Scripts**. Es wird
-> **nicht** automatisch deployt – du führst `deploy/install.sh` auf deinem
-> Ubuntu-Server aus (auf dem `hermes`, `claude` und `codex` bereits installiert &
-> eingeloggt sind).
+> **Wichtig:** Dieses Repo enthält Code **und Deployment-Scripts**. Es wird
+> **nicht** automatisch deployt. Zwei Wege:
+> 1. **systemd** (`deploy/install.sh`) auf einem Ubuntu-Server, auf dem `hermes`,
+>    `claude` und `codex` bereits installiert & eingeloggt sind.
+> 2. **Docker Compose** – ein in sich geschlossener Container, der die Agent-CLIs
+>    selbst mitbringt (siehe [Docker Compose](#docker-compose-alternativ--alles-im-container)).
 
 ---
 
@@ -74,7 +76,7 @@ Commit & Push und vollständiger Historie. Erreichbar über **Web** und
 
 ---
 
-## Installation (Server)
+## Installation (Server, systemd)
 
 ```bash
 # Repo auf den Server bringen (git clone / scp / rsync), dann:
@@ -116,6 +118,73 @@ journalctl -u coding-dashboard -f
 sudo ./deploy/update.sh      # Code/Frontend/Deps aktualisieren + Neustart
 sudo ./deploy/uninstall.sh   # entfernen
 ```
+
+---
+
+## Docker Compose (alternativ – alles im Container)
+
+Statt des systemd-Installers kann der komplette Stack als **ein Container** laufen:
+Backend (uvicorn – liefert auch die SPA **und** die WebSockets aus), die Agent-CLIs
+(**Claude** + **Codex** vorinstalliert, **Hermes** optional) und git – alles drin.
+Zustand (SQLite-DB, geklonte Repos), die generierte `config.yaml` und die
+Agent-Logins liegen in **named volumes**; auf dem Host muss nichts installiert werden.
+
+**Schnellstart** (im Repo-Wurzelverzeichnis, Docker + Compose-Plugin vorausgesetzt):
+
+```bash
+cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
+docker compose build
+# Secrets erzeugen (Image muss gebaut sein) und in die .env eintragen:
+docker compose run --rm dashboard python -m app.cli hash-password 'DEIN-PASSWORT'  # -> CD_ADMIN_PASSWORD_HASH
+openssl rand -hex 32                                                                # -> CD_SECRET_KEY
+# deploy/docker/coding-dashboard.docker.env bearbeiten: Hash, Secret & GitHub-Token eintragen
+docker compose up -d
+```
+
+**Agenten einloggen** – einmalig; die Credentials bleiben im `cd-home`-Volume
+(es werden **keine** API-Keys in Dateien abgelegt):
+
+```bash
+docker compose exec dashboard claude        # im TUI einloggen
+docker compose exec dashboard codex login
+```
+
+**Erreichbarkeit:** standardmäßig nur `127.0.0.1:8000`. Für LAN/öffentlich davor
+einen TLS-Reverse-Proxy setzen (empfohlen, v.a. für die Android-App) oder die
+Bindung ändern:
+
+```bash
+CD_BIND_ADDR=0.0.0.0 CD_HOST_PORT=8080 docker compose up -d
+```
+
+**Hermes mitbauen** (Node-CLI **oder** Install-Script – `command -v hermes` beim
+ersten Start entscheidet, ob er in der `config.yaml` aktiviert wird):
+
+```bash
+docker compose build --build-arg HERMES_NPM_PKG=@dein-scope/hermes-cli
+# oder:
+docker compose build --build-arg HERMES_INSTALL_CMD='curl -fsSL https://…/install.sh | sh'
+docker compose up -d
+```
+
+Beim **ersten Start** erkennt der Container automatisch, welche Agent-CLIs vorhanden
+sind, und aktiviert nur diese in `config.yaml` (im `cd-config`-Volume). Claude/Codex
+lassen sich analog über `--build-arg CLAUDE_NPM_PKG=…` / `CODEX_NPM_PKG=…` pinnen
+oder austauschen. Wer einen Agenten nachträglich hinzufügt: `config.yaml` im
+`cd-config`-Volume anpassen (oder löschen → wird neu generiert) und neu starten.
+
+**Verwalten / Updaten:**
+
+```bash
+docker compose logs -f dashboard
+docker compose up -d --build    # Code/Frontend/Agents neu bauen + Neustart (Daten bleiben)
+docker compose down             # stoppen; Volumes (Daten/Logins) bleiben erhalten
+docker compose down -v          # ACHTUNG: löscht auch die Volumes (DB, Repos, Logins)
+```
+
+**„Nichts verlässt den Container":** außer den GitHub-Pushes und den Agent-API-Aufrufen
+(Anthropic/OpenAI/…) – beides funktionsbedingt – bleibt der gesamte Zustand in den
+Volumes `cd-data` (DB + Repos), `cd-config` (`config.yaml`) und `cd-home` (Agent-Logins).
 
 ---
 
