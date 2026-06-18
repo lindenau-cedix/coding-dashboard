@@ -7,6 +7,9 @@ venv/
 .env
 backend/.env
 
+# --- Docker (real secrets file; the .example is committed) ---
+deploy/docker/coding-dashboard.docker.env
+
 # --- Data (DB + cloned project repos) ---
 data/
 backend/data/

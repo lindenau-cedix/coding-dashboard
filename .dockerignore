@@ -1,0 +1,36 @@
+# Keep the build context small and free of host/secret state.
+.git
+**/.git
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+backend/.venv/
+*.egg-info/
+
+# Node / frontend (dist is rebuilt inside the image)
+**/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Capacitor / Android (generated)
+frontend/android/
+frontend/ios/
+*.apk
+*.aab
+
+# Local data + secrets (must never enter an image layer)
+data/
+backend/data/
+*.db
+*.sqlite3
+.env
+backend/.env
+deploy/docker/coding-dashboard.docker.env
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
