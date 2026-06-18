@@ -1,28 +1,44 @@
 # =============================================================================
 # Coding Dashboard — Docker Compose deployment
 #
-# Self-contained alternative to the systemd installer (deploy/install.sh): the
-# whole stack (FastAPI backend + built SPA + claude/codex/hermes CLIs + git)
-# runs in ONE container. claude + codex state lives in named volumes; Hermes
-# instead REUSES THE HOST's ~/.hermes (bind mount), so its login/data is shared
-# with whatever Hermes you run on the host. See the volumes block below.
+# Self-contained-ish alternative to the systemd installer (deploy/install.sh):
+# the whole stack (FastAPI backend + built SPA + claude/codex CLIs + git) runs in
+# ONE container. Claude + Codex log in interactively and persist in the cd-home
+# named volume.
 #
-# Because that bind mount keeps the HOST's uid/gid, the image defaults the app
-# user to UID/GID 1000. If your ~/.hermes belongs to a different uid/gid, build
-# with matching ids:
-#   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
+# Hermes is the exception: it RUNS THE HOST's Hermes install, by mirroring the
+# host into the container. The host's Hermes (the official git/uv installer) is a
+# Python venv whose launcher hardcodes absolute paths — its own dir under
+# ~/.hermes AND the uv-managed Python under ~/.local/share/uv. A venv is not
+# relocatable, so we don't copy it; we reproduce those exact paths:
+#   * bind-mount the host ~/.hermes              -> /home/app/.hermes      (rw)
+#   * bind-mount the host ~/.local/share/uv      -> /home/app/.local/share/uv (ro)
+#   * the image symlinks the host's home path (HERMES_HOST_HOME, e.g.
+#     /home/debian) -> /home/app, so the venv's hardcoded /home/<host>/... paths
+#     resolve, and a /usr/local/bin/hermes shim execs the venv launcher.
+# The container's $HOME is /home/app, so `hermes` reads its login/config/memory
+# from the mounted host ~/.hermes — login/data are shared with the host.
+#
+# IMPORTANT — match these to the DEST host:
+#   * HERMES_HOST_HOME must equal the home dir of the user that owns ~/.hermes
+#     (this is the path baked into the venv launcher's shebang). Default below.
+#   * APP_UID/APP_GID should match that user so files Hermes writes into the
+#     shared ~/.hermes stay owned by the host user:
+#       APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) \
+#         HERMES_HOST_HOME=$HOME docker compose build
+#     Keep APP_UID STABLE across rebuilds, or the once-chowned cd-home volume is
+#     orphaned (e.g. ~/.cache: Permission denied) — recreate cd-home if it changes.
 #
 # Quick start (from the repo root):
 #   cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-#   docker compose build
+#   APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) HERMES_HOST_HOME=$HOME docker compose build
 #   docker compose run --rm dashboard python -m app.cli hash-password 'choose-a-password'   # -> CD_ADMIN_PASSWORD_HASH
 #   openssl rand -hex 32                                                                     # -> CD_SECRET_KEY
 #   # edit deploy/docker/coding-dashboard.docker.env (paste hash + secret + GitHub token)
 #   docker compose up -d
-#   docker compose exec dashboard claude        # claude/codex log in once -> cd-home volume
+#   docker compose exec dashboard claude        # claude + codex log in once -> cd-home volume
 #   docker compose exec dashboard codex login   #   "
-#   #   Hermes: log in on the HOST (or `docker compose exec dashboard hermes`);
-#   #   either way it writes to the shared host ~/.hermes.
+#   #   Hermes needs no login here — it uses the host's ~/.hermes directly.
 #
 # By default the app is published on 127.0.0.1:8000 only — put a TLS reverse
 # proxy in front, or set CD_BIND_ADDR=0.0.0.0 (and CD_HOST_PORT) to expose it.
@@ -37,16 +53,19 @@ services:
         # Same-origin SPA (the backend serves it). For a separately-hosted
         # frontend, bake a public API base instead.
         VITE_API_BASE: ""
-        # Hermes ships enabled by default via its official installer. Override to
-        # pin/swap (HERMES_NPM_PKG=@scope/hermes-cli) or DISABLE it entirely
-        # (HERMES_INSTALL_CMD='' docker compose build).
+        # Hermes runs from the host mount (see volumes), so DON'T install it into
+        # the image — that venv would just be shadowed by the mount. Set a value
+        # only if you want a self-contained in-image Hermes instead of the host's.
         HERMES_NPM_PKG: "${HERMES_NPM_PKG:-}"
-        HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
-        # Run the container's 'app' user as the owner of the bind-mounted host
-        # ~/.hermes (see volumes) so Hermes can read/write it. Defaults to 1000,
-        # the common first-user uid/gid; override on hosts that use a different
-        # owner:
-        #   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
+        HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-}"
+        # Home dir of the host user that owns ~/.hermes — the path baked into the
+        # host venv launcher's shebang. The image symlinks it to /home/app so the
+        # venv's hardcoded paths resolve. MUST match the dest host (default fits a
+        # standard Debian cloud user); override with HERMES_HOST_HOME=$HOME.
+        HERMES_HOST_HOME: "${HERMES_HOST_HOME:-/home/debian}"
+        # UID/GID of the non-root 'app' user. Match the owner of the shared host
+        # ~/.hermes so files Hermes writes stay host-owned; keep it stable across
+        # rebuilds (a change orphans the chowned cd-home volume).
         APP_UID: "${APP_UID:-1000}"
         APP_GID: "${APP_GID:-1000}"
     image: coding-dashboard:latest
@@ -62,13 +81,13 @@ services:
       - cd-data:/var/lib/coding-dashboard   # SQLite DB + cloned project repos
       - cd-config:/etc/coding-dashboard     # generated config.yaml (edit + persists)
       - cd-home:/home/app                   # claude + codex logins: ~/.claude, ~/.codex
-      # Hermes uses the HOST's ~/.hermes directly (shared login/data). This bind
-      # mount nests over the cd-home volume above — the more specific path wins,
-      # so ONLY ~/.hermes comes from the host; ~/.claude / ~/.codex stay in the
-      # volume. Override the host path via CD_HERMES_HOST_DIR. The directory must
-      # exist on the host (Hermes installed there), and the container's app user
-      # must match the app UID/GID — default 1000:1000, or APP_UID/APP_GID above.
+      # Hermes runs the HOST's install: its ~/.hermes (login/config/memory/venv)
+      # nested over the cd-home volume, plus the uv-managed Python the venv's
+      # launcher hardcodes (read-only — just the interpreter). The image symlinks
+      # HERMES_HOST_HOME -> /home/app so the venv's absolute paths resolve.
+      # Override the host paths via CD_HERMES_HOST_DIR / CD_HERMES_UV_DIR.
       - "${CD_HERMES_HOST_DIR:-${HOME}/.hermes}:/home/app/.hermes"
+      - "${CD_HERMES_UV_DIR:-${HOME}/.local/share/uv}:/home/app/.local/share/uv:ro"
 
 volumes:
   cd-data:

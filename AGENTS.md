@@ -4,6 +4,58 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-18 - claude (Docker: run the HOST's Hermes by mirroring it, not relocating it)
+
+**Problem:** With the host `~/.hermes` bind-mounted into the container, Hermes
+failed with `/home/app/.local/bin/hermes: line 4:
+/home/app/.hermes/hermes-agent/venv/bin/hermes: cannot execute: required file not
+found`, plus `~/.cache` Permission denied and a bogus "no python" on reinstall.
+Root cause: the host Hermes is the official **git/uv** installer — a Python venv
+whose launcher shebang hardcodes `/home/<host>/.hermes/.../python3`, and whose
+`venv/bin/python` links to a uv-managed Python under
+`~/.local/share/uv/python/cpython-3.11.../bin/python3.11` (OUTSIDE `.hermes`).
+Mounting only `~/.hermes` into a container with `HOME=/home/app` leaves both
+absolute paths missing → ENOENT on the interpreter. A venv is not relocatable, so
+no UID tweak fixes it (`chmod 777` only cleared the permission half). The separate
+UID `1001` showed because an earlier rebuild changed `APP_UID`, orphaning the
+once-chowned `cd-home` volume.
+
+**Decision (reverses the earlier "self-contained Hermes" memo):** the user wants
+the host's `~/.hermes` shared into the container. So we **mirror the host** rather
+than relocate the venv.
+
+**What changed in `deploy/docker/` + `docker-compose.yml`:**
+- `docker-compose.yml`: bind-mount host `~/.hermes` → `/home/app/.hermes` (rw) AND
+  host `~/.local/share/uv` → `/home/app/.local/share/uv` (ro, the uv Python the
+  venv needs). New build arg `HERMES_HOST_HOME` (default `/home/debian`),
+  `APP_UID`/`APP_GID` default `1000` (match the host `~/.hermes` owner),
+  `HERMES_INSTALL_CMD` default `""` (host provides Hermes). New overrides
+  `CD_HERMES_HOST_DIR` / `CD_HERMES_UV_DIR`.
+- `Dockerfile`: at build time (root) create a symlink `$HERMES_HOST_HOME ->
+  /home/app` so the venv's hardcoded `/home/<host>/...` paths resolve, and a
+  `/usr/local/bin/hermes` shim that `exec`s `$HOME/.hermes/hermes-agent/venv/bin/hermes`
+  (unsets PYTHONPATH/PYTHONHOME, like the host shim). No in-image Hermes install by
+  default. `HOME` stays `/home/app`, so Hermes reads its login/config/memory from
+  the mounted host `~/.hermes`.
+- `entrypoint.sh`, `coding-dashboard.docker.env.example`, `README.md`: updated to
+  describe mirror mode (Hermes is host-shared; Claude/Codex stay in `cd-home`).
+
+**Verified** against `node:20-bookworm-slim` (which ships NO system Python — moot,
+since Hermes uses the host's uv Python): the host's uv-Python 3.11.15 runs in the
+container, `import hermes_cli` works, and a freshly built image running as the
+non-root `app` user (uid 1000) with the mounts resolves `hermes` on PATH and prints
+`Hermes Agent v0.16.0`.
+
+**Important — deploy on the dest host:** build matched to it and recreate the
+orphaned home volume once:
+```
+APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) HERMES_HOST_HOME=$HOME docker compose build
+docker compose down && docker volume rm coding-dashboard_cd-home   # clears only Claude/Codex logins
+docker compose up -d                                               # cd-data (DB/repos) untouched
+```
+`HERMES_HOST_HOME` must equal the home of the user that owns `~/.hermes`
+(the path baked into the venv launcher). See README "Deploy on the dest server".
+
 ### 2026-06-18 - codex (Docker: default app UID now matches host ~/.hermes)
 
 **Problem:** Even after removing the base image's `node` user, a plain
