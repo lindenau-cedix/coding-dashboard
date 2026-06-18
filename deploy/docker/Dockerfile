@@ -65,17 +65,22 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # --- agent CLIs (global npm -> /usr/local/bin, already on PATH) -------------
+# Only the npm-packaged agents go here (they install to /usr/local/bin as root,
+# always on PATH, never shadowed by the home volume). HERMES_INSTALL_CMD is a
+# HOME-based installer and is run later AS the app user — see below.
 RUN set -eux; \
     if [ -n "$CLAUDE_NPM_PKG" ]; then npm install -g "$CLAUDE_NPM_PKG"; fi; \
     if [ -n "$CODEX_NPM_PKG"  ]; then npm install -g "$CODEX_NPM_PKG";  fi; \
     if [ -n "$HERMES_NPM_PKG" ]; then npm install -g "$HERMES_NPM_PKG"; fi; \
-    if [ -n "$HERMES_INSTALL_CMD" ]; then sh -c "$HERMES_INSTALL_CMD"; fi; \
     npm cache clean --force >/dev/null 2>&1 || true
 
 # --- Python virtualenv for the backend (sidesteps PEP 668, mirrors layout) --
 ENV VENV=/opt/venv
 RUN python3 -m venv "$VENV"
-ENV PATH="$VENV/bin:$PATH"
+# /home/app/.local/bin is where a HOME-based Hermes installer drops its launcher
+# shim; keep it on PATH so both an interactive shell AND the backend subprocess
+# (which spawns the agent by bare name) can find `hermes`.
+ENV PATH="$VENV/bin:/home/app/.local/bin:$PATH"
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r /app/backend/requirements.txt
@@ -104,6 +109,17 @@ ENV HOME=/home/app \
     CD_DATA_DIR=/var/lib/coding-dashboard \
     CD_AGENTS_CONFIG_PATH=/etc/coding-dashboard/config.yaml \
     CD_FRONTEND_DIST=/app/frontend/dist
+
+# --- optional HOME-based Hermes installer (runs AS the app user) ------------
+# Unlike the npm globals above, Hermes' own installer drops a venv + launcher
+# shim under the user's HOME (~/.hermes + ~/.local/bin). It must run as the
+# unprivileged `app` user with the final HOME so the files land where the home
+# volume mounts, are owned by app, and are reachable via the ~/.local/bin entry
+# already on PATH. (npm-packaged Hermes goes through HERMES_NPM_PKG above.)
+RUN set -eux; \
+    if [ -n "$HERMES_INSTALL_CMD" ]; then \
+      runuser -u app -- env HOME=/home/app sh -c "$HERMES_INSTALL_CMD"; \
+    fi
 
 WORKDIR /app/backend
 USER app

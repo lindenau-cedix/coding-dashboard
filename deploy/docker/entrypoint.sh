@@ -24,6 +24,21 @@ mkdir -p "$DATA_DIR" "$(dirname "$CONFIG_YAML")" 2>/dev/null || true
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# --- self-heal a home-volume Hermes install --------------------------------
+# claude/codex are global npm installs, but Hermes is typically installed into
+# the home volume by its own installer: a venv under ~/.hermes plus a launcher
+# shim in ~/.local/bin (which is on PATH). Some install/restore paths drop the
+# executable bit on the venv entrypoint, so `hermes` dies with
+#   "cannot execute: Permission denied".
+# Restore +x idempotently on every boot — BEFORE the availability check below
+# so first-boot config and the report both see a working hermes. Runs against
+# whatever the home volume currently holds, so a plain rebuild + restart fixes
+# an already-broken install without re-running the installer.
+hermes_shim="$HOME/.local/bin/hermes"
+hermes_venv_bin="$HOME/.hermes/hermes-agent/venv/bin"
+[[ -e "$hermes_shim" ]] && chmod u+rx "$hermes_shim" 2>/dev/null || true
+[[ -d "$hermes_venv_bin" ]] && chmod -R u+rx "$hermes_venv_bin" 2>/dev/null || true
+
 # --- first-boot config generation ------------------------------------------
 if [[ ! -f "$CONFIG_YAML" ]]; then
   echo "==> First boot: generating $CONFIG_YAML"
@@ -72,5 +87,8 @@ fi
 echo "==> Agents authenticate via interactive login (credentials persist in the home volume):"
 echo "      docker compose exec dashboard claude        # then log in in the TUI"
 echo "      docker compose exec dashboard codex login"
+if have hermes; then
+  echo "      docker compose exec dashboard hermes        # then log in / configure"
+fi
 
 exec "$@"

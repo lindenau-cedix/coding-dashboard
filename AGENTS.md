@@ -5,6 +5,43 @@ Kurz halten, aktuell halten.
 
 ## Letzter Durchlauf
 
+### 2026-06-18 — claude (Docker: Hermes "cannot execute: Permission denied" gefixt)
+
+**Problem:** Im Docker-Container scheiterte `hermes` mit
+`/home/app/.hermes/hermes-agent/venv/bin/hermes: cannot execute: Permission
+denied` (EACCES auf `execve` → fehlendes Exec-Bit am venv-Launcher). Drei
+Ursachen im Docker-Deploy:
+1. `HERMES_INSTALL_CMD` lief in `deploy/docker/Dockerfile` als **root** und VOR
+   `ENV HOME=/home/app` / `USER app` — ein HOME-basierter Installer landete so
+   in `/root/.hermes` statt im app-User-Home, also nie erreichbar.
+2. `/home/app/.local/bin` (wo der Hermes-Launcher-Shim liegt) war **nicht auf
+   PATH** — selbst eine korrekte Installation fand der Backend-Subprozess nicht.
+3. Manche Install-/Volume-Restore-Pfade verlieren das Exec-Bit am venv-Launcher.
+
+**Was getan (alles in `deploy/docker/`):**
+- `Dockerfile`: `HERMES_INSTALL_CMD` aus dem root-npm-`RUN` herausgelöst und
+  nach der User-Anlage als app-User mit korrektem HOME ausgeführt
+  (`runuser -u app -- env HOME=/home/app sh -c "$HERMES_INSTALL_CMD"`).
+  `HERMES_NPM_PKG` bleibt globaler npm-Install (→ `/usr/local/bin`). PATH um
+  `/home/app/.local/bin` erweitert (`ENV PATH=…`), damit Shell UND
+  Backend-Subprozess `hermes` per blossem Namen finden.
+- `entrypoint.sh`: Self-Heal VOR der Verfügbarkeitsprüfung — `chmod u+rx` auf
+  den Shim `~/.local/bin/hermes` und `chmod -R u+rx` auf
+  `~/.hermes/hermes-agent/venv/bin`, idempotent bei jedem Boot. Das Entrypoint
+  liegt im Image (nicht im Volume), daher repariert ein blosses Rebuild +
+  `docker compose up -d` eine bereits kaputte Installation im `cd-home`-Volume,
+  ohne den Installer neu laufen zu lassen. Login-Hinweis um eine Hermes-Zeile
+  ergänzt (nur wenn `hermes` vorhanden).
+- `coding-dashboard.docker.env.example`: Hermes-Installwege (Build-Args vs.
+  manuell ins Home-Volume) dokumentiert, inkl. Hinweis, dass eine vor Hermes
+  generierte `config.yaml` `agents.hermes.enabled: true` braucht (der
+  YAML-`merged.update(spec)`-Pfad in `load_agents_config` behält ein explizites
+  `enabled: false`).
+
+**Wichtig:** Wirksam nach `docker compose build` + `docker compose up -d`.
+Backend bietet Hermes nur an, wenn `agents.hermes.enabled: true` in der
+`config.yaml` im `cd-config`-Volume steht. Noch NICHT committet/gepusht.
+
 ### 2026-06-14 — claude (6 Features: Codex-Output, Fullscreen, AGENTS.md-Refresh, Filebrowser, Parallel-Branches, Agenten-Dashboard)
 
 **Was getan:** Sechs Features geplant und implementiert.
