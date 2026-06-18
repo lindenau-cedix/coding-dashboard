@@ -3,17 +3,26 @@
 #
 # Self-contained alternative to the systemd installer (deploy/install.sh): the
 # whole stack (FastAPI backend + built SPA + claude/codex/hermes CLIs + git)
-# runs in ONE container; all state lives in named volumes. Nothing has to be
-# installed on the host.
+# runs in ONE container. claude + codex state lives in named volumes; Hermes
+# instead REUSES THE HOST's ~/.hermes (bind mount), so its login/data is shared
+# with whatever Hermes you run on the host. See the volumes block below.
+#
+# Because that bind mount keeps the HOST's uid/gid, build the image with a
+# matching app user so the container can read/write your ~/.hermes:
+#   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
+# (Do this at first build — the cd-home volume's ownership is set then too.)
 #
 # Quick start (from the repo root):
 #   cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-#   docker compose build
+#   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
 #   docker compose run --rm dashboard python -m app.cli hash-password 'choose-a-password'   # -> CD_ADMIN_PASSWORD_HASH
 #   openssl rand -hex 32                                                                     # -> CD_SECRET_KEY
 #   # edit deploy/docker/coding-dashboard.docker.env (paste hash + secret + GitHub token)
 #   docker compose up -d
-#   docker compose exec dashboard claude        # log the agents in once (persists in cd-home)
+#   docker compose exec dashboard claude        # claude/codex log in once -> cd-home volume
+#   docker compose exec dashboard codex login   #   "
+#   #   Hermes: log in on the HOST (or `docker compose exec dashboard hermes`);
+#   #   either way it writes to the shared host ~/.hermes.
 #
 # By default the app is published on 127.0.0.1:8000 only — put a TLS reverse
 # proxy in front, or set CD_BIND_ADDR=0.0.0.0 (and CD_HOST_PORT) to expose it.
@@ -28,10 +37,16 @@ services:
         # Same-origin SPA (the backend serves it). For a separately-hosted
         # frontend, bake a public API base instead.
         VITE_API_BASE: ""
-        # Enable Hermes by setting ONE of these (npm package or install command);
-        # both can be passed on the CLI: docker compose build --build-arg HERMES_NPM_PKG=...
+        # Hermes ships enabled by default via its official installer. Override to
+        # pin/swap (HERMES_NPM_PKG=@scope/hermes-cli) or DISABLE it entirely
+        # (HERMES_INSTALL_CMD='' docker compose build).
         HERMES_NPM_PKG: "${HERMES_NPM_PKG:-}"
-        HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-}"
+        HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
+        # Run the container's 'app' user as YOUR uid/gid so the bind-mounted
+        # host ~/.hermes (see volumes) is readable/writable. Defaults to 10001.
+        #   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
+        APP_UID: "${APP_UID:-10001}"
+        APP_GID: "${APP_GID:-10001}"
     image: coding-dashboard:latest
     restart: unless-stopped
     # Secrets + git identity + CORS. Copy the .example first (see header).
@@ -44,7 +59,14 @@ services:
     volumes:
       - cd-data:/var/lib/coding-dashboard   # SQLite DB + cloned project repos
       - cd-config:/etc/coding-dashboard     # generated config.yaml (edit + persists)
-      - cd-home:/home/app                   # agent logins: ~/.claude, ~/.codex, hermes
+      - cd-home:/home/app                   # claude + codex logins: ~/.claude, ~/.codex
+      # Hermes uses the HOST's ~/.hermes directly (shared login/data). This bind
+      # mount nests over the cd-home volume above — the more specific path wins,
+      # so ONLY ~/.hermes comes from the host; ~/.claude / ~/.codex stay in the
+      # volume. Override the host path via CD_HERMES_HOST_DIR. The directory must
+      # exist on the host (Hermes installed there), and the container's app user
+      # must own/match it — see APP_UID/APP_GID above.
+      - "${CD_HERMES_HOST_DIR:-${HOME}/.hermes}:/home/app/.hermes"
 
 volumes:
   cd-data:

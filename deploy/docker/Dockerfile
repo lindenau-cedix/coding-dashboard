@@ -42,19 +42,24 @@ RUN npm run build      # -> /app/frontend/dist
 FROM node:20-bookworm-slim AS runtime
 
 # --- which agent CLIs to bake into the image --------------------------------
-# Each install step is skipped when its arg is empty, and every command is
-# overridable so you can pin versions or swap install methods without editing
-# this file:
-#   docker compose build \
-#     --build-arg HERMES_NPM_PKG=@your-scope/hermes-cli      # enable Hermes via npm
-#   docker compose build \
-#     --build-arg HERMES_INSTALL_CMD='curl -fsSL https://example.com/hermes/install.sh | sh'
-# claude + codex ship enabled by default; hermes is OFF until you set one of
-# the HERMES_* args (matches the "make it optional" deployment choice).
+# All three (claude + codex + hermes) ship enabled by default. Each install
+# step is skipped when its arg is empty, and every command is overridable so
+# you can pin versions, swap install methods, or DISABLE an agent (set its arg
+# to "") without editing this file:
+#   docker compose build --build-arg HERMES_INSTALL_CMD=''     # drop Hermes
+#   docker compose build --build-arg HERMES_NPM_PKG=@your-scope/hermes-cli
+#
+# Hermes ships via its official installer. It runs here as root, so the
+# installer picks the FHS layout: the `hermes` shim lands in /usr/local/bin
+# (on PATH, OUTSIDE the home volume) and the code in /usr/local/lib/hermes-agent
+# — mirroring how claude/codex's npm bins persist in the image. Only Hermes'
+# per-user data/config dir (~/.hermes) lives under $HOME, so at runtime it
+# resolves to /home/app/.hermes and persists in the cd-home volume after the
+# one-time `hermes` login (exactly like ~/.claude and ~/.codex).
 ARG CLAUDE_NPM_PKG="@anthropic-ai/claude-code"
 ARG CODEX_NPM_PKG="@openai/codex"
 ARG HERMES_NPM_PKG=""
-ARG HERMES_INSTALL_CMD=""
+ARG HERMES_INSTALL_CMD="curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
 
 # --- OS packages: Python runtime + git + tini (PID 1 / zombie reaping) ------
 ENV DEBIAN_FRONTEND=noninteractive
