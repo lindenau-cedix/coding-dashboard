@@ -4,6 +4,45 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-18 - claude (Auth off by default; no admin password needed behind a Cloudflare tunnel)
+
+**Task:** Disable auth by default — no `CD_ADMIN_PASSWORD_HASH` required, since
+the deployment sits behind a Cloudflare tunnel.
+
+**Decision:** Auth auto-derives from whether a password hash is configured, with
+an explicit override. A fresh install with no password runs WITHOUT a login
+screen (API + UI open); setting a hash re-enables it automatically.
+
+**What changed:**
+- `backend/app/config.py`: new `require_auth: Optional[bool]` setting
+  (`CD_REQUIRE_AUTH`) + `Settings.auth_enabled` property — `True` iff
+  `require_auth` is set, else `bool(admin_password_hash)`. So default (no hash,
+  no override) ⇒ auth OFF.
+- `backend/app/auth.py`: `get_current_user` and `user_from_token` short-circuit
+  to `settings.admin_username` (no token / credentials needed) when
+  `auth_enabled` is `False`. WS auth uses the same bypass.
+- `backend/app/routers/auth.py`: new **public** `GET /api/auth/status`
+  → `{auth_required: bool}` for the frontend; `POST /api/auth/login` now hands
+  out a token without checking credentials when auth is disabled (so an older
+  frontend still works).
+- Frontend: `api.authStatus()`; `auth.tsx` tracks `authRequired` (probes
+  `/auth/status` on mount, resolves the user from `/me` when auth is off);
+  `App.tsx` `Protected` allows through and `/login` redirects home when
+  `!authRequired`; `Layout.tsx` hides the Logout button when auth is off.
+- Deploy docs/env: `install.sh` now accepts an EMPTY admin password (⇒ auth off,
+  `PASS_HASH=""`); `coding-dashboard.env.example`, the Docker env example,
+  `docker-compose.yml` quick-start, and `README.md` document the off-by-default
+  behavior + `CD_REQUIRE_AUTH` override.
+- Tests: `smoke.py` gains `test_auth_toggle` (auto-derive on/off + explicit
+  override + the `get_current_user` / `user_from_token` bypass), wired into
+  `main()`.
+
+**Verified:** backend `py_compile`, full `smoke.py` (**160 PASS, 0 FAIL** — the
+existing "agents require auth -> 401" path still holds because the suite sets a
+password hash), frontend `npm run typecheck` + `npm run build` all green.
+Effective after `update.sh` / `systemctl restart coding-dashboard` (or a Docker
+rebuild). Not committed/pushed — the dashboard handles that.
+
 ### 2026-06-18 - claude (Docker: run the HOST's Hermes by mirroring it, not relocating it)
 
 **Problem:** With the host `~/.hermes` bind-mounted into the container, Hermes

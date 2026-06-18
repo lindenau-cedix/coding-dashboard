@@ -84,7 +84,11 @@ sudo ./deploy/install.sh
 ```
 
 The installer interactively asks for the admin password, GitHub token, domain,
-and similar settings. It sets up:
+and similar settings. **Leave the admin password empty to run without a login**
+(no auth screen) — intended for deployments behind an authenticating proxy such
+as a Cloudflare tunnel/Access. Setting a password (now or later via
+`CD_ADMIN_PASSWORD_HASH`) re-enables the login automatically;
+`CD_REQUIRE_AUTH=true|false` is an explicit override. It sets up:
 
 - Code under `/opt/coding-dashboard`
 - venv + dependencies, frontend build
@@ -373,7 +377,10 @@ cd backend && .venv/bin/python tests/smoke.py
 ## Security
 
 - **Single-user login** (password -> JWT, pbkdf2 hash). Secrets live in
-  `.../coding-dashboard.env` (`chmod 640`).
+  `.../coding-dashboard.env` (`chmod 640`). Auth is **off by default** (no
+  `CD_ADMIN_PASSWORD_HASH`): the API and UI are open, meant for use behind an
+  authenticating proxy (e.g. a Cloudflare tunnel/Access). Set a password hash to
+  require login, or force it either way with `CD_REQUIRE_AUTH=true|false`.
 - The GitHub token is **never** written to `.git/config` - it is injected only as
   an auth header per network operation.
 - Agents run autonomously (Claude with `--dangerously-skip-permissions`, Hermes

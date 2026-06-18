@@ -11,9 +11,22 @@ from ..security import create_access_token
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+@router.get("/status")
+def auth_status() -> dict:
+    """Public: tells the frontend whether a login is required at all."""
+    return {"auth_required": get_settings().auth_enabled}
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest) -> TokenResponse:
     settings = get_settings()
+    if not settings.auth_enabled:
+        # Auth disabled -> hand out a token for the admin user without checking
+        # credentials, so an older frontend that still posts /login keeps working.
+        return TokenResponse(
+            access_token=create_access_token(settings.admin_username),
+            username=settings.admin_username,
+        )
     if not settings.admin_password_hash:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

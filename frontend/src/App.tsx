@@ -16,19 +16,27 @@ function Splash() {
 }
 
 function Protected() {
-  const { token, ready } = useAuth();
+  const { token, ready, authRequired } = useAuth();
   if (!ready) return <Splash />;
-  if (!token) return <Navigate to="/login" replace />;
+  if (authRequired && !token) return <Navigate to="/login" replace />;
   return <Layout />;
 }
 
 export default function App() {
-  const { token, ready } = useAuth();
+  const { token, ready, authRequired } = useAuth();
   return (
     <Routes>
       <Route
         path="/login"
-        element={!ready ? <Splash /> : token ? <Navigate to="/" replace /> : <Login />}
+        element={
+          !ready ? (
+            <Splash />
+          ) : token || !authRequired ? (
+            <Navigate to="/" replace />
+          ) : (
+            <Login />
+          )
+        }
       />
       <Route element={<Protected />}>
         <Route path="/" element={<Projects />} />

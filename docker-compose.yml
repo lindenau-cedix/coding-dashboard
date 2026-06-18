@@ -32,9 +32,10 @@
 # Quick start (from the repo root):
 #   cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
 #   APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) HERMES_HOST_HOME=$HOME docker compose build
-#   docker compose run --rm dashboard python -m app.cli hash-password 'choose-a-password'   # -> CD_ADMIN_PASSWORD_HASH
 #   openssl rand -hex 32                                                                     # -> CD_SECRET_KEY
-#   # edit deploy/docker/coding-dashboard.docker.env (paste hash + secret + GitHub token)
+#   # Auth is OFF by default (e.g. behind a Cloudflare tunnel). To require a login, also run:
+#   docker compose run --rm dashboard python -m app.cli hash-password 'choose-a-password'   # -> CD_ADMIN_PASSWORD_HASH
+#   # edit deploy/docker/coding-dashboard.docker.env (paste secret + GitHub token; password hash optional)
 #   docker compose up -d
 #   docker compose exec dashboard claude        # claude + codex log in once -> cd-home volume
 #   docker compose exec dashboard codex login   #   "
