@@ -4,6 +4,35 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-18 - claude (Docker: ~/.hermes owned by 'node' instead of 'app' -> Permission denied)
+
+**Problem:** In the Docker deployment `~/.hermes` ended up owned by `node` rather
+than `app`, so Hermes failed with *Permission denied*. Root cause: the
+`node:20-bookworm-slim` base image ships a `node` user/group at **UID/GID 1000**
+— the most common host UID. That collides with the documented build workflow
+`APP_UID=$(id -u) APP_GID=$(id -g) docker compose build` both ways:
+- With `APP_UID=1000`, `groupadd -g 1000 app` / `useradd -u 1000` failed
+  ("GID/UID already exists") because `node` already held 1000 -> the build aborted.
+- Without the override (default 10001), the bind-mounted host `~/.hermes`
+  (host uid 1000) showed up inside the container as owned by `node`, and the
+  `app` user (10001) could not read/write it -> Permission denied.
+
+**What changed in `deploy/docker/`:**
+- `Dockerfile`: the `app` user-creation step now removes the base image's `node`
+  user/group first (`userdel -r node` / `groupdel node`, both best-effort) before
+  `groupadd -o`/`useradd -o app`. The `-o` flags keep creation tolerant of any
+  other pre-existing id collision. Result: `APP_UID=$(id -u)=1000` now builds
+  cleanly and the bind-mounted host `~/.hermes` is owned by `app`, not `node`.
+  Verified against `node:20-bookworm-slim` for both `APP_UID=1000` and `10001`:
+  the app user is created and owns `~/.hermes` at the requested uid in each case.
+- `coding-dashboard.docker.env.example`: documented the node-UID collision and
+  that you must build with `APP_UID/APP_GID=$(id -u)/$(id -g)` so `app` owns the
+  bind-mounted host `~/.hermes`.
+
+**Important:** Effective after `docker compose build` (rebuild required) +
+`docker compose up -d`. Build with `APP_UID=$(id -u) APP_GID=$(id -g)` so the
+container's `app` user matches the host owner of `~/.hermes`.
+
 ### 2026-06-18 - claude (Docker: Hermes "cannot execute: Permission denied" fixed)
 
 **Problem:** In the Docker container, `hermes` failed with

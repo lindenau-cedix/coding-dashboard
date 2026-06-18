@@ -100,12 +100,24 @@ RUN chmod +x /usr/local/bin/cd-entrypoint
 # claude's --dangerously-skip-permissions (and good hygiene) refuse to run as
 # root, so the service runs as an unprivileged user. Its $HOME is a real dir we
 # mount a volume onto so agent logins persist across container restarts.
+#
+# The node:20 base image ships a 'node' user/group at UID/GID 1000 — which is
+# the most common host UID. That collision bites the bind-mounted host ~/.hermes
+# both ways: building with APP_UID=$(id -u)=1000 (as the docs recommend) makes
+# `groupadd`/`useradd` fail ("GID/UID already exists"), and leaving the default
+# means the host-owned ~/.hermes (uid 1000) shows up as owned by 'node' inside
+# the container, so the 'app' user (10001) can't read it -> Permission denied.
+# Drop the 'node' user/group first so 'app' can take any requested id; -o keeps
+# user creation tolerant of any other pre-existing id collision.
 ARG APP_UID=10001
 ARG APP_GID=10001
-RUN groupadd -g "$APP_GID" app \
- && useradd -m -u "$APP_UID" -g "$APP_GID" -s /bin/bash app \
- && mkdir -p /var/lib/coding-dashboard /etc/coding-dashboard \
- && chown -R app:app /var/lib/coding-dashboard /etc/coding-dashboard /app /home/app
+RUN set -eux; \
+    userdel -r node 2>/dev/null || true; \
+    groupdel node 2>/dev/null || true; \
+    groupadd -o -g "$APP_GID" app; \
+    useradd -o -m -u "$APP_UID" -g "$APP_GID" -s /bin/bash app; \
+    mkdir -p /var/lib/coding-dashboard /etc/coding-dashboard; \
+    chown -R app:app /var/lib/coding-dashboard /etc/coding-dashboard /app /home/app
 
 # --- runtime configuration (paths are fixed; secrets come from env_file) ----
 ENV HOME=/home/app \
