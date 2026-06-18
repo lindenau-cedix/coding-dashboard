@@ -4,6 +4,29 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-18 - codex (Docker: default app UID now matches host ~/.hermes)
+
+**Problem:** Even after removing the base image's `node` user, a plain
+`docker compose build` still created `app` as UID/GID `10001` because the Docker
+build args defaulted to `10001`. The default Hermes bind mount points at the
+host's `~/.hermes`, which is commonly owned by UID/GID `1000`, so inside the
+container it appeared as numeric `1000:1000` instead of `app:app` and Hermes
+could not access it.
+
+**What changed in `deploy/docker/`:**
+- `Dockerfile`: `APP_UID` / `APP_GID` now default to `1000`, relying on the
+  existing `node` user/group removal so `app` can safely take the common host
+  UID/GID. Hosts with different owners can still override the build args.
+- `docker-compose.yml`: build-arg defaults now pass `1000:1000` instead of
+  `10001:10001`, so `docker compose build` fixes the screenshot's `~/.hermes`
+  owner mismatch for the common Linux setup.
+- `coding-dashboard.docker.env.example` and `README.md`: updated Docker docs to
+  explain the new default and when to use `APP_UID=$(id -u) APP_GID=$(id -g)`.
+
+**Important:** Effective after rebuilding the image (`docker compose build` or
+`docker compose up -d --build`). If the host `~/.hermes` is not owned by
+`1000:1000`, rebuild with matching `APP_UID` / `APP_GID`.
+
 ### 2026-06-18 - claude (Docker: ~/.hermes owned by 'node' instead of 'app' -> Permission denied)
 
 **Problem:** In the Docker deployment `~/.hermes` ended up owned by `node` rather
@@ -487,16 +510,18 @@ lives at `/etc/coding-dashboard/config.yaml`; data (SQLite + cloned repos) under
 Alternatively, **Docker Compose** (`docker-compose.yml` + `deploy/docker/`): one
 self-contained container - uvicorn serves API + WS + the built SPA (no nginx inside),
 with the agent CLIs baked in (claude + codex + hermes by default - hermes via its
-official installer, which under the root build picks the FHS layout so its `hermes`
-shim lands on `/usr/local/bin` outside the home volume; override / disable via the
-`HERMES_NPM_PKG` / `HERMES_INSTALL_CMD` build args). Runs as non-root `app`; state in
+official HOME-based installer as `app`, placing the shim under `/home/app/.local/bin`
+and the venv under `/home/app/.hermes`; override / disable via the `HERMES_NPM_PKG` /
+`HERMES_INSTALL_CMD` build args). Runs as non-root `app`; state in
 named volumes (`cd-data` = DB + repos, `cd-config` = config.yaml, `cd-home` = claude
 + codex logins `~/.claude` / `~/.codex`). **Hermes is the exception: `~/.hermes` is a
 bind mount of the *host's* `~/.hermes`** (overridable via `CD_HERMES_HOST_DIR`),
 nested over the `cd-home` volume so only that subdir comes from the host - so Hermes
 shares its login / data with the host. Because bind mounts keep host uid/gid, the
-image takes `APP_UID` / `APP_GID` build args (set them to `$(id -u)` / `$(id -g)` at
-build so `app` can read the host dir). Auth is **interactive login only**
+image defaults `APP_UID` / `APP_GID` to `1000:1000` (safe because the Dockerfile
+removes the base `node` user/group first); override those build args to
+`$(id -u)` / `$(id -g)` when the host Hermes dir has a different owner. Auth is
+**interactive login only**
 (`docker compose exec dashboard claude`), no API keys on disk. `deploy/docker/entrypoint.sh`
 generates `config.yaml` on first boot from `default_agents()`, enabling only the CLIs
 found on `PATH` (so a missing agent is not a dead UI entry). Secrets via

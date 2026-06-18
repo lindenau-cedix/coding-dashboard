@@ -128,8 +128,9 @@ backend (uvicorn - also serves the SPA **and** WebSockets), the agent CLIs
 State (SQLite DB, cloned repos), the generated `config.yaml`, and the
 **Claude/Codex logins** live in **named volumes**. **Hermes** uses the host's
 `~/.hermes` instead (bind mount), so it shares login/data with a host Hermes
-installation. Since bind mounts keep the host uid/gid, build the image with a
-matching app user:
+installation. Bind mounts keep the host uid/gid; the Docker defaults create
+`app` as UID/GID 1000, matching the common first-user setup. If your host
+`~/.hermes` has a different owner, build the image with matching ids:
 
 ```bash
 APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
@@ -139,7 +140,7 @@ APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
 
 ```bash
 cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
+docker compose build
 # Generate secrets (image must already be built) and put them into the .env file:
 docker compose run --rm dashboard python -m app.cli hash-password 'YOUR-PASSWORD'  # -> CD_ADMIN_PASSWORD_HASH
 openssl rand -hex 32                                                               # -> CD_SECRET_KEY
@@ -157,7 +158,8 @@ docker compose exec dashboard hermes        # writes to host ~/.hermes (or log i
 ```
 
 You can override the host path with `CD_HERMES_HOST_DIR` (default `~/.hermes`);
-the directory must exist on the host and belong to the `APP_UID`/`APP_GID` user.
+the directory must exist on the host and belong to the image's `app` UID/GID
+(default `1000:1000`, or your `APP_UID`/`APP_GID` override).
 
 **Reachability:** by default the service listens only on `127.0.0.1:8000`. For LAN
 or public access, place a TLS reverse proxy in front of it (recommended, especially
@@ -168,12 +170,12 @@ CD_BIND_ADDR=0.0.0.0 CD_HOST_PORT=8080 docker compose up -d
 ```
 
 **Hermes** is preinstalled by default via its official install script
-(`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`). Since the
-build runs as root, the installer picks the FHS layout: the `hermes` shim ends up
-in `/usr/local/bin` (on PATH), and the code is stored in `/usr/local/lib/hermes-agent`.
-Its data/config directory `~/.hermes` is, unlike `~/.claude`/`~/.codex`, not kept in
-the volume but mounted as a **bind mount from the host** (see above) - login/data are
-therefore shared with the host. To **pin, replace, or disable** it:
+(`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`). The
+installer runs as the image's `app` user, so its launcher goes under
+`/home/app/.local/bin` (on PATH) and its venv under `/home/app/.hermes`. At runtime
+that `~/.hermes` path is mounted from the host (see above), so login/data are shared
+with the host and the container `app` UID/GID must match the host owner. To **pin,
+replace, or disable** it:
 
 ```bash
 # Omit Hermes entirely:
