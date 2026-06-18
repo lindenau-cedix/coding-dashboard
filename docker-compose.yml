@@ -1,0 +1,52 @@
+# =============================================================================
+# Coding Dashboard — Docker Compose deployment
+#
+# Self-contained alternative to the systemd installer (deploy/install.sh): the
+# whole stack (FastAPI backend + built SPA + claude/codex/hermes CLIs + git)
+# runs in ONE container; all state lives in named volumes. Nothing has to be
+# installed on the host.
+#
+# Quick start (from the repo root):
+#   cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
+#   docker compose build
+#   docker compose run --rm dashboard python -m app.cli hash-password 'choose-a-password'   # -> CD_ADMIN_PASSWORD_HASH
+#   openssl rand -hex 32                                                                     # -> CD_SECRET_KEY
+#   # edit deploy/docker/coding-dashboard.docker.env (paste hash + secret + GitHub token)
+#   docker compose up -d
+#   docker compose exec dashboard claude        # log the agents in once (persists in cd-home)
+#
+# By default the app is published on 127.0.0.1:8000 only — put a TLS reverse
+# proxy in front, or set CD_BIND_ADDR=0.0.0.0 (and CD_HOST_PORT) to expose it.
+# =============================================================================
+
+services:
+  dashboard:
+    build:
+      context: .
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        # Same-origin SPA (the backend serves it). For a separately-hosted
+        # frontend, bake a public API base instead.
+        VITE_API_BASE: ""
+        # Enable Hermes by setting ONE of these (npm package or install command);
+        # both can be passed on the CLI: docker compose build --build-arg HERMES_NPM_PKG=...
+        HERMES_NPM_PKG: "${HERMES_NPM_PKG:-}"
+        HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-}"
+    image: coding-dashboard:latest
+    restart: unless-stopped
+    # Secrets + git identity + CORS. Copy the .example first (see header).
+    env_file:
+      - deploy/docker/coding-dashboard.docker.env
+    ports:
+      # host -> container. Defaults to localhost-only; override via env:
+      #   CD_BIND_ADDR=0.0.0.0 CD_HOST_PORT=8080 docker compose up -d
+      - "${CD_BIND_ADDR:-127.0.0.1}:${CD_HOST_PORT:-8000}:8000"
+    volumes:
+      - cd-data:/var/lib/coding-dashboard   # SQLite DB + cloned project repos
+      - cd-config:/etc/coding-dashboard     # generated config.yaml (edit + persists)
+      - cd-home:/home/app                   # agent logins: ~/.claude, ~/.codex, hermes
+
+volumes:
+  cd-data:
+  cd-config:
+  cd-home:
