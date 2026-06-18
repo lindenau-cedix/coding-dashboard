@@ -42,22 +42,19 @@ RUN npm run build      # -> /app/frontend/dist
 FROM node:20-bookworm-slim AS runtime
 
 # --- which agent CLIs to bake into the image --------------------------------
-# All three (claude + codex + hermes) ship enabled by default. Each install
-# step is skipped when its arg is empty, and every command is overridable so
-# you can pin versions, swap install methods, or DISABLE an agent (set its arg
-# to "") without editing this file:
-#   docker compose build --build-arg HERMES_INSTALL_CMD=''     # drop Hermes
-#   docker compose build --build-arg HERMES_NPM_PKG=@your-scope/hermes-cli
+# Claude + Codex are installed here via npm (-> /usr/local/bin, on PATH). Each
+# step is skipped when its arg is empty and is overridable to pin/swap versions.
 #
-# Hermes ships via its official HOME-based installer by default. It is run
-# later as the app user, so the launcher lands in /home/app/.local/bin and the
-# venv under /home/app/.hermes. docker-compose.yml bind-mounts the host
-# ~/.hermes over that path at runtime so Hermes can reuse the host login/data.
-# Use HERMES_NPM_PKG instead when you want a global npm install in /usr/local.
+# Hermes is NOT installed into the image by default. The default deployment runs
+# the HOST's Hermes via runtime bind mounts (see docker-compose.yml): a venv is
+# not relocatable, so reusing the host's login/data means reusing the host's
+# install, mirrored into the container. Set HERMES_INSTALL_CMD / HERMES_NPM_PKG
+# only if you want a SELF-CONTAINED in-image Hermes instead of the host's:
+#   docker compose build --build-arg HERMES_NPM_PKG=@your-scope/hermes-cli
 ARG CLAUDE_NPM_PKG="@anthropic-ai/claude-code"
 ARG CODEX_NPM_PKG="@openai/codex"
 ARG HERMES_NPM_PKG=""
-ARG HERMES_INSTALL_CMD="curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+ARG HERMES_INSTALL_CMD=""
 
 # --- OS packages: Python runtime + git + tini (PID 1 / zombie reaping) ------
 ENV DEBIAN_FRONTEND=noninteractive
@@ -94,28 +91,44 @@ COPY deploy/docker/entrypoint.sh /usr/local/bin/cd-entrypoint
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
 RUN chmod +x /usr/local/bin/cd-entrypoint
 
-# --- non-root user ----------------------------------------------------------
+# --- non-root user + host-Hermes mirroring ----------------------------------
 # claude's --dangerously-skip-permissions (and good hygiene) refuse to run as
-# root, so the service runs as an unprivileged user. Its $HOME is a real dir we
-# mount a volume onto so agent logins persist across container restarts.
+# root, so the service runs as an unprivileged user. Its $HOME is /home/app, the
+# mount point of the cd-home volume, so agent logins persist across restarts.
 #
-# The node:20 base image ships a 'node' user/group at UID/GID 1000 — which is
-# the most common host UID. That collision bites the bind-mounted host ~/.hermes
-# both ways: building with APP_UID=$(id -u)=1000 (as the docs recommend) makes
-# `groupadd`/`useradd` fail ("GID/UID already exists"). Drop the 'node'
-# user/group first so 'app' can take UID/GID 1000 by default, matching the
-# common host owner of the bind-mounted ~/.hermes. -o keeps user creation
-# tolerant of any other pre-existing id collision. Override APP_UID/APP_GID for
-# hosts whose ~/.hermes is owned by a different uid/gid.
+# UID/GID should match the owner of the host ~/.hermes that is bind-mounted at
+# runtime (see docker-compose.yml), so files Hermes writes into that shared dir
+# stay owned by the host user. Keep it stable across rebuilds — a change orphans
+# the once-chowned cd-home volume (e.g. ~/.cache: Permission denied). -o + the
+# best-effort drop of the node:20 base image's 'node' user/group (UID/GID 1000)
+# keep the build tolerant of an id collision when APP_UID is set to 1000.
+#
+# HERMES_HOST_HOME is the home dir of that host user (e.g. /home/debian) — the
+# absolute path baked into the host Hermes venv launcher's shebang and into the
+# venv's link to the uv-managed Python. We can't relocate a venv, so we symlink
+# that path to /home/app: with the host ~/.hermes and ~/.local/share/uv mounted
+# under /home/app at runtime, the venv's hardcoded /home/<host>/... paths resolve.
 ARG APP_UID=1000
 ARG APP_GID=1000
+ARG HERMES_HOST_HOME=/home/debian
 RUN set -eux; \
     userdel -r node 2>/dev/null || true; \
     groupdel node 2>/dev/null || true; \
     groupadd -o -g "$APP_GID" app; \
     useradd -o -m -u "$APP_UID" -g "$APP_GID" -s /bin/bash app; \
-    mkdir -p /var/lib/coding-dashboard /etc/coding-dashboard; \
-    chown -R app:app /var/lib/coding-dashboard /etc/coding-dashboard /app /home/app
+    mkdir -p /var/lib/coding-dashboard /etc/coding-dashboard \
+             /home/app/.local/bin /home/app/.local/share; \
+    chown -R app:app /var/lib/coding-dashboard /etc/coding-dashboard /app /home/app; \
+    # Mirror the host home path so the host venv's absolute shebang/links resolve.
+    if [ "$HERMES_HOST_HOME" != "/home/app" ] && [ ! -e "$HERMES_HOST_HOME" ]; then \
+      mkdir -p "$(dirname "$HERMES_HOST_HOME")"; \
+      ln -s /home/app "$HERMES_HOST_HOME"; \
+    fi; \
+    # `hermes` on PATH: a shim that execs the (host-mounted) venv launcher, same
+    # as the host installer's ~/.local/bin/hermes. Resolves via $HOME=/home/app.
+    printf '#!/usr/bin/env bash\nunset PYTHONPATH\nunset PYTHONHOME\nexec "$HOME/.hermes/hermes-agent/venv/bin/hermes" "$@"\n' \
+      > /usr/local/bin/hermes; \
+    chmod +x /usr/local/bin/hermes
 
 # --- runtime configuration (paths are fixed; secrets come from env_file) ----
 ENV HOME=/home/app \
@@ -125,12 +138,14 @@ ENV HOME=/home/app \
     CD_AGENTS_CONFIG_PATH=/etc/coding-dashboard/config.yaml \
     CD_FRONTEND_DIST=/app/frontend/dist
 
-# --- optional HOME-based Hermes installer (runs AS the app user) ------------
-# Unlike the npm globals above, Hermes' own installer drops a venv + launcher
-# shim under the user's HOME (~/.hermes + ~/.local/bin). It must run as the
-# unprivileged `app` user with the final HOME so the files land where the home
-# volume mounts, are owned by app, and are reachable via the ~/.local/bin entry
-# already on PATH. (npm-packaged Hermes goes through HERMES_NPM_PKG above.)
+# --- optional in-image Hermes install (runs AS the app user) ----------------
+# OFF by default: the default deployment runs the HOST's Hermes via the runtime
+# bind mounts (see docker-compose.yml + the symlink above), so installing Hermes
+# here would just be shadowed by that mount. Set HERMES_INSTALL_CMD (or
+# HERMES_NPM_PKG) only for a SELF-CONTAINED Hermes instead of the host's; the
+# HOME-based installer must run as `app` with the final HOME so its venv's
+# interpreter paths point inside this container (a venv is not relocatable) and
+# its ~/.local/bin shim is on PATH. It seeds into cd-home on first boot.
 RUN set -eux; \
     if [ -n "$HERMES_INSTALL_CMD" ]; then \
       runuser -u app -- env HOME=/home/app sh -c "$HERMES_INSTALL_CMD"; \

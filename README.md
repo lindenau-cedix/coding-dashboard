@@ -123,24 +123,32 @@ sudo ./deploy/uninstall.sh    # remove
 ## Docker Compose alternative - everything in one container
 
 Instead of the systemd installer, the whole stack can run as **one container**:
-backend (uvicorn - also serves the SPA **and** WebSockets), the agent CLIs
-(**Claude**, **Codex**, and **Hermes** preinstalled), and git - everything inside.
-State (SQLite DB, cloned repos), the generated `config.yaml`, and the
-**Claude/Codex logins** live in **named volumes**. **Hermes** uses the host's
-`~/.hermes` instead (bind mount), so it shares login/data with a host Hermes
-installation. Bind mounts keep the host uid/gid; the Docker defaults create
-`app` as UID/GID 1000, matching the common first-user setup. If your host
-`~/.hermes` has a different owner, build the image with matching ids:
+backend (uvicorn - also serves the SPA **and** WebSockets), the **Claude** +
+**Codex** CLIs, and git - everything inside. State (SQLite DB, cloned repos), the
+generated `config.yaml`, and the **Claude/Codex logins** live in **named
+volumes**.
 
-```bash
-APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
-```
+**Hermes** is the exception: rather than installing a second copy, the container
+**runs the host's Hermes**. Hermes (the official git/uv installer) is a Python
+venv whose launcher hardcodes absolute paths - its dir under `~/.hermes` *and*
+the uv-managed Python under `~/.local/share/uv` - and a venv is not relocatable.
+So the container reproduces those paths: it bind-mounts the host `~/.hermes`
+(read-write) and `~/.local/share/uv` (read-only), and the image symlinks the host
+user's home (`HERMES_HOST_HOME`, e.g. `/home/debian`) to `/home/app` so the
+hardcoded paths resolve. Hermes' login/config/memory are shared with the host.
+
+Because the host `~/.hermes` is bind-mounted, **build the image matched to the
+dest host**: set `HERMES_HOST_HOME` to the home of the user that owns `~/.hermes`,
+and `APP_UID`/`APP_GID` to that user's uid/gid (so files Hermes writes stay
+host-owned). Keep `APP_UID` stable across rebuilds, or the once-chowned `cd-home`
+volume is orphaned.
 
 **Quick start** (from the repo root, with Docker + Compose plugin installed):
 
 ```bash
 cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-docker compose build
+# Build matched to this host's Hermes owner (run as the user that owns ~/.hermes):
+APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) HERMES_HOST_HOME=$HOME docker compose build
 # Generate secrets (image must already be built) and put them into the .env file:
 docker compose run --rm dashboard python -m app.cli hash-password 'YOUR-PASSWORD'  # -> CD_ADMIN_PASSWORD_HASH
 openssl rand -hex 32                                                               # -> CD_SECRET_KEY
@@ -148,18 +156,13 @@ openssl rand -hex 32                                                            
 docker compose up -d
 ```
 
-**Agent login** - one-time only; no API keys are written to files.
-Claude/Codex stay in the `cd-home` volume, Hermes writes to the shared host `~/.hermes`:
+**Agent login** - Claude + Codex log in once (no API keys on disk), persisting in
+the `cd-home` volume. Hermes needs no login here - it uses the host's `~/.hermes`:
 
 ```bash
 docker compose exec dashboard claude        # log in via TUI -> cd-home
 docker compose exec dashboard codex login   #   "
-docker compose exec dashboard hermes        # writes to host ~/.hermes (or log in on the host)
 ```
-
-You can override the host path with `CD_HERMES_HOST_DIR` (default `~/.hermes`);
-the directory must exist on the host and belong to the image's `app` UID/GID
-(default `1000:1000`, or your `APP_UID`/`APP_GID` override).
 
 **Reachability:** by default the service listens only on `127.0.0.1:8000`. For LAN
 or public access, place a TLS reverse proxy in front of it (recommended, especially
@@ -169,21 +172,49 @@ for the Android app) or change the bind address:
 CD_BIND_ADDR=0.0.0.0 CD_HOST_PORT=8080 docker compose up -d
 ```
 
-**Hermes** is preinstalled by default via its official install script
-(`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`). The
-installer runs as the image's `app` user, so its launcher goes under
-`/home/app/.local/bin` (on PATH) and its venv under `/home/app/.hermes`. At runtime
-that `~/.hermes` path is mounted from the host (see above), so login/data are shared
-with the host and the container `app` UID/GID must match the host owner. To **pin,
-replace, or disable** it:
+**Hermes** runs the host's install via the bind mounts described above - no
+in-image install by default. The host must therefore have Hermes installed, and
+the build args must match it:
+
+| Build arg | Meaning | Default |
+|---|---|---|
+| `HERMES_HOST_HOME` | Home dir of the user that owns `~/.hermes` (the path baked into the venv launcher) | `/home/debian` |
+| `APP_UID` / `APP_GID` | uid/gid of that user (keep stable across rebuilds) | `1000` |
+| `CD_HERMES_HOST_DIR` | Host source for `~/.hermes` | `$HOME/.hermes` |
+| `CD_HERMES_UV_DIR` | Host source for the uv-managed Python | `$HOME/.local/share/uv` |
+
+To instead ship a **self-contained** in-image Hermes (no host coupling; log in
+with `docker compose exec dashboard hermes`), set its installer and drop the host
+mounts from `docker-compose.yml`:
 
 ```bash
-# Omit Hermes entirely:
-HERMES_INSTALL_CMD='' docker compose build
-# Or use an npm package instead of the install script:
+# Self-contained Hermes via its official installer (built as the app user):
+docker compose build --build-arg HERMES_INSTALL_CMD='curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash'
+# Or via an npm package:
 docker compose build --build-arg HERMES_NPM_PKG=@your-scope/hermes-cli
 docker compose up -d
 ```
+
+### Deploy on the dest server
+
+Run as the user that owns `~/.hermes` (so the build auto-matches its uid and home),
+from the repo root. After a `git pull` that changed the Hermes build args, recreate
+the `cd-home` volume once so it re-seeds with the correct ownership:
+
+```bash
+git pull                                      # get these changes
+APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) HERMES_HOST_HOME=$HOME docker compose build
+docker compose down
+docker volume ls | grep cd-home               # confirm the exact volume name
+docker volume rm coding-dashboard_cd-home     # recreate the orphaned home vol (clears ONLY claude/codex logins)
+docker compose up -d
+docker compose exec dashboard hermes --version   # expect: Hermes Agent v0.16.0
+```
+
+`cd-data` (DB + repos) and `cd-config` (`config.yaml`) are untouched; you only
+re-login Claude/Codex (`docker compose exec dashboard claude` / `codex login`).
+The volume prefix follows the Compose project name (the repo dir) — use the name
+shown by `docker volume ls` if it isn't `coding-dashboard_cd-home`.
 
 On the **first start**, the container automatically detects which agent CLIs are
 available and enables only those in `config.yaml` (in the `cd-config` volume).
@@ -201,10 +232,12 @@ docker compose down             # stop; volumes (data/logins) remain
 docker compose down -v          # WARNING: deletes the volumes too (DB, repos, logins)
 ```
 
-**"Nothing leaves the container":** except GitHub pushes and the agent API calls
-(Anthropic/OpenAI/...) - both required by the feature - everything remains in the
-volumes `cd-data` (DB + repos), `cd-config` (`config.yaml`), and `cd-home` (agent
-logins).
+**State location:** except GitHub pushes and the agent API calls
+(Anthropic/OpenAI/...) - both required by the feature - dashboard state stays in
+the volumes `cd-data` (DB + repos), `cd-config` (`config.yaml`), and `cd-home`
+(Claude/Codex logins). Hermes is the one cross-boundary piece by design: it reads
+and writes the **host's** `~/.hermes` (the bind mount), so its login/memory are
+shared with the host rather than confined to a volume.
 
 ---
 

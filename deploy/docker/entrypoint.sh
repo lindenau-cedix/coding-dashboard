@@ -84,10 +84,10 @@ done
 if [[ $any_agent -eq 0 ]]; then
   echo "WARN: no agent CLI found in the image — rebuild with the *_NPM_PKG build args." >&2
 fi
-echo "==> Agents authenticate via interactive login (credentials persist in the home volume):"
+echo "==> Claude + Codex authenticate via interactive login (credentials persist in the cd-home volume):"
 echo "      docker compose exec dashboard claude        # then log in in the TUI"
 echo "      docker compose exec dashboard codex login"
-echo "      docker compose exec dashboard hermes        # log in; data persists in ~/.hermes"
+echo "==> Hermes runs the HOST's install (host ~/.hermes is bind-mounted) — no login needed here."
 
 
 exec "$@"
