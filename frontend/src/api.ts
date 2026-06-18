@@ -160,6 +160,8 @@ export const api = {
       password,
     }),
   me: () => request<{ username: string }>("GET", "/auth/me"),
+  authStatus: () =>
+    request<{ auth_required: boolean }>("GET", "/auth/status"),
   agents: () => request<Agent[]>("GET", "/agents"),
 
   listProjects: () => request<Project[]>("GET", "/projects"),

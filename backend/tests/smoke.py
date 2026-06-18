@@ -89,6 +89,47 @@ def test_security() -> None:
     check("password wrong rejected", not verify_password("nope", PASSWORD_HASH))
 
 
+def test_auth_toggle() -> None:
+    """auth_enabled auto-derives from the password hash; CD_REQUIRE_AUTH overrides."""
+    from app import auth as auth_mod
+    from app.config import get_settings
+
+    def settings_with(**env):
+        for k in ("CD_REQUIRE_AUTH", "CD_ADMIN_PASSWORD_HASH"):
+            os.environ.pop(k, None)
+        os.environ.update(env)
+        get_settings.cache_clear()
+        return get_settings()
+
+    try:
+        # No password, no override -> auth OFF (default for a fresh install).
+        s = settings_with()
+        check("auth off without password", s.auth_enabled is False)
+        check(
+            "get_current_user bypassed when off",
+            auth_mod.get_current_user(None) == s.admin_username,
+        )
+        check(
+            "ws auth bypassed when off",
+            auth_mod.user_from_token(None) == s.admin_username,
+        )
+
+        # Password present -> auth ON automatically.
+        s = settings_with(CD_ADMIN_PASSWORD_HASH=PASSWORD_HASH)
+        check("auth on with password", s.auth_enabled is True)
+
+        # Explicit override wins both ways.
+        s = settings_with(CD_REQUIRE_AUTH="false", CD_ADMIN_PASSWORD_HASH=PASSWORD_HASH)
+        check("CD_REQUIRE_AUTH=false forces off", s.auth_enabled is False)
+        s = settings_with(CD_REQUIRE_AUTH="true")
+        check("CD_REQUIRE_AUTH=true forces on", s.auth_enabled is True)
+    finally:
+        # Restore the auth-on environment the rest of the suite relies on.
+        os.environ.pop("CD_REQUIRE_AUTH", None)
+        os.environ["CD_ADMIN_PASSWORD_HASH"] = PASSWORD_HASH
+        get_settings.cache_clear()
+
+
 def test_parser() -> None:
     p = _ClaudeJSONParser()
     out = ""
@@ -1051,6 +1092,7 @@ def test_session_workdir_resolution() -> None:
 def main() -> int:
     try:
         test_security()
+        test_auth_toggle()
         test_parser()
         test_codex_parser()
         test_command_building()

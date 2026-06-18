@@ -2,7 +2,7 @@ import { Link, Outlet } from "react-router-dom";
 import { useAuth } from "../auth";
 
 export default function Layout() {
-  const { username, logout } = useAuth();
+  const { username, logout, authRequired } = useAuth();
   return (
     <div className="flex min-h-full flex-col">
       <header className="safe-top sticky top-0 z-10 border-b border-slate-800 bg-slate-900/80 backdrop-blur">
@@ -13,12 +13,14 @@ export default function Layout() {
           </Link>
           <div className="flex items-center gap-3 text-sm text-slate-400">
             {username && <span className="hidden sm:inline">{username}</span>}
-            <button
-              onClick={logout}
-              className="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800"
-            >
-              Logout
-            </button>
+            {authRequired && (
+              <button
+                onClick={logout}
+                className="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800"
+              >
+                Logout
+              </button>
+            )}
           </div>
         </div>
       </header>

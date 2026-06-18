@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     admin_username: str = "admin"
     # bcrypt-free pbkdf2 hash produced by `python -m app.cli hash-password`.
     admin_password_hash: str = ""
+    # Whether API auth (login + Bearer token) is enforced. ``None`` (default)
+    # auto-derives it: auth is ON only when an ``admin_password_hash`` is set,
+    # so a fresh install with no password runs WITHOUT auth -- intended for
+    # deployments fronted by an authenticating proxy (e.g. a Cloudflare tunnel /
+    # Access). Set ``CD_REQUIRE_AUTH=true`` to force it on, or ``false`` to force
+    # it off even when a hash is present.
+    require_auth: Optional[bool] = None
 
     # --- GitHub ---
     github_token: str = ""
@@ -53,6 +60,13 @@ class Settings(BaseSettings):
     # --- Server ---
     host: str = "127.0.0.1"
     port: int = 8000
+
+    @property
+    def auth_enabled(self) -> bool:
+        """Auth is enforced only when explicitly required or a password is set."""
+        if self.require_auth is not None:
+            return self.require_auth
+        return bool(self.admin_password_hash)
 
     @property
     def projects_dir(self) -> Path:

@@ -22,6 +22,11 @@ def authenticate_user(username: str, password: str) -> bool:
 def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str:
+    settings = get_settings()
+    if not settings.auth_enabled:
+        # Auth disabled (e.g. behind a Cloudflare tunnel) -> everyone is the
+        # single admin user, no token required.
+        return settings.admin_username
     if creds is None or not creds.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
@@ -36,6 +41,9 @@ def get_current_user(
 
 def user_from_token(token: str | None) -> str | None:
     """Used for WebSocket auth where the token arrives as a query param."""
+    settings = get_settings()
+    if not settings.auth_enabled:
+        return settings.admin_username
     if not token:
         return None
     payload = decode_access_token(token)

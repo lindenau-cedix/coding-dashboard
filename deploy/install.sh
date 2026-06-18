@@ -199,16 +199,18 @@ else
   ADMIN_USERNAME=${CD_ADMIN_USERNAME:-admin}
   ask ADMIN_USERNAME "Admin-Benutzername" "$ADMIN_USERNAME"
 
+  # Passwort ist OPTIONAL: leer lassen -> Auth aus (z.B. hinter Cloudflare Tunnel).
   ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
   if [[ $NONINTERACTIVE != 1 ]]; then
+    info "Admin-Passwort leer lassen = ohne Login (z.B. hinter Cloudflare Tunnel)."
     while :; do
-      ask_secret ADMIN_PASSWORD "Admin-Passwort"
+      ask_secret ADMIN_PASSWORD "Admin-Passwort (leer = ohne Login)"
+      [[ -z $ADMIN_PASSWORD ]] && break
       local_pw2=""; ask_secret local_pw2 "Passwort wiederholen"
-      [[ -n $ADMIN_PASSWORD && $ADMIN_PASSWORD == "$local_pw2" ]] && break
-      err "Passwörter leer oder ungleich – nochmal."
+      [[ $ADMIN_PASSWORD == "$local_pw2" ]] && break
+      err "Passwörter ungleich – nochmal."
     done
   fi
-  [[ -z ${ADMIN_PASSWORD:-} ]] && { err "Kein Admin-Passwort (ADMIN_PASSWORD env für NONINTERACTIVE)."; exit 1; }
 
   GITHUB_TOKEN=${CD_GITHUB_TOKEN:-}
   ask_secret GITHUB_TOKEN "GitHub Personal Access Token (repo-Scope)"
@@ -220,8 +222,13 @@ else
   ask GIT_AUTHOR_EMAIL "Git author email" "$GIT_AUTHOR_EMAIL"
 
   SECRET_KEY=$(openssl rand -hex 32)
-  info "Passwort-Hash erzeugen"
-  PASS_HASH=$(cd "$APP_DIR/backend" && ADMIN_PASSWORD="$ADMIN_PASSWORD" "$APP_DIR/backend/.venv/bin/python" -c 'import os;from app.security import hash_password;print(hash_password(os.environ["ADMIN_PASSWORD"]))')
+  if [[ -n ${ADMIN_PASSWORD:-} ]]; then
+    info "Passwort-Hash erzeugen"
+    PASS_HASH=$(cd "$APP_DIR/backend" && ADMIN_PASSWORD="$ADMIN_PASSWORD" "$APP_DIR/backend/.venv/bin/python" -c 'import os;from app.security import hash_password;print(hash_password(os.environ["ADMIN_PASSWORD"]))')
+  else
+    info "Kein Passwort gesetzt -> Auth deaktiviert (kein Login-Screen)."
+    PASS_HASH=""
+  fi
 
   umask 077
   cat > "$ENV_FILE" <<ENV
