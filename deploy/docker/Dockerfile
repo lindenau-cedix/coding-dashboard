@@ -49,13 +49,11 @@ FROM node:20-bookworm-slim AS runtime
 #   docker compose build --build-arg HERMES_INSTALL_CMD=''     # drop Hermes
 #   docker compose build --build-arg HERMES_NPM_PKG=@your-scope/hermes-cli
 #
-# Hermes ships via its official installer. It runs here as root, so the
-# installer picks the FHS layout: the `hermes` shim lands in /usr/local/bin
-# (on PATH, OUTSIDE the home volume) and the code in /usr/local/lib/hermes-agent
-# — mirroring how claude/codex's npm bins persist in the image. Only Hermes'
-# per-user data/config dir (~/.hermes) lives under $HOME, so at runtime it
-# resolves to /home/app/.hermes and persists in the cd-home volume after the
-# one-time `hermes` login (exactly like ~/.claude and ~/.codex).
+# Hermes ships via its official HOME-based installer by default. It is run
+# later as the app user, so the launcher lands in /home/app/.local/bin and the
+# venv under /home/app/.hermes. docker-compose.yml bind-mounts the host
+# ~/.hermes over that path at runtime so Hermes can reuse the host login/data.
+# Use HERMES_NPM_PKG instead when you want a global npm install in /usr/local.
 ARG CLAUDE_NPM_PKG="@anthropic-ai/claude-code"
 ARG CODEX_NPM_PKG="@openai/codex"
 ARG HERMES_NPM_PKG=""
@@ -104,13 +102,13 @@ RUN chmod +x /usr/local/bin/cd-entrypoint
 # The node:20 base image ships a 'node' user/group at UID/GID 1000 — which is
 # the most common host UID. That collision bites the bind-mounted host ~/.hermes
 # both ways: building with APP_UID=$(id -u)=1000 (as the docs recommend) makes
-# `groupadd`/`useradd` fail ("GID/UID already exists"), and leaving the default
-# means the host-owned ~/.hermes (uid 1000) shows up as owned by 'node' inside
-# the container, so the 'app' user (10001) can't read it -> Permission denied.
-# Drop the 'node' user/group first so 'app' can take any requested id; -o keeps
-# user creation tolerant of any other pre-existing id collision.
-ARG APP_UID=10001
-ARG APP_GID=10001
+# `groupadd`/`useradd` fail ("GID/UID already exists"). Drop the 'node'
+# user/group first so 'app' can take UID/GID 1000 by default, matching the
+# common host owner of the bind-mounted ~/.hermes. -o keeps user creation
+# tolerant of any other pre-existing id collision. Override APP_UID/APP_GID for
+# hosts whose ~/.hermes is owned by a different uid/gid.
+ARG APP_UID=1000
+ARG APP_GID=1000
 RUN set -eux; \
     userdel -r node 2>/dev/null || true; \
     groupdel node 2>/dev/null || true; \

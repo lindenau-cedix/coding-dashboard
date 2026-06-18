@@ -7,14 +7,14 @@
 # instead REUSES THE HOST's ~/.hermes (bind mount), so its login/data is shared
 # with whatever Hermes you run on the host. See the volumes block below.
 #
-# Because that bind mount keeps the HOST's uid/gid, build the image with a
-# matching app user so the container can read/write your ~/.hermes:
+# Because that bind mount keeps the HOST's uid/gid, the image defaults the app
+# user to UID/GID 1000. If your ~/.hermes belongs to a different uid/gid, build
+# with matching ids:
 #   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
-# (Do this at first build — the cd-home volume's ownership is set then too.)
 #
 # Quick start (from the repo root):
 #   cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-#   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
+#   docker compose build
 #   docker compose run --rm dashboard python -m app.cli hash-password 'choose-a-password'   # -> CD_ADMIN_PASSWORD_HASH
 #   openssl rand -hex 32                                                                     # -> CD_SECRET_KEY
 #   # edit deploy/docker/coding-dashboard.docker.env (paste hash + secret + GitHub token)
@@ -42,11 +42,13 @@ services:
         # (HERMES_INSTALL_CMD='' docker compose build).
         HERMES_NPM_PKG: "${HERMES_NPM_PKG:-}"
         HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash}"
-        # Run the container's 'app' user as YOUR uid/gid so the bind-mounted
-        # host ~/.hermes (see volumes) is readable/writable. Defaults to 10001.
+        # Run the container's 'app' user as the owner of the bind-mounted host
+        # ~/.hermes (see volumes) so Hermes can read/write it. Defaults to 1000,
+        # the common first-user uid/gid; override on hosts that use a different
+        # owner:
         #   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
-        APP_UID: "${APP_UID:-10001}"
-        APP_GID: "${APP_GID:-10001}"
+        APP_UID: "${APP_UID:-1000}"
+        APP_GID: "${APP_GID:-1000}"
     image: coding-dashboard:latest
     restart: unless-stopped
     # Secrets + git identity + CORS. Copy the .example first (see header).
@@ -65,7 +67,7 @@ services:
       # so ONLY ~/.hermes comes from the host; ~/.claude / ~/.codex stay in the
       # volume. Override the host path via CD_HERMES_HOST_DIR. The directory must
       # exist on the host (Hermes installed there), and the container's app user
-      # must own/match it — see APP_UID/APP_GID above.
+      # must match the app UID/GID — default 1000:1000, or APP_UID/APP_GID above.
       - "${CD_HERMES_HOST_DIR:-${HOME}/.hermes}:/home/app/.hermes"
 
 volumes:
