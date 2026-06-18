@@ -87,8 +87,7 @@ fi
 echo "==> Agents authenticate via interactive login (credentials persist in the home volume):"
 echo "      docker compose exec dashboard claude        # then log in in the TUI"
 echo "      docker compose exec dashboard codex login"
-if have hermes; then
-  echo "      docker compose exec dashboard hermes        # then log in / configure"
-fi
+echo "      docker compose exec dashboard hermes        # log in; data persists in ~/.hermes"
+
 
 exec "$@"

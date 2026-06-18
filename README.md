@@ -125,15 +125,22 @@ sudo ./deploy/uninstall.sh   # entfernen
 
 Statt des systemd-Installers kann der komplette Stack als **ein Container** laufen:
 Backend (uvicorn – liefert auch die SPA **und** die WebSockets aus), die Agent-CLIs
-(**Claude** + **Codex** vorinstalliert, **Hermes** optional) und git – alles drin.
-Zustand (SQLite-DB, geklonte Repos), die generierte `config.yaml` und die
-Agent-Logins liegen in **named volumes**; auf dem Host muss nichts installiert werden.
+(**Claude**, **Codex** **und Hermes** vorinstalliert) und git – alles drin.
+Zustand (SQLite-DB, geklonte Repos), die generierte `config.yaml` sowie die
+**Claude-/Codex-Logins** liegen in **named volumes**. **Hermes** nutzt dagegen das
+`~/.hermes` des **Hosts** (Bind-Mount), teilt sich also Login/Daten mit einer
+Hermes-Installation auf dem Host. Da Bind-Mounts die uid/gid des Hosts behalten,
+das Image mit passendem App-User bauen:
+
+```bash
+APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
+```
 
 **Schnellstart** (im Repo-Wurzelverzeichnis, Docker + Compose-Plugin vorausgesetzt):
 
 ```bash
 cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-docker compose build
+APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
 # Secrets erzeugen (Image muss gebaut sein) und in die .env eintragen:
 docker compose run --rm dashboard python -m app.cli hash-password 'DEIN-PASSWORT'  # -> CD_ADMIN_PASSWORD_HASH
 openssl rand -hex 32                                                                # -> CD_SECRET_KEY
@@ -141,13 +148,17 @@ openssl rand -hex 32                                                            
 docker compose up -d
 ```
 
-**Agenten einloggen** – einmalig; die Credentials bleiben im `cd-home`-Volume
-(es werden **keine** API-Keys in Dateien abgelegt):
+**Agenten einloggen** – einmalig; es werden **keine** API-Keys in Dateien abgelegt.
+Claude/Codex bleiben im `cd-home`-Volume, Hermes schreibt ins geteilte Host-`~/.hermes`:
 
 ```bash
-docker compose exec dashboard claude        # im TUI einloggen
-docker compose exec dashboard codex login
+docker compose exec dashboard claude        # im TUI einloggen -> cd-home
+docker compose exec dashboard codex login   #   "
+docker compose exec dashboard hermes        # schreibt ins Host-~/.hermes (oder auf dem Host einloggen)
 ```
+
+Den Host-Pfad bei Bedarf via `CD_HERMES_HOST_DIR` umbiegen (Default `~/.hermes`);
+das Verzeichnis muss auf dem Host existieren und dem `APP_UID`/`APP_GID`-User gehören.
 
 **Erreichbarkeit:** standardmäßig nur `127.0.0.1:8000`. Für LAN/öffentlich davor
 einen TLS-Reverse-Proxy setzen (empfohlen, v.a. für die Android-App) oder die
@@ -157,13 +168,20 @@ Bindung ändern:
 CD_BIND_ADDR=0.0.0.0 CD_HOST_PORT=8080 docker compose up -d
 ```
 
-**Hermes mitbauen** (Node-CLI **oder** Install-Script – `command -v hermes` beim
-ersten Start entscheidet, ob er in der `config.yaml` aktiviert wird):
+**Hermes** wird standardmäßig über sein offizielles Install-Script vorinstalliert
+(`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`). Da der
+Build als root läuft, wählt der Installer das FHS-Layout: der `hermes`-Shim landet
+in `/usr/local/bin` (auf dem PATH), der Code in `/usr/local/lib/hermes-agent`. Sein
+Daten-/Config-Verzeichnis `~/.hermes` wird (anders als `~/.claude`/`~/.codex`)
+nicht im Volume gehalten, sondern als **Bind-Mount vom Host** eingehängt (s.o.) –
+Login/Daten sind also mit dem Host geteilt. Zum **Pinnen/Austauschen oder
+Deaktivieren**:
 
 ```bash
+# Hermes weglassen:
+HERMES_INSTALL_CMD='' docker compose build
+# oder per npm-Paket statt Install-Script:
 docker compose build --build-arg HERMES_NPM_PKG=@dein-scope/hermes-cli
-# oder:
-docker compose build --build-arg HERMES_INSTALL_CMD='curl -fsSL https://…/install.sh | sh'
 docker compose up -d
 ```
 
