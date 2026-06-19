@@ -24,16 +24,26 @@ mkdir -p "$DATA_DIR" "$(dirname "$CONFIG_YAML")" 2>/dev/null || true
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# --- self-heal a home-volume Hermes install --------------------------------
-# claude/codex are global npm installs, but Hermes is typically installed into
-# the home volume by its own installer: a venv under ~/.hermes plus a launcher
-# shim in ~/.local/bin (which is on PATH). Some install/restore paths drop the
-# executable bit on the venv entrypoint, so `hermes` dies with
-#   "cannot execute: Permission denied".
-# Restore +x idempotently on every boot — BEFORE the availability check below
-# so first-boot config and the report both see a working hermes. Runs against
-# whatever the home volume currently holds, so a plain rebuild + restart fixes
-# an already-broken install without re-running the installer.
+# --- Hermes runs on the HOST over SSH --------------------------------------
+# By default Hermes is NOT in this image: when CD_HERMES_SSH_USER is set, the
+# generated config.yaml runs the host's `hermes` via `ssh <user>@<host> '… hermes …'`
+# (see the Python block below). This keeps exactly one Hermes process tree on the
+# host, so its cronjobs / paired channels (WhatsApp, Telegram) don't fire twice.
+HERMES_SSH_USER="${CD_HERMES_SSH_USER:-}"
+HERMES_SSH_HOST="${CD_HERMES_SSH_HOST:-host.docker.internal}"
+HERMES_SSH_PORT="${CD_HERMES_SSH_PORT:-22}"
+HERMES_SSH_KEY="/home/app/.ssh/id_hermes"
+# known_hosts must live somewhere the app user can write (the single-file key
+# bind mount leaves ~/.ssh root-owned), so keep it in the home volume root.
+HERMES_KNOWN_HOSTS="$HOME/.ssh_known_hosts"
+[[ -n "$HERMES_SSH_USER" ]] && { : > "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; touch "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; }
+
+# --- self-heal a SELF-CONTAINED (in-image) Hermes install ------------------
+# Only relevant when you opted into an in-image Hermes (HERMES_INSTALL_CMD): its
+# own installer drops a venv under ~/.hermes plus a launcher shim in ~/.local/bin.
+# Some install/restore paths drop the exec bit on the venv entrypoint, so `hermes`
+# dies with "cannot execute: Permission denied". Restore +x idempotently; no-op in
+# the default SSH mode where neither path exists.
 hermes_shim="$HOME/.local/bin/hermes"
 hermes_venv_bin="$HOME/.hermes/hermes-agent/venv/bin"
 [[ -e "$hermes_shim" ]] && chmod u+rx "$hermes_shim" 2>/dev/null || true
@@ -43,15 +53,59 @@ hermes_venv_bin="$HOME/.hermes/hermes-agent/venv/bin"
 if [[ ! -f "$CONFIG_YAML" ]]; then
   echo "==> First boot: generating $CONFIG_YAML"
   if python - "$CONFIG_YAML.tmp" <<'PY'
-import shutil, sys, yaml
+import os, shutil, sys, yaml
 from app.config import default_agents, DEFAULT_CONTEXT_INSTRUCTION
+
+# --- Hermes-over-SSH wiring (default Docker mode) ---------------------------
+# When CD_HERMES_SSH_USER is set, Hermes is NOT run in this container; instead we
+# rewrite its command/session_command to drive the HOST's `hermes` over SSH. The
+# repos live in a data dir bind-mounted at an identical path on the host, so the
+# remote `cd {project_dir}` lands on the same working tree the container manages.
+ssh_user = os.environ.get("CD_HERMES_SSH_USER", "").strip()
+ssh_host = (os.environ.get("CD_HERMES_SSH_HOST") or "host.docker.internal").strip()
+ssh_port = (os.environ.get("CD_HERMES_SSH_PORT") or "22").strip()
+ssh_key = "/home/app/.ssh/id_hermes"
+known_hosts = os.path.expanduser("~/.ssh_known_hosts")
+hermes_ssh = bool(ssh_user)
+
+def _ssh_opts():
+    return [
+        "-i", ssh_key,
+        "-p", ssh_port,
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={known_hosts}",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+    ]
+
+# Task mode: the prompt is fed to ssh's stdin (prompt_via=stdin) and read on the
+# host with "$(cat)", so arbitrary multi-line prompts pass safely without argv
+# quoting games. HERMES_ACCEPT_HOOKS/NO_COLOR are set on the REMOTE side.
+HERMES_SSH_TASK_REMOTE = (
+    'cd {project_dir} && exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 '
+    'hermes chat -q "$(cat)" --yolo --accept-hooks'
+)
+# Session mode: -tt forces a remote PTY (the container side is already a PTY), so
+# the interactive TUI works through the double PTY. Start params are appended by
+# the runner as extra remote args after `hermes chat`.
+HERMES_SSH_SESSION_REMOTE = "cd {project_dir} && exec hermes chat"
 
 agents = {}
 for key, spec in default_agents().items():
     d = spec.model_dump()
     d.pop("key", None)  # the loader re-derives the key from the mapping
-    # Enable an agent only if its CLI is actually installed in this image.
-    d["enabled"] = shutil.which(spec.command[0]) is not None
+    if key == "hermes" and hermes_ssh:
+        d["prompt_via"] = "stdin"
+        d["stream_format"] = "raw"
+        d["env"] = {}        # set on the remote side instead
+        d["unset_env"] = []  # ssh client, not a python venv to sanitise
+        d["command"] = ["ssh"] + _ssh_opts() + [f"{ssh_user}@{ssh_host}", HERMES_SSH_TASK_REMOTE]
+        d["session_command"] = ["ssh", "-tt"] + _ssh_opts() + [f"{ssh_user}@{ssh_host}", HERMES_SSH_SESSION_REMOTE]
+        d["enabled"] = True
+    else:
+        # Enable an agent only if its CLI is actually installed in this image
+        # (claude/codex baked in; Hermes only when self-contained / no SSH user).
+        d["enabled"] = shutil.which(spec.command[0]) is not None
     agents[key] = d
 
 doc = {"context_instruction": DEFAULT_CONTEXT_INSTRUCTION, "agents": agents}
@@ -71,9 +125,9 @@ PY
 fi
 
 # --- report agent availability + login hint --------------------------------
-echo "==> Agent CLIs in this container:"
+echo "==> In-container agent CLIs:"
 any_agent=0
-for a in claude codex hermes; do
+for a in claude codex; do
   if have "$a"; then
     printf '    %-7s %s\n' "$a" "$(command -v "$a")"
     any_agent=1
@@ -81,13 +135,25 @@ for a in claude codex hermes; do
     printf '    %-7s (not installed)\n' "$a"
   fi
 done
-if [[ $any_agent -eq 0 ]]; then
+if have hermes; then
+  printf '    %-7s %s (self-contained in-image)\n' "hermes" "$(command -v hermes)"
+  any_agent=1
+fi
+if [[ $any_agent -eq 0 && -z "$HERMES_SSH_USER" ]]; then
   echo "WARN: no agent CLI found in the image — rebuild with the *_NPM_PKG build args." >&2
 fi
 echo "==> Claude + Codex authenticate via interactive login (credentials persist in the cd-home volume):"
 echo "      docker compose exec dashboard claude        # then log in in the TUI"
 echo "      docker compose exec dashboard codex login"
-echo "==> Hermes runs the HOST's install (host ~/.hermes is bind-mounted) — no login needed here."
+if [[ -n "$HERMES_SSH_USER" ]]; then
+  echo "==> Hermes runs on the HOST over SSH as ${HERMES_SSH_USER}@${HERMES_SSH_HOST}:${HERMES_SSH_PORT} (key: $HERMES_SSH_KEY)."
+  echo "    Verify connectivity (host must allow this key + have hermes installed):"
+  echo "      docker compose exec dashboard ssh -i $HERMES_SSH_KEY -p $HERMES_SSH_PORT -o UserKnownHostsFile=$HERMES_KNOWN_HOSTS -o StrictHostKeyChecking=accept-new ${HERMES_SSH_USER}@${HERMES_SSH_HOST} hermes --version"
+elif have hermes; then
+  echo "==> Hermes is self-contained in this image (CD_HERMES_SSH_USER unset)."
+else
+  echo "==> Hermes is DISABLED: set CD_HERMES_SSH_USER to run the host's Hermes over SSH (delete config.yaml in cd-config to regenerate)."
+fi
 
 
 exec "$@"
