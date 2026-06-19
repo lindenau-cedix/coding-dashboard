@@ -132,40 +132,59 @@ backend (uvicorn - also serves the SPA **and** WebSockets), the **Claude** +
 generated `config.yaml`, and the **Claude/Codex logins** live in **named
 volumes**.
 
-**Hermes** is the exception: rather than installing a second copy, the container
-**runs the host's Hermes**. Hermes (the official git/uv installer) is a Python
-venv whose launcher hardcodes absolute paths - its dir under `~/.hermes` *and*
-the uv-managed Python under `~/.local/share/uv` - and a venv is not relocatable.
-So the container reproduces those paths: it bind-mounts the host `~/.hermes`
-(read-write) and `~/.local/share/uv` (read-only), and the image symlinks the host
-user's home (`HERMES_HOST_HOME`, e.g. `/home/debian`) to `/home/app` so the
-hardcoded paths resolve. Hermes' login/config/memory are shared with the host.
+**Hermes** is the exception: it does **not** run inside the container at all.
+Instead the container `ssh`es into the host and runs the **host's** `hermes`
+there (`ssh user@host '… hermes …'`), so there is exactly **one** Hermes process
+tree - on the host. This replaces the earlier approach of mirroring the host
+`~/.hermes` into the container, which spun up a *second* Hermes and made its
+cronjobs and paired channels (WhatsApp, Telegram) fire twice and answer twice.
+Now the dashboard just drives the single host Hermes remotely for each task /
+session; its login/config/memory/cron/channels stay entirely on the host.
 
-Because the host `~/.hermes` is bind-mounted, **build the image matched to the
-dest host**: set `HERMES_HOST_HOME` to the home of the user that owns `~/.hermes`,
-and `APP_UID`/`APP_GID` to that user's uid/gid (so files Hermes writes stay
-host-owned). Keep `APP_UID` stable across rebuilds, or the once-chowned `cd-home`
-volume is orphaned.
+For the host's Hermes to work on the dashboard's repos, the **data dir is a bind
+mount shared with the host at an identical path** (default
+`/var/lib/coding-dashboard`), so a project path like
+`/var/lib/coding-dashboard/projects/<slug>` means the same thing in the container
+and on the host. The container clones / commits / pushes; the host's `hermes`
+edits the working tree over SSH.
+
+**Host prerequisites** (one time):
+
+1. The host runs **sshd** and has **Hermes installed + logged in** for the user
+   that will run it (`CD_HERMES_SSH_USER`).
+2. Create an SSH keypair for the container, authorise it for that user, and own
+   the shared data dir with that user's uid/gid (so repo file ownership matches):
+
+```bash
+sudo mkdir -p /var/lib/coding-dashboard && sudo chown $(id -u):$(id -g) /var/lib/coding-dashboard
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_coding_dashboard      # container -> host key
+cat ~/.ssh/id_coding_dashboard.pub >> ~/.ssh/authorized_keys   # let the container in
+```
 
 **Quick start** (from the repo root, with Docker + Compose plugin installed):
 
 ```bash
 cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-# Build matched to this host's Hermes owner (run as the user that owns ~/.hermes):
-APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) HERMES_HOST_HOME=$HOME docker compose build
+# Build with the app user matching the host user that runs Hermes / owns the data dir:
+APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
 # Generate secrets (image must already be built) and put them into the .env file:
 docker compose run --rm dashboard python -m app.cli hash-password 'YOUR-PASSWORD'  # -> CD_ADMIN_PASSWORD_HASH
 openssl rand -hex 32                                                               # -> CD_SECRET_KEY
-# Edit deploy/docker/coding-dashboard.docker.env: add hash, secret, and GitHub token
+# Edit deploy/docker/coding-dashboard.docker.env: add hash, secret, GitHub token,
+#   and set CD_HERMES_SSH_USER (the host user that runs Hermes) to enable Hermes.
 docker compose up -d
 ```
 
 **Agent login** - Claude + Codex log in once (no API keys on disk), persisting in
-the `cd-home` volume. Hermes needs no login here - it uses the host's `~/.hermes`:
+the `cd-home` volume. Hermes needs no login here - it runs on the host:
 
 ```bash
 docker compose exec dashboard claude        # log in via TUI -> cd-home
 docker compose exec dashboard codex login   #   "
+# Verify the container can reach the host's Hermes over SSH:
+docker compose exec dashboard ssh -i /home/app/.ssh/id_hermes \
+  -o UserKnownHostsFile=/home/app/.ssh_known_hosts -o StrictHostKeyChecking=accept-new \
+  "$CD_HERMES_SSH_USER@host.docker.internal" hermes --version
 ```
 
 **Reachability:** by default the service listens only on `127.0.0.1:8000`. For LAN
@@ -176,20 +195,26 @@ for the Android app) or change the bind address:
 CD_BIND_ADDR=0.0.0.0 CD_HOST_PORT=8080 docker compose up -d
 ```
 
-**Hermes** runs the host's install via the bind mounts described above - no
-in-image install by default. The host must therefore have Hermes installed, and
-the build args must match it:
+**Hermes** runs on the host over SSH - no in-image install by default. Set
+`CD_HERMES_SSH_USER` (in the env file) to enable it; the other knobs have
+sensible defaults. Build / runtime settings:
 
-| Build arg | Meaning | Default |
-|---|---|---|
-| `HERMES_HOST_HOME` | Home dir of the user that owns `~/.hermes` (the path baked into the venv launcher) | `/home/debian` |
-| `APP_UID` / `APP_GID` | uid/gid of that user (keep stable across rebuilds) | `1000` |
-| `CD_HERMES_HOST_DIR` | Host source for `~/.hermes` | `$HOME/.hermes` |
-| `CD_HERMES_UV_DIR` | Host source for the uv-managed Python | `$HOME/.local/share/uv` |
+| Setting | Where | Meaning | Default |
+|---|---|---|---|
+| `CD_HERMES_SSH_USER` | env file | Host user that runs Hermes; **empty = Hermes disabled** | *(unset)* |
+| `CD_HERMES_SSH_HOST` | env file | Host address reachable from the container | `host.docker.internal` |
+| `CD_HERMES_SSH_PORT` | env file | sshd port on the host | `22` |
+| `APP_UID` / `APP_GID` | build arg / shell | uid/gid of that host user (owns the shared data dir; keep stable across rebuilds) | `1000` |
+| `CD_DATA_HOST_DIR` | shell | Host path bind-mounted (at the **same** path) as the data dir | `/var/lib/coding-dashboard` |
+| `CD_HERMES_SSH_KEY_HOST` | shell | Host path of the private key the container ssh's with | `~/.ssh/id_coding_dashboard` |
+
+`host.docker.internal` is mapped to the host gateway via `extra_hosts` in
+`docker-compose.yml`; make sure the host's sshd listens on that interface (e.g.
+the docker bridge) and any host firewall allows it.
 
 To instead ship a **self-contained** in-image Hermes (no host coupling; log in
-with `docker compose exec dashboard hermes`), set its installer and drop the host
-mounts from `docker-compose.yml`:
+with `docker compose exec dashboard hermes`), leave `CD_HERMES_SSH_USER` empty and
+bake the installer in:
 
 ```bash
 # Self-contained Hermes via its official installer (built as the app user):
@@ -201,24 +226,39 @@ docker compose up -d
 
 ### Deploy on the dest server
 
-Run as the user that owns `~/.hermes` (so the build auto-matches its uid and home),
-from the repo root. After a `git pull` that changed the Hermes build args, recreate
-the `cd-home` volume once so it re-seeds with the correct ownership:
+Run as the host user that will run Hermes and own the shared data dir (so the
+build auto-matches its uid), from the repo root. After a `git pull` that changed
+`APP_UID`/`APP_GID`, recreate the `cd-home` volume once so it re-seeds with the
+correct ownership:
 
 ```bash
 git pull                                      # get these changes
-APP_UID=$(stat -c %u ~/.hermes) APP_GID=$(stat -c %g ~/.hermes) HERMES_HOST_HOME=$HOME docker compose build
+sudo mkdir -p /var/lib/coding-dashboard && sudo chown $(id -u):$(id -g) /var/lib/coding-dashboard
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_coding_dashboard 2>/dev/null || true   # if not already created
+cat ~/.ssh/id_coding_dashboard.pub >> ~/.ssh/authorized_keys                    # authorise the container
+APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
 docker compose down
 docker volume ls | grep cd-home               # confirm the exact volume name
 docker volume rm coding-dashboard_cd-home     # recreate the orphaned home vol (clears ONLY claude/codex logins)
 docker compose up -d
-docker compose exec dashboard hermes --version   # expect: Hermes Agent v0.16.0
+# Set CD_HERMES_SSH_USER in the env file, then verify the host's Hermes is reachable:
+docker compose exec dashboard ssh -i /home/app/.ssh/id_hermes \
+  -o UserKnownHostsFile=/home/app/.ssh_known_hosts -o StrictHostKeyChecking=accept-new \
+  "$CD_HERMES_SSH_USER@host.docker.internal" hermes --version
 ```
 
-`cd-data` (DB + repos) and `cd-config` (`config.yaml`) are untouched; you only
-re-login Claude/Codex (`docker compose exec dashboard claude` / `codex login`).
-The volume prefix follows the Compose project name (the repo dir) — use the name
-shown by `docker volume ls` if it isn't `coding-dashboard_cd-home`.
+> **Migrating from the old bind-mount setup?** The data dir is now a host bind
+> mount instead of the `cd-data` named volume. Copy your data across once:
+> `docker run --rm -v coding-dashboard_cd-data:/from -v /var/lib/coding-dashboard:/to alpine sh -c 'cp -a /from/. /to/'`
+> then `chown -R $(id -u):$(id -g) /var/lib/coding-dashboard`.
+
+`cd-config` (`config.yaml`) and the shared data dir are untouched by a rebuild;
+you only re-login Claude/Codex (`docker compose exec dashboard claude` /
+`codex login`). The volume prefix follows the Compose project name (the repo
+dir) — use the name shown by `docker volume ls` if it isn't
+`coding-dashboard_cd-home`. **If you change `CD_HERMES_SSH_USER` later**, delete
+`config.yaml` in the `cd-config` volume so it regenerates with the new SSH command
+(it is written once and never overwritten).
 
 On the **first start**, the container automatically detects which agent CLIs are
 available and enables only those in `config.yaml` (in the `cd-config` volume).
@@ -237,11 +277,11 @@ docker compose down -v          # WARNING: deletes the volumes too (DB, repos, l
 ```
 
 **State location:** except GitHub pushes and the agent API calls
-(Anthropic/OpenAI/...) - both required by the feature - dashboard state stays in
-the volumes `cd-data` (DB + repos), `cd-config` (`config.yaml`), and `cd-home`
-(Claude/Codex logins). Hermes is the one cross-boundary piece by design: it reads
-and writes the **host's** `~/.hermes` (the bind mount), so its login/memory are
-shared with the host rather than confined to a volume.
+(Anthropic/OpenAI/...) - both required by the feature - dashboard state stays on
+the host data dir (DB + repos, shared bind mount) plus the volumes `cd-config`
+(`config.yaml`) and `cd-home` (Claude/Codex logins). Hermes is the one
+cross-boundary piece by design: it runs on the **host** over SSH, so its
+login/memory/cron/channels live entirely on the host, not in the container.
 
 ---
 

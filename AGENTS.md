@@ -4,6 +4,61 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-19 - claude (Docker: run Hermes ON THE HOST over SSH — no second Hermes)
+
+**Task:** Mirroring the host `~/.hermes` into the container started a *second*
+Hermes runtime, so its cronjobs ran twice and paired channels (WhatsApp/Telegram)
+answered twice. Use the host's `hermes` binary and let it run **on the host**.
+
+**Decision (reverses the "mirror the host venv into the container" memo below):**
+the container no longer runs Hermes at all. It `ssh`es into the host and runs the
+host's `hermes` there (`ssh user@host '… hermes …'`) — one Hermes process tree, on
+the host. Claude/Codex still run in-container. This is **Docker-only**; the
+systemd path and `default_agents()` (local `hermes chat`) are unchanged, and no
+backend code changed — the whole thing is config the entrypoint generates.
+
+**What changed (deploy/docker + docker-compose.yml + docs):**
+- `entrypoint.sh` first-boot config gen: when `CD_HERMES_SSH_USER` is set, the
+  generated `config.yaml` rewrites the `hermes` agent to drive the host over SSH —
+  `command` = `ssh <opts> user@host 'cd {project_dir} && exec env HERMES_ACCEPT_HOOKS=1
+  NO_COLOR=1 hermes chat -q "$(cat)" --yolo --accept-hooks'` with `prompt_via:
+  stdin` (the prompt rides ssh stdin and is read with `"$(cat)"` on the host — no
+  argv quoting issues for multi-line prompts); `session_command` = `ssh -tt … 'cd
+  {project_dir} && exec hermes chat'` (the `-tt` remote PTY nests inside our PTY).
+  `enabled: true` in SSH mode regardless of `which hermes`. Empty
+  `CD_HERMES_SSH_USER` ⇒ Hermes disabled (or self-contained in-image if installed).
+  Known_hosts goes to `$HOME/.ssh_known_hosts` (the single-file key bind mount
+  leaves `~/.ssh` root-owned).
+- `docker-compose.yml`: dropped the `~/.hermes` + `~/.local/share/uv` bind mounts.
+  Data dir is now a **bind mount shared with the host at an identical path**
+  (`CD_DATA_HOST_DIR`, default `/var/lib/coding-dashboard`, and `CD_DATA_DIR`
+  tracks it) so the host's `hermes` can `cd {project_dir}` into the same working
+  tree the container clones/commits. Added `extra_hosts: host.docker.internal:host-gateway`
+  and a read-only mount of the private key (`CD_HERMES_SSH_KEY_HOST` →
+  `/home/app/.ssh/id_hermes`). Removed `HERMES_HOST_HOME` / `CD_HERMES_HOST_DIR` /
+  `CD_HERMES_UV_DIR`; `cd-data` is no longer a named volume (migration note in README).
+- `Dockerfile`: added `openssh-client`; removed the `HERMES_HOST_HOME` symlink and
+  the `/usr/local/bin/hermes` venv shim; create `/home/app/.ssh` (0700). Kept the
+  optional self-contained in-image Hermes build args (off by default).
+- `coding-dashboard.docker.env.example`: documented `CD_HERMES_SSH_USER/HOST/PORT`
+  (env file) and `APP_UID/APP_GID`, `CD_DATA_HOST_DIR`, `CD_HERMES_SSH_KEY_HOST`
+  (compose shell vars), with the one-time host setup (sshd, keypair, data dir).
+- `README.md`: rewrote the Docker Hermes section + the build-args table for the
+  SSH model, added host prerequisites, an SSH verification command, and a
+  cd-data → host-bind-mount migration note.
+
+**Host prerequisites:** sshd running; Hermes installed + logged in for
+`CD_HERMES_SSH_USER`; the container's pubkey in that user's `authorized_keys`; the
+shared data dir owned by that user (`APP_UID`/`APP_GID` match). Because
+`config.yaml` is written once, changing `CD_HERMES_SSH_USER` later means deleting
+it from the `cd-config` volume to regenerate.
+
+**Verified:** entrypoint config-gen logic produces valid YAML and the correct
+SSH `command`/`session_command` in SSH mode and leaves the local `hermes` command
+untouched when disabled; `bash -n entrypoint.sh` clean; `docker compose config`
+renders the data bind mount, `CD_DATA_DIR`, `host-gateway`, and the key mount in
+both default and override modes. Not committed/pushed — the dashboard handles that.
+
 ### 2026-06-18 - claude (Auth off by default; no admin password needed behind a Cloudflare tunnel)
 
 **Task:** Disable auth by default — no `CD_ADMIN_PASSWORD_HASH` required, since
@@ -599,24 +654,30 @@ lives at `/etc/coding-dashboard/config.yaml`; data (SQLite + cloned repos) under
 `/var/lib/coding-dashboard/`.
 
 Alternatively, **Docker Compose** (`docker-compose.yml` + `deploy/docker/`): one
-self-contained container - uvicorn serves API + WS + the built SPA (no nginx inside),
-with the agent CLIs baked in (claude + codex + hermes by default - hermes via its
-official HOME-based installer as `app`, placing the shim under `/home/app/.local/bin`
-and the venv under `/home/app/.hermes`; override / disable via the `HERMES_NPM_PKG` /
-`HERMES_INSTALL_CMD` build args). Runs as non-root `app`; state in
-named volumes (`cd-data` = DB + repos, `cd-config` = config.yaml, `cd-home` = claude
-+ codex logins `~/.claude` / `~/.codex`). **Hermes is the exception: `~/.hermes` is a
-bind mount of the *host's* `~/.hermes`** (overridable via `CD_HERMES_HOST_DIR`),
-nested over the `cd-home` volume so only that subdir comes from the host - so Hermes
-shares its login / data with the host. Because bind mounts keep host uid/gid, the
-image defaults `APP_UID` / `APP_GID` to `1000:1000` (safe because the Dockerfile
-removes the base `node` user/group first); override those build args to
-`$(id -u)` / `$(id -g)` when the host Hermes dir has a different owner. Auth is
-**interactive login only**
-(`docker compose exec dashboard claude`), no API keys on disk. `deploy/docker/entrypoint.sh`
-generates `config.yaml` on first boot from `default_agents()`, enabling only the CLIs
-found on `PATH` (so a missing agent is not a dead UI entry). Secrets via
-`deploy/docker/coding-dashboard.docker.env` (gitignored; `.example` committed).
+container - uvicorn serves API + WS + the built SPA (no nginx inside), with
+**claude + codex** baked in (override via `CLAUDE_NPM_PKG` / `CODEX_NPM_PKG`).
+Runs as non-root `app`; `cd-config` = config.yaml and `cd-home` = claude + codex
+logins (`~/.claude` / `~/.codex`) are named volumes, while **data (DB + repos +
+worktrees) is a host BIND MOUNT at an identical path** (`CD_DATA_HOST_DIR`,
+default `/var/lib/coding-dashboard`; `CD_DATA_DIR` tracks it). **Hermes does NOT
+run in the container: when `CD_HERMES_SSH_USER` is set the entrypoint generates a
+`config.yaml` whose `hermes` agent `ssh`es into the host and runs the host's
+`hermes` there** (`ssh user@host 'cd {project_dir} && exec hermes …'`) - one
+Hermes on the host (no doubled cronjobs / WhatsApp / Telegram replies), and the
+shared data bind mount lets the host's Hermes operate on the same working trees
+the container clones/commits. The container reaches the host via
+`host.docker.internal` (`extra_hosts: host-gateway`) using a read-only mounted
+private key (`CD_HERMES_SSH_KEY_HOST` → `/home/app/.ssh/id_hermes`). `APP_UID` /
+`APP_GID` default `1000:1000` and should match the host user that runs Hermes /
+owns the data dir (Dockerfile removes the base `node` user/group first so `1000`
+builds cleanly); a self-contained in-image Hermes is still possible via
+`HERMES_NPM_PKG` / `HERMES_INSTALL_CMD` with `CD_HERMES_SSH_USER` empty. Auth is
+**interactive login only** (`docker compose exec dashboard claude`), no API keys
+on disk. `deploy/docker/entrypoint.sh` generates `config.yaml` on first boot from
+`default_agents()`, enabling only the CLIs on `PATH` (plus Hermes when SSH is
+configured); it is written once and never overwritten (delete it from `cd-config`
+to regenerate). Secrets via `deploy/docker/coding-dashboard.docker.env`
+(gitignored; `.example` committed).
 
 ## Architecture (the parts that span files)
 
