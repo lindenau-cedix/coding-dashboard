@@ -141,25 +141,38 @@ cronjobs and paired channels (WhatsApp, Telegram) fire twice and answer twice.
 Now the dashboard just drives the single host Hermes remotely for each task /
 session; its login/config/memory/cron/channels stay entirely on the host.
 
-For the host's Hermes to work on the dashboard's repos, the **data dir is a bind
-mount shared with the host at an identical path** (default
-`/var/lib/coding-dashboard`), so a project path like
-`/var/lib/coding-dashboard/projects/<slug>` means the same thing in the container
-and on the host. The container clones / commits / pushes; the host's `hermes`
-edits the working tree over SSH.
+The dashboard's data (DB + cloned repos) stays **private to the container** in the
+`cd-data` named volume — the host can't see it. So for each Hermes run the
+dashboard **copies the project into a small staging dir** that *is* shared with the
+host: a `/tmp` subfolder bind-mounted at an **identical path** on both sides
+(`CD_HERMES_STAGING_HOST_DIR`, default `/tmp/coding-dashboard-hermes`). The host's
+`hermes` edits that copy over SSH; afterwards the dashboard **merges the result
+back** into the repo in `cd-data` and pushes. If the merge conflicts, the Hermes
+commit is pushed on its own branch and left for you to merge and then **Pull** — the
+dashboard never force-pulls over a conflict. The per-task copy is cleaned up
+afterwards; interactive sessions keep one stable per-project copy so Hermes
+`--resume` finds the same directory again.
 
 **Host prerequisites** (one time):
 
 1. The host runs **sshd** and has **Hermes installed + logged in** for the user
    that will run it (`CD_HERMES_SSH_USER`).
 2. Create an SSH keypair for the container, authorise it for that user, and own
-   the shared data dir with that user's uid/gid (so repo file ownership matches):
+   the shared **staging dir** with that user's uid/gid (so the host's Hermes can
+   read/write the staged copy and file ownership matches):
 
 ```bash
-sudo mkdir -p /var/lib/coding-dashboard && sudo chown $(id -u):$(id -g) /var/lib/coding-dashboard
+mkdir -p /tmp/coding-dashboard-hermes                          # staging dir (owned by this user)
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_coding_dashboard      # container -> host key
 cat ~/.ssh/id_coding_dashboard.pub >> ~/.ssh/authorized_keys   # let the container in
 ```
+
+   The dir only ever holds throwaway copies, but it must exist and be **owned by
+   that user** before `docker compose up` (Docker would otherwise auto-create the
+   bind-mount source as `root`, which the container's `app` user can't write).
+   `/tmp` is cleared on reboot, so recreate it on boot (a `tmpfiles.d` entry, or
+   just re-run the `mkdir` before `up`) or set `CD_HERMES_STAGING_HOST_DIR` to a
+   persistent path you own.
 
 **Quick start** (from the repo root, with Docker + Compose plugin installed):
 
@@ -204,8 +217,8 @@ sensible defaults. Build / runtime settings:
 | `CD_HERMES_SSH_USER` | env file | Host user that runs Hermes; **empty = Hermes disabled** | *(unset)* |
 | `CD_HERMES_SSH_HOST` | env file | Host address reachable from the container | `host.docker.internal` |
 | `CD_HERMES_SSH_PORT` | env file | sshd port on the host | `22` |
-| `APP_UID` / `APP_GID` | build arg / shell | uid/gid of that host user (owns the shared data dir; keep stable across rebuilds) | `1000` |
-| `CD_DATA_HOST_DIR` | shell | Host path bind-mounted (at the **same** path) as the data dir | `/var/lib/coding-dashboard` |
+| `APP_UID` / `APP_GID` | build arg / shell | uid/gid of that host user (owns the shared staging dir; keep stable across rebuilds) | `1000` |
+| `CD_HERMES_STAGING_HOST_DIR` | shell | Host path bind-mounted (at the **same** path) where the project is staged for the host's Hermes | `/tmp/coding-dashboard-hermes` |
 | `CD_HERMES_SSH_KEY_HOST` | shell | Host path of the private key the container ssh's with | `~/.ssh/id_coding_dashboard` |
 
 `host.docker.internal` is mapped to the host gateway via `extra_hosts` in
@@ -226,14 +239,14 @@ docker compose up -d
 
 ### Deploy on the dest server
 
-Run as the host user that will run Hermes and own the shared data dir (so the
+Run as the host user that will run Hermes and own the shared staging dir (so the
 build auto-matches its uid), from the repo root. After a `git pull` that changed
 `APP_UID`/`APP_GID`, recreate the `cd-home` volume once so it re-seeds with the
 correct ownership:
 
 ```bash
 git pull                                      # get these changes
-sudo mkdir -p /var/lib/coding-dashboard && sudo chown $(id -u):$(id -g) /var/lib/coding-dashboard
+mkdir -p /tmp/coding-dashboard-hermes         # staging dir, owned by this user
 ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_coding_dashboard 2>/dev/null || true   # if not already created
 cat ~/.ssh/id_coding_dashboard.pub >> ~/.ssh/authorized_keys                    # authorise the container
 APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
@@ -247,12 +260,14 @@ docker compose exec dashboard ssh -i /home/app/.ssh/id_hermes \
   "$CD_HERMES_SSH_USER@host.docker.internal" hermes --version
 ```
 
-> **Migrating from the old bind-mount setup?** The data dir is now a host bind
-> mount instead of the `cd-data` named volume. Copy your data across once:
-> `docker run --rm -v coding-dashboard_cd-data:/from -v /var/lib/coding-dashboard:/to alpine sh -c 'cp -a /from/. /to/'`
-> then `chown -R $(id -u):$(id -g) /var/lib/coding-dashboard`.
+> **Ran the short-lived host-bind-mount build?** An interim version bind-mounted the
+> whole data dir at `/var/lib/coding-dashboard`; data now lives back in the `cd-data`
+> named volume. Copy your data in once:
+> `docker run --rm -v /var/lib/coding-dashboard:/from -v coding-dashboard_cd-data:/to alpine sh -c 'cp -a /from/. /to/'`.
+> If you're coming straight from the original named-volume setup, there's nothing to
+> migrate — `cd-data` is reused as-is.
 
-`cd-config` (`config.yaml`) and the shared data dir are untouched by a rebuild;
+`cd-data` (DB + repos) and `cd-config` (`config.yaml`) are untouched by a rebuild;
 you only re-login Claude/Codex (`docker compose exec dashboard claude` /
 `codex login`). The volume prefix follows the Compose project name (the repo
 dir) — use the name shown by `docker volume ls` if it isn't
@@ -277,11 +292,13 @@ docker compose down -v          # WARNING: deletes the volumes too (DB, repos, l
 ```
 
 **State location:** except GitHub pushes and the agent API calls
-(Anthropic/OpenAI/...) - both required by the feature - dashboard state stays on
-the host data dir (DB + repos, shared bind mount) plus the volumes `cd-config`
-(`config.yaml`) and `cd-home` (Claude/Codex logins). Hermes is the one
-cross-boundary piece by design: it runs on the **host** over SSH, so its
-login/memory/cron/channels live entirely on the host, not in the container.
+(Anthropic/OpenAI/...) - both required by the feature - dashboard state stays in
+the volumes `cd-data` (DB + repos), `cd-config` (`config.yaml`) and `cd-home`
+(Claude/Codex logins). Hermes is the one cross-boundary piece by design: it runs
+on the **host** over SSH, so its login/memory/cron/channels live entirely on the
+host; for each run the dashboard copies the project into the shared staging dir
+(`/tmp/coding-dashboard-hermes`) for the host's Hermes to edit and merges the
+result back into `cd-data`.
 
 ---
 

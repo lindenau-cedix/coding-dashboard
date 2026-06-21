@@ -14,24 +14,28 @@
 # and answer twice. Now there is exactly one Hermes (the host's); the dashboard
 # just drives it remotely for each task/session.
 #
-# For the host Hermes to operate on the dashboard's repos, the data dir is a BIND
-# MOUNT shared with the host at an IDENTICAL path (default /var/lib/coding-dashboard),
-# so a project path like /var/lib/coding-dashboard/projects/<slug> means the same
-# thing inside the container and on the host. The container clones/commits/pushes;
-# the host's `hermes` edits the working tree over SSH.
+# The dashboard's data (SQLite DB + cloned repos + worktrees) stays in the cd-data
+# NAMED VOLUME — private to the container. The host's Hermes cannot see it, so for
+# each Hermes run the dashboard COPIES the project into a small staging dir that IS
+# shared with the host (a /tmp subfolder bind-mounted at an IDENTICAL path on both
+# sides, CD_HERMES_STAGING_HOST_DIR, default /tmp/coding-dashboard-hermes). Hermes
+# edits that copy over SSH; afterwards the dashboard merges the result back into the
+# repo in cd-data and pushes (a merge conflict is left on a branch for you to merge
+# and then Pull). The copy is cleaned up after each task.
 #
 # IMPORTANT — host prerequisites for the SSH-driven Hermes (see README):
 #   1. Host runs sshd and has Hermes installed + logged in for CD_HERMES_SSH_USER.
 #   2. Create an SSH keypair; put the PRIVATE key at CD_HERMES_SSH_KEY_HOST (below,
 #      default ~/.ssh/id_coding_dashboard) and append its .pub to that user's
 #      ~/.ssh/authorized_keys. The container mounts the private key read-only.
-#   3. The shared data dir (CD_DATA_HOST_DIR) must exist on the host and be owned
-#      by APP_UID:APP_GID — the SAME user that runs Hermes — so the host's Hermes
-#      and the container agree on file ownership in the repos.
+#   3. The staging dir (CD_HERMES_STAGING_HOST_DIR, default /tmp/coding-dashboard-hermes)
+#      must exist on the host and be owned by APP_UID:APP_GID — the SAME user that
+#      runs Hermes — so the host's Hermes can read/write the staged project copy and
+#      file ownership matches the container.
 #
 # Quick start (from the repo root):
 #   cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
-#   sudo mkdir -p /var/lib/coding-dashboard && sudo chown $(id -u):$(id -g) /var/lib/coding-dashboard
+#   mkdir -p /tmp/coding-dashboard-hermes                              # host staging dir (owned by you)
 #   ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_coding_dashboard          # container -> host key
 #   cat ~/.ssh/id_coding_dashboard.pub >> ~/.ssh/authorized_keys       # let the container in
 #   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
@@ -64,9 +68,9 @@ services:
         HERMES_NPM_PKG: "${HERMES_NPM_PKG:-}"
         HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-}"
         # UID/GID of the non-root 'app' user. Match the host user that runs Hermes
-        # and owns the shared data dir (CD_DATA_HOST_DIR), so the host's Hermes and
-        # the container agree on repo file ownership. Keep it stable across rebuilds
-        # (a change orphans the chowned cd-home volume).
+        # and owns the shared staging dir (CD_HERMES_STAGING_HOST_DIR), so the host's
+        # Hermes and the container agree on file ownership in the staged copy. Keep
+        # it stable across rebuilds (a change orphans the chowned cd-home volume).
         APP_UID: "${APP_UID:-1000}"
         APP_GID: "${APP_GID:-1000}"
     image: coding-dashboard:latest
@@ -75,10 +79,10 @@ services:
     env_file:
       - deploy/docker/coding-dashboard.docker.env
     environment:
-      # Keep the container's data dir at the SAME absolute path as the host bind
-      # source, so {project_dir} paths are valid on the host too (the host's
-      # Hermes `cd`s into them over SSH).
-      - CD_DATA_DIR=${CD_DATA_HOST_DIR:-/var/lib/coding-dashboard}
+      # Where the dashboard stages a COPY of the project for the host's Hermes.
+      # MUST equal the host path of the staging bind mount below so {project_dir}
+      # resolves to the same files in the container and on the host.
+      - CD_HERMES_STAGING_DIR=${CD_HERMES_STAGING_HOST_DIR:-/tmp/coding-dashboard-hermes}
     # Reach the host's sshd from inside the container via host.docker.internal.
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -87,19 +91,22 @@ services:
       #   CD_BIND_ADDR=0.0.0.0 CD_HOST_PORT=8080 docker compose up -d
       - "${CD_BIND_ADDR:-127.0.0.1}:${CD_HOST_PORT:-8000}:8000"
     volumes:
-      # Data (SQLite DB + cloned repos + worktrees) is a BIND MOUNT shared with the
-      # host at an IDENTICAL path, so the host's Hermes can operate on the same
-      # working trees the container clones/commits. Must exist + be owned by
-      # APP_UID:APP_GID. Override the host location with CD_DATA_HOST_DIR (the
-      # container path tracks it via CD_DATA_DIR above).
-      - "${CD_DATA_HOST_DIR:-/var/lib/coding-dashboard}:${CD_DATA_HOST_DIR:-/var/lib/coding-dashboard}"
+      # Data (SQLite DB + cloned repos + worktrees) stays PRIVATE to the container
+      # in a named volume — the host never sees it directly.
+      - cd-data:/var/lib/coding-dashboard
       - cd-config:/etc/coding-dashboard     # generated config.yaml (edit + persists)
       - cd-home:/home/app                   # claude + codex logins: ~/.claude, ~/.codex
+      # Small staging dir SHARED with the host at an IDENTICAL path: the dashboard
+      # copies a project here for the host's Hermes to edit, then merges it back.
+      # Must exist on the host + be owned by APP_UID:APP_GID. Override with
+      # CD_HERMES_STAGING_HOST_DIR (the container path tracks it via the env above).
+      - "${CD_HERMES_STAGING_HOST_DIR:-/tmp/coding-dashboard-hermes}:${CD_HERMES_STAGING_HOST_DIR:-/tmp/coding-dashboard-hermes}"
       # Private SSH key the container uses to run the host's Hermes as
       # CD_HERMES_SSH_USER. Read-only; its .pub must be in that user's
       # authorized_keys on the host. Override the host source via CD_HERMES_SSH_KEY_HOST.
       - "${CD_HERMES_SSH_KEY_HOST:-${HOME}/.ssh/id_coding_dashboard}:/home/app/.ssh/id_hermes:ro"
 
 volumes:
+  cd-data:
   cd-config:
   cd-home:

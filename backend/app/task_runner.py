@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import git_ops, session_dirs, uploads
+from . import git_ops, host_staging, session_dirs, uploads
 from .agents import run_agent
 from .config import get_agents_config, get_settings
 from .database import session_scope
@@ -193,6 +193,9 @@ class TaskManager:
         # task_id -> (project_dir, worktree_dir, branch) for isolated runs so a
         # cancel/crash can still detach the worktree.
         self._worktrees: dict[str, tuple[str, str, str]] = {}
+        # task_id -> (project_dir, staging_dir, branch) for host-staging runs
+        # (agent runs in a copy under hermes_staging_dir) so cancel/crash cleans up.
+        self._staging: dict[str, tuple[str, str, str]] = {}
         self._max_channels = max_channels
 
     def _project_lock(self, project_id: str) -> asyncio.Lock:
@@ -240,6 +243,7 @@ class TaskManager:
             await self._run_inner(task_id, project_id, ch)
         except asyncio.CancelledError:
             self._cleanup_worktree(task_id)
+            self._cleanup_staging(task_id)
             self._mark(task_id, status="cancelled", error="Abgebrochen.", finished=True)
             ch.publish({"type": "output", "data": "\n[abgebrochen]\n"})
             ch.publish({"type": "status", "status": "cancelled"})
@@ -247,6 +251,7 @@ class TaskManager:
             raise
         except Exception as exc:  # noqa: BLE001
             self._cleanup_worktree(task_id)
+            self._cleanup_staging(task_id)
             tb = traceback.format_exc()
             self._mark(task_id, status="error", error=f"{exc}\n{tb}", finished=True)
             ch.publish({"type": "output", "data": f"\n[interner Fehler] {exc}\n"})
@@ -266,6 +271,14 @@ class TaskManager:
         except Exception:  # noqa: BLE001
             pass
         shutil.rmtree(worktree_dir, ignore_errors=True)
+
+    def _cleanup_staging(self, task_id: str) -> None:
+        """Best-effort removal of a host-staging copy (cancel/crash path)."""
+        info = self._staging.pop(task_id, None)
+        if not info:
+            return
+        _project_dir, staging_dir, _branch = info
+        shutil.rmtree(staging_dir, ignore_errors=True)
 
     async def _run_inner(self, task_id: str, project_id: str, ch: TaskChannel) -> None:
         settings = get_settings()
@@ -311,7 +324,30 @@ class TaskManager:
         run_dir = project_dir
         run_branch = branch
         isolated = False
-        if project_dir and Path(project_dir).exists():
+        staging = False
+        # Host-staging agents (e.g. the SSH-driven Hermes) cannot see the data dir,
+        # so they run in a COPY of the project under hermes_staging_dir (shared with
+        # the host at an identical path); the copy is merged back afterwards.
+        if (
+            getattr(spec, "host_staging", False)
+            and project_dir
+            and git_ops.is_git_repo(project_dir)
+        ):
+            try:
+                run_dir, run_branch = await self._setup_staging(
+                    project_id, task_id, project_dir, branch, mode, ch
+                )
+                staging = True
+            except Exception as exc:  # noqa: BLE001
+                ch.publish(
+                    {
+                        "type": "git",
+                        "data": f"[git] Host-Arbeitskopie fehlgeschlagen ({exc}); "
+                        f"nutze Hauptverzeichnis\n",
+                    }
+                )
+                run_dir, run_branch = project_dir, branch
+        elif project_dir and Path(project_dir).exists():
             try:
                 run_dir, run_branch = await self._setup_worktree(
                     project_id, task_id, project_dir, branch, mode, ch
@@ -359,7 +395,12 @@ class TaskManager:
         self._mark(task_id, finished=True)
         self._update_agents_md(project_id, run_dir)
 
-        if isolated:
+        if staging:
+            await self._finalize_staging(
+                task_id, project_id, project_dir, run_dir, run_branch, branch, settings,
+                spec.display_name, ch,
+            )
+        elif isolated:
             await self._finalize_isolated(
                 task_id, project_id, project_dir, run_dir, run_branch, branch, settings,
                 spec.display_name, ch,
@@ -436,6 +477,78 @@ class TaskManager:
         async with self._project_lock(project_id):
             res = await asyncio.to_thread(finish)
         self._worktrees.pop(task_id, None)
+        for message in res["messages"]:
+            ch.publish({"type": "git", "data": message})
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task:
+                task.commit_hash = res["commit_hash"] or ""
+                task.commit_message = first_line if res["commit_created"] else ""
+                task.commit_created = res["commit_created"]
+                task.pushed = res["pushed"]
+                task.merge_state = res["merge_state"]
+
+    async def _setup_staging(
+        self,
+        project_id: str,
+        task_id: str,
+        project_dir: str,
+        base_branch: str,
+        mode: str,
+        ch: TaskChannel,
+    ) -> tuple[str, str]:
+        """Copy the project into a host-shared staging dir for an off-host agent.
+
+        Returns ``(staging_dir, branch)``.  ``branch`` is the name the staging
+        commit is later fetched into and merged from (``cd/<mode>/<id>``).  The
+        copy is taken under the per-project lock so it is a consistent snapshot of
+        the canonical checkout.
+        """
+        branch = f"cd/{mode}/{task_id[:8]}"
+        staging_dir = host_staging.task_staging_dir(task_id)
+
+        async with self._project_lock(project_id):
+            await asyncio.to_thread(host_staging.prepare_copy, project_dir, staging_dir)
+        self._staging[task_id] = (project_dir, str(staging_dir), branch)
+        ch.publish(
+            {
+                "type": "git",
+                "data": f"[git] Host-Arbeitskopie {staging_dir} "
+                f"(Merge als Branch {branch})\n",
+            }
+        )
+        return str(staging_dir), branch
+
+    async def _finalize_staging(
+        self,
+        task_id: str,
+        project_id: str,
+        project_dir: str,
+        staging_dir: str,
+        branch: str,
+        base_branch: str,
+        settings,
+        agent_name: str,
+        ch: TaskChannel,
+    ) -> None:
+        """Integrate the staging copy back into the canonical repo, then remove it."""
+        token = settings.github_token
+        first_line = self._summary_line(task_id)
+        msg = (
+            f"{first_line}\n\nAutomatischer Commit durch Coding Dashboard "
+            f"({agent_name}).\nTask-ID: {task_id}"
+        )
+
+        def finish() -> dict:
+            return host_staging.integrate(
+                project_dir, staging_dir, branch, base_branch, token,
+                settings.git_author_name, settings.git_author_email, msg, first_line,
+                cleanup=True,
+            )
+
+        async with self._project_lock(project_id):
+            res = await asyncio.to_thread(finish)
+        self._staging.pop(task_id, None)
         for message in res["messages"]:
             ch.publish({"type": "git", "data": message})
         with session_scope() as db:
@@ -681,9 +794,21 @@ class SessionManager:
         except ValueError:
             argv_extra = []
         resume_req = session_dirs.parse_resume_request(agent_key, argv_extra)
-        workdir, workdir_note = await self._resolve_session_workdir(
-            task_id, project_id, project_dir, agent_key, resume_req
-        )
+        if (
+            getattr(spec, "host_staging", False)
+            and project_dir
+            and git_ops.is_git_repo(project_dir)
+        ):
+            # Off-host agent (SSH-driven Hermes): run in a stable per-project copy
+            # under the shared staging dir so the host can reach it and `--resume`
+            # finds the same cwd again. Integrated back (not just pushed) on end.
+            workdir, workdir_note = await self._resolve_staging_session_workdir(
+                project_id, project_dir, resume_req is not None
+            )
+        else:
+            workdir, workdir_note = await self._resolve_session_workdir(
+                task_id, project_id, project_dir, agent_key, resume_req
+            )
 
         ch = SessionChannel(task_id)
         self._channels[task_id] = ch
@@ -899,6 +1024,28 @@ class SessionManager:
                 return worktree, f"[parallel] Isolierte Arbeitskopie: {worktree}\n"
 
         return project_dir, ""
+
+    async def _resolve_staging_session_workdir(
+        self, project_id: str, project_dir: str, resume: bool
+    ) -> tuple[str, str]:
+        """Working dir for an off-host (host-staging) session: a per-project copy.
+
+        One stable copy per project under the shared staging dir, so the host's
+        agent can reach it and ``--resume`` lands in the same cwd.  A resume keeps
+        the existing copy (its working tree backs the saved conversation); a fresh
+        session re-copies the current project HEAD.  Concurrent host-staging
+        sessions for the *same* project share this copy and are not isolated — run
+        them sequentially.
+        """
+        staging = str(host_staging.session_staging_dir(project_id))
+        await asyncio.to_thread(
+            host_staging.ensure_session_copy, project_dir, staging, resume
+        )
+        if resume:
+            note = f"[resume] Host-Arbeitskopie: {staging}\n"
+        else:
+            note = f"[host] Arbeitskopie auf dem Host: {staging}\n"
+        return staging, note
 
     def _primary_busy(self, project_id: str, project_dir: str) -> bool:
         """True if a live session already occupies the project's main folder."""
@@ -1137,32 +1284,59 @@ class SessionManager:
 
         if git_dir and Path(git_dir).exists() and lock:
             async with lock:
-                (
-                    commit_hash,
-                    commit_created,
-                    pushed,
-                    git_messages,
-                ) = await asyncio.to_thread(
-                    self._finish_session_git,
-                    git_dir,
-                    branch,
-                    settings.github_token,
-                    settings.git_author_name,
-                    settings.git_author_email,
-                    commit_message.strip() or f"Session: {summary}",
-                )
-                if ch:
-                    for message in git_messages:
-                        ch.publish({"type": "git", "data": message})
+                msg_full = commit_message.strip() or f"Session: {summary}"
+                first_line = msg_full.splitlines()[0] if msg_full else summary
+                if host_staging.is_staging_dir(git_dir):
+                    # Off-host (host-staging) session: integrate the host copy back
+                    # into the canonical repo (commit -> merge -> push; conflict
+                    # leaves a branch for a manual merge). Keep the copy so a later
+                    # `--resume` finds the same cwd again.
+                    res = await asyncio.to_thread(
+                        host_staging.integrate,
+                        project_local_path,
+                        git_dir,
+                        f"cd/session/{task_id[:8]}",
+                        branch,
+                        settings.github_token,
+                        settings.git_author_name,
+                        settings.git_author_email,
+                        msg_full,
+                        first_line,
+                        cleanup=False,
+                    )
+                    commit_hash = res["commit_hash"]
+                    commit_created = res["commit_created"]
+                    pushed = res["pushed"]
+                    if ch:
+                        for message in res["messages"]:
+                            ch.publish({"type": "git", "data": message})
+                else:
+                    (
+                        commit_hash,
+                        commit_created,
+                        pushed,
+                        git_messages,
+                    ) = await asyncio.to_thread(
+                        self._finish_session_git,
+                        git_dir,
+                        branch,
+                        settings.github_token,
+                        settings.git_author_name,
+                        settings.git_author_email,
+                        msg_full,
+                    )
+                    if ch:
+                        for message in git_messages:
+                            ch.publish({"type": "git", "data": message})
 
-                # Reclaim an isolated per-session worktree once its work is safely
-                # on the remote. If the push FAILED we keep the worktree so the
-                # commits are not stranded — a later resume re-enters it and can
-                # retry the push. (The agent's conversation lives in its own
-                # store, so a clean worktree is recreated on resume regardless.)
-                await self._cleanup_worktree_if_done(
-                    git_dir, project_local_path, pushed, ch
-                )
+                    # Reclaim an isolated per-session worktree once its work is
+                    # safely on the remote. If the push FAILED we keep the worktree
+                    # so the commits are not stranded — a later resume re-enters it
+                    # and can retry the push. (The agent's conversation lives in its
+                    # own store, so a clean worktree is recreated on resume anyway.)
+                    await self._cleanup_worktree_if_done(
+                        git_dir, project_local_path, pushed, ch
+                    )
 
         with session_scope() as db:
             task = db.get(Task, task_id)
@@ -1288,6 +1462,9 @@ def reset_interrupted() -> None:
         ]
     # Drop the on-disk worktree dirs, then prune the now-stale admin entries.
     shutil.rmtree(_worktrees_root(), ignore_errors=True)
+    # Drop throwaway per-task host-staging copies (per-project session copies are
+    # kept so an interrupted session can still be resumed into the same cwd).
+    host_staging.cleanup_task_staging()
     for project_dir in project_dirs:
         if Path(project_dir).exists():
             try:
