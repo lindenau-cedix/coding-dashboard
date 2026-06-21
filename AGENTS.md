@@ -4,6 +4,64 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-19 - claude (Docker: keep data in cd-data; stage the project to /tmp for the host's Hermes)
+
+**Task:** The earlier "Hermes over SSH" change shared the WHOLE data dir as a host
+bind mount so the host's Hermes could `cd` into the repos. The user wanted the data
+to stay a private Docker volume and instead expose only a small host `/tmp`
+subfolder: copy the project there, run Hermes in it, then commit + push from that
+copy and merge it back into the main repo — leaving a conflict on a branch for a
+manual merge + Pull, never auto-pulling.
+
+**Decision:** Added a generic, opt-in `host_staging` capability. An agent with
+`host_staging=True` runs in a throwaway COPY of the project under
+`settings.hermes_staging_dir` (`CD_HERMES_STAGING_DIR`, default
+`/tmp/coding-dashboard-hermes`), bind-mounted at an IDENTICAL path host<->container
+so `cd {project_dir}` resolves to the same files on both sides. The Docker
+entrypoint sets the flag on the Hermes agent in SSH mode; local Hermes / systemd
+installs are unaffected (flag defaults `False`). Data goes back to the `cd-data`
+named volume.
+
+**Flow (tasks):** copy project -> agent edits the copy on the host -> dashboard
+commits the copy, fetches that commit into the canonical repo as `cd/<mode>/<id>`,
+merges into the default branch and pushes; **on conflict** the branch is pushed and
+kept (`merge_state="conflict"`), the default branch is untouched, and the user
+merges manually then clicks **Pull**. Per-task copies are deleted after; sessions
+share one stable per-project copy (`sessions/<project_id>`) so Hermes `--resume`
+finds the same cwd (its conversations are keyed by directory on the host).
+
+**What changed (backend + Docker, no frontend):**
+- `config.py`: `Settings.hermes_staging_dir` (`CD_HERMES_STAGING_DIR`); new
+  `AgentSpec.host_staging` (default `False`, backfilled like other fields).
+- `git_ops.py`: `local_clone` (`git clone --no-hardlinks` — an independent copy the
+  host can edit without touching the source) + `fetch_into_branch`
+  (`fetch <path> +HEAD:refs/heads/<branch>` — pull the copy's commit back by path,
+  no network/shared object store).
+- new `host_staging.py`: `task_staging_dir` / `session_staging_dir` / `is_staging_dir`,
+  `prepare_copy`, `ensure_session_copy` (keep on resume, re-copy for a new session),
+  `integrate` (commit -> fetch -> merge -> push / conflict-keeps-branch, mirrors
+  `_merge_worktree_branch`'s result shape), `cleanup_task_staging`.
+- `task_runner.py`: `TaskManager` picks staging over the worktree when
+  `spec.host_staging` (`_setup_staging` / `_finalize_staging`, `_cleanup_staging` on
+  cancel/crash); `SessionManager` routes host_staging sessions to a stable per-project
+  copy (`_resolve_staging_session_workdir`) and integrates via `host_staging.integrate`
+  (cleanup=False) in `end_session`; `reset_interrupted` drops `tasks/` staging copies
+  (keeps `sessions/` for resume).
+- `deploy/docker/`: `entrypoint.sh` sets `host_staging=True` on the SSH Hermes +
+  ensures/report the staging dir; `docker-compose.yml` reverts data to the `cd-data`
+  named volume and adds the `${CD_HERMES_STAGING_HOST_DIR:-/tmp/coding-dashboard-hermes}`
+  bind mount (identical path) + `CD_HERMES_STAGING_DIR` env; `Dockerfile` pre-creates
+  the staging mountpoint owned by `app`; `*.env.example` + `README.md` document
+  `CD_HERMES_STAGING_HOST_DIR` (replacing `CD_DATA_HOST_DIR`) and the staging flow.
+- `tests/smoke.py`: `test_host_staging` (clean integrate merges+pushes & cleans up;
+  conflict keeps+pushes the branch, default branch untouched; `is_staging_dir`).
+
+**Verified:** `py_compile` clean; full `smoke.py` **173 PASS / 0 FAIL**;
+`bash -n entrypoint.sh` OK; entrypoint config-gen emits `host_staging: true` for the
+SSH Hermes and it survives the loader (claude stays `False`); `docker compose config`
+renders `cd-data` + the identical-path staging bind mount + `CD_HERMES_STAGING_DIR`
+in default and override modes. Not committed/pushed — the dashboard handles that.
+
 ### 2026-06-19 - claude (Docker: run Hermes ON THE HOST over SSH — no second Hermes)
 
 **Task:** Mirroring the host `~/.hermes` into the container started a *second*
@@ -656,20 +714,24 @@ lives at `/etc/coding-dashboard/config.yaml`; data (SQLite + cloned repos) under
 Alternatively, **Docker Compose** (`docker-compose.yml` + `deploy/docker/`): one
 container - uvicorn serves API + WS + the built SPA (no nginx inside), with
 **claude + codex** baked in (override via `CLAUDE_NPM_PKG` / `CODEX_NPM_PKG`).
-Runs as non-root `app`; `cd-config` = config.yaml and `cd-home` = claude + codex
-logins (`~/.claude` / `~/.codex`) are named volumes, while **data (DB + repos +
-worktrees) is a host BIND MOUNT at an identical path** (`CD_DATA_HOST_DIR`,
-default `/var/lib/coding-dashboard`; `CD_DATA_DIR` tracks it). **Hermes does NOT
+Runs as non-root `app`; `cd-config` = config.yaml, `cd-home` = claude + codex
+logins (`~/.claude` / `~/.codex`) and **`cd-data` = data (DB + repos + worktrees)**
+are named volumes — the data volume is PRIVATE to the container. **Hermes does NOT
 run in the container: when `CD_HERMES_SSH_USER` is set the entrypoint generates a
 `config.yaml` whose `hermes` agent `ssh`es into the host and runs the host's
 `hermes` there** (`ssh user@host 'cd {project_dir} && exec hermes …'`) - one
-Hermes on the host (no doubled cronjobs / WhatsApp / Telegram replies), and the
-shared data bind mount lets the host's Hermes operate on the same working trees
-the container clones/commits. The container reaches the host via
+Hermes on the host (no doubled cronjobs / WhatsApp / Telegram replies). Because the
+host can't see `cd-data`, the SSH Hermes agent is flagged **`host_staging`**: for
+each run the dashboard copies the project into a small host-shared staging dir
+(`CD_HERMES_STAGING_HOST_DIR`, default `/tmp/coding-dashboard-hermes`, bind-mounted
+at an IDENTICAL path host<->container so `cd {project_dir}` resolves on both sides),
+the host's Hermes edits the copy, and the dashboard merges the copy's commit back
+into `cd-data` + pushes (conflict ⇒ branch kept for a manual merge + Pull; see
+`host_staging.py`). The container reaches the host via
 `host.docker.internal` (`extra_hosts: host-gateway`) using a read-only mounted
 private key (`CD_HERMES_SSH_KEY_HOST` → `/home/app/.ssh/id_hermes`). `APP_UID` /
 `APP_GID` default `1000:1000` and should match the host user that runs Hermes /
-owns the data dir (Dockerfile removes the base `node` user/group first so `1000`
+owns the staging dir (Dockerfile removes the base `node` user/group first so `1000`
 builds cleanly); a self-contained in-image Hermes is still possible via
 `HERMES_NPM_PKG` / `HERMES_INSTALL_CMD` with `CD_HERMES_SSH_USER` empty. Auth is
 **interactive login only** (`docker compose exec dashboard claude`), no API keys

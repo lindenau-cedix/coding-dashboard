@@ -33,6 +33,11 @@ HERMES_SSH_USER="${CD_HERMES_SSH_USER:-}"
 HERMES_SSH_HOST="${CD_HERMES_SSH_HOST:-host.docker.internal}"
 HERMES_SSH_PORT="${CD_HERMES_SSH_PORT:-22}"
 HERMES_SSH_KEY="/home/app/.ssh/id_hermes"
+# The host's Hermes cannot see the data volume, so the dashboard runs it inside a
+# COPY of the project here — a dir bind-mounted from the host at the SAME path so
+# `cd {project_dir}` resolves identically on both sides. Ensure it exists/writable.
+HERMES_STAGING_DIR="${CD_HERMES_STAGING_DIR:-/tmp/coding-dashboard-hermes}"
+[[ -n "$HERMES_SSH_USER" ]] && mkdir -p "$HERMES_STAGING_DIR" 2>/dev/null || true
 # known_hosts must live somewhere the app user can write (the single-file key
 # bind mount leaves ~/.ssh root-owned), so keep it in the home volume root.
 HERMES_KNOWN_HOSTS="$HOME/.ssh_known_hosts"
@@ -58,9 +63,10 @@ from app.config import default_agents, DEFAULT_CONTEXT_INSTRUCTION
 
 # --- Hermes-over-SSH wiring (default Docker mode) ---------------------------
 # When CD_HERMES_SSH_USER is set, Hermes is NOT run in this container; instead we
-# rewrite its command/session_command to drive the HOST's `hermes` over SSH. The
-# repos live in a data dir bind-mounted at an identical path on the host, so the
-# remote `cd {project_dir}` lands on the same working tree the container manages.
+# rewrite its command/session_command to drive the HOST's `hermes` over SSH, and
+# flag host_staging so the dashboard runs it inside a COPY of the project placed in
+# CD_HERMES_STAGING_DIR — a dir bind-mounted at an identical path on the host — so
+# the remote `cd {project_dir}` lands on the same files; the result is merged back.
 ssh_user = os.environ.get("CD_HERMES_SSH_USER", "").strip()
 ssh_host = (os.environ.get("CD_HERMES_SSH_HOST") or "host.docker.internal").strip()
 ssh_port = (os.environ.get("CD_HERMES_SSH_PORT") or "22").strip()
@@ -101,6 +107,12 @@ for key, spec in default_agents().items():
         d["unset_env"] = []  # ssh client, not a python venv to sanitise
         d["command"] = ["ssh"] + _ssh_opts() + [f"{ssh_user}@{ssh_host}", HERMES_SSH_TASK_REMOTE]
         d["session_command"] = ["ssh", "-tt"] + _ssh_opts() + [f"{ssh_user}@{ssh_host}", HERMES_SSH_SESSION_REMOTE]
+        # Hermes runs on the HOST, which cannot see the dashboard's data volume.
+        # host_staging makes the dashboard run it inside a COPY of the project under
+        # CD_HERMES_STAGING_DIR (bind-mounted at the same path host<->container):
+        # the project is copied in, the host edits it, and the dashboard merges the
+        # result back + pushes (a merge conflict is left on a branch for the user).
+        d["host_staging"] = True
         d["enabled"] = True
     else:
         # Enable an agent only if its CLI is actually installed in this image
@@ -147,6 +159,8 @@ echo "      docker compose exec dashboard claude        # then log in in the TUI
 echo "      docker compose exec dashboard codex login"
 if [[ -n "$HERMES_SSH_USER" ]]; then
   echo "==> Hermes runs on the HOST over SSH as ${HERMES_SSH_USER}@${HERMES_SSH_HOST}:${HERMES_SSH_PORT} (key: $HERMES_SSH_KEY)."
+  echo "    Project files are staged in $HERMES_STAGING_DIR (shared with the host at the same path);"
+  echo "    the dashboard copies the project there, Hermes edits it, and the result is merged back + pushed."
   echo "    Verify connectivity (host must allow this key + have hermes installed):"
   echo "      docker compose exec dashboard ssh -i $HERMES_SSH_KEY -p $HERMES_SSH_PORT -o UserKnownHostsFile=$HERMES_KNOWN_HOSTS -o StrictHostKeyChecking=accept-new ${HERMES_SSH_USER}@${HERMES_SSH_HOST} hermes --version"
 elif have hermes; then

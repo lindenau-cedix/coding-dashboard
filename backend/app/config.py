@@ -52,6 +52,17 @@ class Settings(BaseSettings):
     git_author_email: str = "coding-dashboard@localhost"
     default_branch: str = "main"
 
+    # --- Host staging (for agents with ``host_staging`` set, e.g. the SSH-driven
+    # Hermes in the Docker deployment) ---
+    # When an agent runs on a DIFFERENT machine than the dashboard (the container
+    # drives the host's Hermes over SSH), it cannot see the repos that live in the
+    # dashboard's data dir.  Such agents instead run inside a throwaway COPY of the
+    # project placed under this directory, which is bind-mounted into the container
+    # at an IDENTICAL path on both sides so ``cd {project_dir}`` resolves to the
+    # same files for the container (copies in / integrates back) and the host
+    # (Hermes edits).  Default lives under /tmp and is cleaned per run.
+    hermes_staging_dir: Path = Path("/tmp/coding-dashboard-hermes")
+
     # --- Files / serving ---
     agents_config_path: Path = Path("./config.yaml")
     frontend_dist: Path = Path("../frontend/dist")
@@ -127,6 +138,16 @@ class AgentSpec(BaseModel):
     cwd: str = "{project_dir}"
     timeout_seconds: Optional[int] = None
     enabled: bool = True
+    # If set, this agent does NOT run where the dashboard's repos live (it runs on
+    # another machine, e.g. the host's Hermes driven over SSH).  The dashboard then
+    # runs it inside a throwaway COPY of the project under ``settings.hermes_staging_dir``
+    # (bind-mounted at an identical path host<->container): the project is copied
+    # in, the agent edits it remotely, and its commit is merged back into the
+    # canonical repo + pushed afterwards (conflicts are left on a branch for a
+    # manual merge).  ``{project_dir}`` then resolves to that staging copy.  Set by
+    # the Docker entrypoint on the Hermes agent when SSH mode is active; ``False``
+    # everywhere else (local Hermes / systemd installs are unaffected).
+    host_staging: bool = False
 
 
 DEFAULT_CONTEXT_INSTRUCTION = """\

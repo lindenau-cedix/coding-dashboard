@@ -521,6 +521,71 @@ def test_worktree_merge() -> None:
     )
 
 
+def test_host_staging() -> None:
+    """Host-staging flow (off-host agents, e.g. the SSH-driven Hermes): the agent
+    edits a COPY of the project; the commit is fetched back, merged into the
+    default branch and pushed; a conflicting copy is kept on a pushed branch
+    (merge_state='conflict') without touching the default branch."""
+    from app import host_staging
+
+    remote = TMP / "hs-remote.git"
+    proj = TMP / "hs-proj"
+    run(["git", "init", "--bare", str(remote)])
+    git_ops.clone(str(remote), proj, token="")
+    git_ops.ensure_identity(proj, "Tester", "t@example.com")
+    (proj / "base.txt").write_text("base\n", encoding="utf-8")
+    git_ops.commit_all(proj, "init", "Tester", "t@example.com")
+    git_ops.push(proj, "main", token="")
+
+    # 1. Clean run: copy the project, edit the copy, integrate -> merged + pushed.
+    stage1 = TMP / "hs-stage1"
+    host_staging.prepare_copy(str(proj), stage1)
+    check("staging copy is an independent repo", git_ops.is_git_repo(stage1), str(stage1))
+    check("staging copy has the project files", (stage1 / "base.txt").exists())
+    (stage1 / "feature_a.txt").write_text("A\n", encoding="utf-8")
+    res1 = host_staging.integrate(
+        str(proj), str(stage1), "cd/task/aaa", "main", "",
+        "Tester", "t@example.com", "feature A", "feature A", cleanup=True,
+    )
+    check("staging integrate merged", res1["merge_state"] == "merged", str(res1["messages"]))
+    check("staging integrate pushed", res1["pushed"] is True, str(res1["messages"]))
+    check("staging copy cleaned up (cleanup=True)", not stage1.exists(), str(stage1))
+    files = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
+    check("staged feature on remote", "feature_a.txt" in files, files)
+
+    # 2. Conflicting copy: change base.txt in the copy AND on the default branch so
+    #    the merge cannot apply -> kept on a pushed branch, default branch untouched.
+    stage2 = TMP / "hs-stage2"
+    host_staging.prepare_copy(str(proj), stage2)
+    (stage2 / "base.txt").write_text("staged change\n", encoding="utf-8")
+    (proj / "base.txt").write_text("main change\n", encoding="utf-8")
+    git_ops.commit_all(proj, "main edit", "Tester", "t@example.com")
+    head_before = git_ops.head_commit(proj)
+    res2 = host_staging.integrate(
+        str(proj), str(stage2), "cd/task/bbb", "main", "",
+        "Tester", "t@example.com", "conflicting", "conflicting", cleanup=False,
+    )
+    check("staging conflict detected", res2["merge_state"] == "conflict", str(res2["messages"]))
+    check(
+        "default branch untouched on staging conflict",
+        git_ops.head_commit(proj) == head_before,
+        f"{git_ops.head_commit(proj)} vs {head_before}",
+    )
+    branch_on_remote = run(["git", "--git-dir", str(remote), "branch", "--list", "cd/task/bbb"])
+    check("conflict branch pushed to remote", "cd/task/bbb" in branch_on_remote, branch_on_remote)
+    check("staging copy kept on conflict (cleanup=False)", stage2.exists(), str(stage2))
+    check(
+        "default branch has no conflict markers",
+        "<<<<<<<" not in (proj / "base.txt").read_text(encoding="utf-8"),
+        (proj / "base.txt").read_text(encoding="utf-8"),
+    )
+    # is_staging_dir keys off settings.hermes_staging_dir (the shared mount root).
+    from app.config import get_settings
+    root = Path(get_settings().hermes_staging_dir).resolve()
+    check("is_staging_dir true under root", host_staging.is_staging_dir(root / "tasks" / "x"))
+    check("is_staging_dir false for project dir", not host_staging.is_staging_dir(str(proj)))
+
+
 def test_git_cycle() -> None:
     remote = TMP / "remote.git"
     work = TMP / "work"
@@ -1102,6 +1167,7 @@ def main() -> int:
         test_images()
         test_config_backfill()
         test_worktree_merge()
+        test_host_staging()
         test_git_cycle()
         test_api_and_task()
         test_session_api_and_manager()

@@ -56,6 +56,33 @@ def clone(clone_url: str, dest: str | Path, token: str, branch: str | None = Non
     _run(args, token=token)
 
 
+def local_clone(src: str | Path, dest: str | Path) -> None:
+    """Clone a local repo into ``dest`` as a fully independent copy.
+
+    ``--no-hardlinks`` forces a real file copy of the object store (no hardlinks
+    back into ``src``), so the clone can be edited on another machine (the host's
+    Hermes over a shared bind mount) without ever touching the source repo.  The
+    clone's ``origin`` points at ``src`` and is never used: changes are brought
+    back by fetching the clone's HEAD by path (:func:`fetch_into_branch`).
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _run(["clone", "--no-hardlinks", str(src), str(dest)])
+
+
+def fetch_into_branch(repo_dir: str | Path, src_path: str | Path, branch: str) -> None:
+    """Fetch ``src_path``'s current HEAD into a local ``branch`` in ``repo_dir``.
+
+    Used to pull a host staging copy's commit back into the canonical repo by
+    path (no network, no shared object store).  Force (``+``) so a re-run/retry
+    overwrites a stale branch of the same name.
+    """
+    _run(
+        ["fetch", "--no-tags", str(src_path), f"+HEAD:refs/heads/{branch}"],
+        cwd=repo_dir,
+    )
+
+
 def ensure_identity(repo_dir: str | Path, name: str, email: str) -> None:
     _run(["config", "user.name", name], cwd=repo_dir)
     _run(["config", "user.email", email], cwd=repo_dir)
