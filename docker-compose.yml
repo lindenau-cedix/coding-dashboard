@@ -83,6 +83,11 @@ services:
       # MUST equal the host path of the staging bind mount below so {project_dir}
       # resolves to the same files in the container and on the host.
       - CD_HERMES_STAGING_DIR=${CD_HERMES_STAGING_HOST_DIR:-/tmp/coding-dashboard-hermes}
+      # Docker normally cannot run Codex's bubblewrap workspace sandbox unless the
+      # host allows unprivileged user namespaces. The dashboard already isolates
+      # each run in a worktree/staging copy, so Docker defaults Codex to no
+      # inner sandbox; override to workspace-write if your host supports it.
+      - CD_CODEX_SANDBOX=${CD_CODEX_SANDBOX:-danger-full-access}
     # Reach the host's sshd from inside the container via host.docker.internal.
     extra_hosts:
       - "host.docker.internal:host-gateway"

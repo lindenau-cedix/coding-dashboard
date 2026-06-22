@@ -489,16 +489,29 @@ async def _run_agent_inner(
     parser = _make_parser(spec.stream_format)
     transcript: list[str] = []
 
+    async def emit(raw_line: bytes) -> None:
+        display = parser.feed(raw_line.decode("utf-8", errors="replace"))
+        if display:
+            transcript.append(display)
+            await on_output(display)
+
     async def pump() -> None:
         assert proc.stdout is not None
+        pending = bytearray()
         while True:
-            raw = await proc.stdout.readline()
+            raw = await proc.stdout.read(16384)
             if not raw:
                 break
-            display = parser.feed(raw.decode("utf-8", errors="replace"))
-            if display:
-                transcript.append(display)
-                await on_output(display)
+            pending.extend(raw)
+            while True:
+                newline = pending.find(b"\n")
+                if newline < 0:
+                    break
+                line = bytes(pending[: newline + 1])
+                del pending[: newline + 1]
+                await emit(line)
+        if pending:
+            await emit(bytes(pending))
 
     try:
         if spec.timeout_seconds:

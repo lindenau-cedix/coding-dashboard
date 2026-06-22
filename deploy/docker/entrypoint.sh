@@ -73,6 +73,11 @@ ssh_port = (os.environ.get("CD_HERMES_SSH_PORT") or "22").strip()
 ssh_key = "/home/app/.ssh/id_hermes"
 known_hosts = os.path.expanduser("~/.ssh_known_hosts")
 hermes_ssh = bool(ssh_user)
+codex_sandbox = (os.environ.get("CD_CODEX_SANDBOX") or "").strip()
+hermes_remote_path = (
+    'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:'
+    '$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
+)
 
 def _ssh_opts():
     return [
@@ -84,17 +89,38 @@ def _ssh_opts():
         "-o", "ConnectTimeout=10",
     ]
 
+def _set_cli_option(command, option, value):
+    if not value:
+        return command
+    out = list(command)
+    for idx, tok in enumerate(out):
+        if tok == option:
+            if idx + 1 < len(out):
+                out[idx + 1] = value
+            else:
+                out.append(value)
+            return out
+        if tok.startswith(f"{option}="):
+            out[idx] = f"{option}={value}"
+            return out
+    insert_at = len(out) - 1 if out and out[-1] == "-" else len(out)
+    out[insert_at:insert_at] = [option, value]
+    return out
+
 # Task mode: the prompt is fed to ssh's stdin (prompt_via=stdin) and read on the
 # host with "$(cat)", so arbitrary multi-line prompts pass safely without argv
 # quoting games. HERMES_ACCEPT_HOOKS/NO_COLOR are set on the REMOTE side.
 HERMES_SSH_TASK_REMOTE = (
-    'cd {project_dir} && exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 '
+    f'cd "{{project_dir}}" && {hermes_remote_path} && '
+    'exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 '
     'hermes chat -q "$(cat)" --yolo --accept-hooks'
 )
 # Session mode: -tt forces a remote PTY (the container side is already a PTY), so
 # the interactive TUI works through the double PTY. Start params are appended by
 # the runner as extra remote args after `hermes chat`.
-HERMES_SSH_SESSION_REMOTE = "cd {project_dir} && exec hermes chat"
+HERMES_SSH_SESSION_REMOTE = (
+    f'cd "{{project_dir}}" && {hermes_remote_path} && exec hermes chat'
+)
 
 agents = {}
 for key, spec in default_agents().items():
@@ -114,6 +140,9 @@ for key, spec in default_agents().items():
         # result back + pushes (a merge conflict is left on a branch for the user).
         d["host_staging"] = True
         d["enabled"] = True
+    elif key == "codex" and codex_sandbox:
+        d["command"] = _set_cli_option(d["command"], "--sandbox", codex_sandbox)
+        d["enabled"] = shutil.which(spec.command[0]) is not None
     else:
         # Enable an agent only if its CLI is actually installed in this image
         # (claude/codex baked in; Hermes only when self-contained / no SSH user).
@@ -162,7 +191,7 @@ if [[ -n "$HERMES_SSH_USER" ]]; then
   echo "    Project files are staged in $HERMES_STAGING_DIR (shared with the host at the same path);"
   echo "    the dashboard copies the project there, Hermes edits it, and the result is merged back + pushed."
   echo "    Verify connectivity (host must allow this key + have hermes installed):"
-  echo "      docker compose exec dashboard ssh -i $HERMES_SSH_KEY -p $HERMES_SSH_PORT -o UserKnownHostsFile=$HERMES_KNOWN_HOSTS -o StrictHostKeyChecking=accept-new ${HERMES_SSH_USER}@${HERMES_SSH_HOST} hermes --version"
+  echo "      docker compose exec dashboard ssh -i $HERMES_SSH_KEY -p $HERMES_SSH_PORT -o UserKnownHostsFile=$HERMES_KNOWN_HOSTS -o StrictHostKeyChecking=accept-new ${HERMES_SSH_USER}@${HERMES_SSH_HOST} 'export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && hermes --version'"
 elif have hermes; then
   echo "==> Hermes is self-contained in this image (CD_HERMES_SSH_USER unset)."
 else

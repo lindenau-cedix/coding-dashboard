@@ -197,7 +197,8 @@ docker compose exec dashboard codex login   #   "
 # Verify the container can reach the host's Hermes over SSH:
 docker compose exec dashboard ssh -i /home/app/.ssh/id_hermes \
   -o UserKnownHostsFile=/home/app/.ssh_known_hosts -o StrictHostKeyChecking=accept-new \
-  "$CD_HERMES_SSH_USER@host.docker.internal" hermes --version
+  "$CD_HERMES_SSH_USER@host.docker.internal" \
+  'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && hermes --version'
 ```
 
 **Reachability:** by default the service listens only on `127.0.0.1:8000`. For LAN
@@ -220,10 +221,18 @@ sensible defaults. Build / runtime settings:
 | `APP_UID` / `APP_GID` | build arg / shell | uid/gid of that host user (owns the shared staging dir; keep stable across rebuilds) | `1000` |
 | `CD_HERMES_STAGING_HOST_DIR` | shell | Host path bind-mounted (at the **same** path) where the project is staged for the host's Hermes | `/tmp/coding-dashboard-hermes` |
 | `CD_HERMES_SSH_KEY_HOST` | shell | Host path of the private key the container ssh's with | `~/.ssh/id_coding_dashboard` |
+| `CD_CODEX_SANDBOX` | shell / compose env | Codex sandbox mode inside Docker; default avoids bubblewrap user-namespace failures | `danger-full-access` |
 
 `host.docker.internal` is mapped to the host gateway via `extra_hosts` in
 `docker-compose.yml`; make sure the host's sshd listens on that interface (e.g.
 the docker bridge) and any host firewall allows it.
+
+Docker defaults Codex to `--sandbox danger-full-access` because Codex's
+`workspace-write` sandbox uses bubblewrap/user namespaces, which many Docker
+hosts disable for unprivileged container users. Task and session writes are still
+contained by the dashboard's per-run git worktrees or host-staging copies. If your
+host allows unprivileged user namespaces and you want Codex's inner sandbox too,
+run Compose with `CD_CODEX_SANDBOX=workspace-write`.
 
 To instead ship a **self-contained** in-image Hermes (no host coupling; log in
 with `docker compose exec dashboard hermes`), leave `CD_HERMES_SSH_USER` empty and
@@ -257,7 +266,8 @@ docker compose up -d
 # Set CD_HERMES_SSH_USER in the env file, then verify the host's Hermes is reachable:
 docker compose exec dashboard ssh -i /home/app/.ssh/id_hermes \
   -o UserKnownHostsFile=/home/app/.ssh_known_hosts -o StrictHostKeyChecking=accept-new \
-  "$CD_HERMES_SSH_USER@host.docker.internal" hermes --version
+  "$CD_HERMES_SSH_USER@host.docker.internal" \
+  'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && hermes --version'
 ```
 
 > **Ran the short-lived host-bind-mount build?** An interim version bind-mounted the
@@ -274,6 +284,10 @@ dir) — use the name shown by `docker volume ls` if it isn't
 `coding-dashboard_cd-home`. **If you change `CD_HERMES_SSH_USER` later**, delete
 `config.yaml` in the `cd-config` volume so it regenerates with the new SSH command
 (it is written once and never overwritten).
+
+Changes to `CD_CODEX_SANDBOX` are applied when the backend loads the agent config,
+so an existing `cd-config` volume does not have to be deleted just to switch Codex
+away from Docker's default `danger-full-access` value.
 
 On the **first start**, the container automatically detects which agent CLIs are
 available and enables only those in `config.yaml` (in the `cd-config` volume).

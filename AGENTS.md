@@ -4,6 +4,44 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-22 - codex (Docker Compose: Codex sandbox, Hermes SSH PATH, Claude long-line output)
+
+**Task:** Fix three Docker Compose agent failures: Codex crashed when its
+`workspace-write` sandbox tried to start bubblewrap without unprivileged user
+namespaces; SSH-driven Hermes could reach the host but `hermes` was not on the
+remote non-login PATH; Claude Code runs could fail internally with
+`Separator is found, but chunk is longer than limit` on very large stream-json
+events.
+
+**What changed:**
+- Docker now sets `CD_CODEX_SANDBOX=danger-full-access` by default in
+  `docker-compose.yml`. `load_agents_config()` applies that runtime override to
+  both fresh defaults and existing `cd-config/config.yaml`, so users do not have
+  to delete the config volume just to escape the bubblewrap/user-namespace
+  failure. Set `CD_CODEX_SANDBOX=workspace-write` only on hosts where Docker can
+  create unprivileged user namespaces.
+- The Docker entrypoint now generates Hermes SSH commands with an explicit
+  remote PATH (`$HOME/.local/bin`, `$HOME/bin`, cargo/npm global dirs, system
+  bins) and quotes `{project_dir}`. The config loader also normalizes existing
+  `host_staging` Hermes SSH configs at runtime, so old generated configs find the
+  host's `~/.local/bin/hermes` after restart.
+- `run_agent()` no longer uses `StreamReader.readline()` for agent stdout.
+  It reads fixed-size byte chunks and splits lines itself, avoiding asyncio's
+  line-length limit for large Claude stream-json events.
+- README and Docker env example document `CD_CODEX_SANDBOX` and update the
+  Hermes SSH verification command to use the same remote PATH.
+- Smoke coverage was extended for long Claude stdout lines and for persisted
+  Docker config normalization.
+
+**Verified:** `python3 -m compileall -q backend/app`, `python3 -m py_compile
+backend/tests/smoke.py`, `bash -n deploy/docker/entrypoint.sh`, parsed the
+entrypoint Python heredoc with `ast.parse`, `git diff --check`, and rendered
+`docker compose config` with the example env file (showing
+`CD_CODEX_SANDBOX: danger-full-access`, `cd-data`, identical staging bind mount,
+and SSH key mount). Full `smoke.py` could not run in this workspace because the
+global Python environment lacks backend dependencies (`pydantic`) and no project
+`.venv` is present. Not committed/pushed — the dashboard handles that.
+
 ### 2026-06-19 - claude (Docker: keep data in cd-data; stage the project to /tmp for the host's Hermes)
 
 **Task:** The earlier "Hermes over SSH" change shared the WHOLE data dir as a host
