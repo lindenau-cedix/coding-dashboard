@@ -7,6 +7,7 @@ server without touching code.
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional
@@ -251,9 +252,67 @@ class AgentsConfig(BaseModel):
     context_instruction: str = DEFAULT_CONTEXT_INSTRUCTION
 
 
+_HERMES_REMOTE_PATH_EXPORT = (
+    'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:'
+    '$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
+)
+
+
+def _set_cli_option(command: list[str], option: str, value: str) -> list[str]:
+    """Set or insert a two-token CLI option without disturbing a trailing stdin marker."""
+    if not value:
+        return command
+    out = list(command)
+    for idx, tok in enumerate(out):
+        if tok == option:
+            if idx + 1 < len(out):
+                out[idx + 1] = value
+            else:
+                out.append(value)
+            return out
+        if tok.startswith(f"{option}="):
+            out[idx] = f"{option}={value}"
+            return out
+    insert_at = len(out) - 1 if out and out[-1] == "-" else len(out)
+    out[insert_at:insert_at] = [option, value]
+    return out
+
+
+def _ensure_hermes_remote_path(remote: str) -> str:
+    """Make SSH-driven Hermes find ~/.local/bin/hermes in non-login shells."""
+    if "hermes" not in remote or "export PATH=" in remote:
+        return remote
+    for prefix in ('cd "{project_dir}" && ', "cd {project_dir} && "):
+        if remote.startswith(prefix):
+            rest = remote[len(prefix) :]
+            return f'cd "{{project_dir}}" && {_HERMES_REMOTE_PATH_EXPORT} && {rest}'
+    return remote
+
+
+def _normalize_hermes_ssh_argv(command: list[str]) -> list[str]:
+    out = list(command)
+    for idx, tok in enumerate(out):
+        if "{project_dir}" in tok and "hermes" in tok:
+            out[idx] = _ensure_hermes_remote_path(tok)
+    return out
+
+
+def _apply_runtime_agent_overrides(agents: dict[str, AgentSpec]) -> dict[str, AgentSpec]:
+    """Apply deployment-level command fixes to both fresh and persisted configs."""
+    codex_sandbox = (os.environ.get("CD_CODEX_SANDBOX") or "").strip()
+    for key, spec in agents.items():
+        if key == "codex" and codex_sandbox:
+            spec.command = _set_cli_option(spec.command, "--sandbox", codex_sandbox)
+        if key == "hermes" and spec.host_staging:
+            spec.command = _normalize_hermes_ssh_argv(spec.command)
+            if spec.session_command:
+                spec.session_command = _normalize_hermes_ssh_argv(spec.session_command)
+    return agents
+
+
 def load_agents_config(path: Path) -> AgentsConfig:
     if not path.exists():
-        return AgentsConfig(agents=default_agents())
+        return AgentsConfig(agents=_apply_runtime_agent_overrides(default_agents()))
 
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     agents_raw = data.get("agents") or {}
@@ -291,6 +350,7 @@ def load_agents_config(path: Path) -> AgentsConfig:
         # explicit and are not mutated.
         for key, spec in builtin.items():
             agents.setdefault(key, spec)
+    agents = _apply_runtime_agent_overrides(agents)
     return AgentsConfig(
         agents=agents,
         context_instruction=data.get("context_instruction") or DEFAULT_CONTEXT_INSTRUCTION,

@@ -312,6 +312,22 @@ def test_agent_runner() -> None:
     check("last-message file becomes summary", res3.summary == "FINALE ANTWORT", res3.summary)
     check("last-message run streamed too", "streamed zwischenschritt" in res3.transcript, res3.transcript)
 
+    long_json_spec = AgentSpec(
+        key="claude",
+        display_name="Claude Long Line",
+        command=[
+            PY,
+            "-c",
+            "import json; print(json.dumps({'type':'assistant','message':"
+            "{'content':[{'type':'text','text':'x'*70000}]}}))",
+        ],
+        stream_format="claude-json",
+    )
+    chunks = []
+    res4 = asyncio.run(run_agent(long_json_spec, "p", str(TMP), lambda c: _collect(chunks, c)))
+    check("agent handles long stdout line", res4.exit_code == 0 and not res4.is_error, str(res4.exit_code))
+    check("long stdout line streamed", "x" * 1000 in res4.transcript, res4.transcript[:200])
+
 
 async def _collect(buf: list[str], c: str) -> None:
     buf.append(c)
@@ -449,6 +465,68 @@ def test_config_backfill() -> None:
     )
     custom = load_agents_config(custom_path)
     check("backfill: custom-only config stays explicit", set(custom.agents) == {"fake"}, str(sorted(custom.agents)))
+
+    old_sandbox = os.environ.get("CD_CODEX_SANDBOX")
+    try:
+        os.environ["CD_CODEX_SANDBOX"] = "danger-full-access"
+        docker_cfg_path = TMP / "docker-existing.yaml"
+        docker_cfg_path.write_text(
+            "agents:\n"
+            "  hermes:\n"
+            '    display_name: "Hermes"\n'
+            "    command:\n"
+            '      - "ssh"\n'
+            '      - "-i"\n'
+            '      - "/home/app/.ssh/id_hermes"\n'
+            '      - "-p"\n'
+            '      - "22"\n'
+            '      - "debian@host.docker.internal"\n'
+            '      - "cd {project_dir} && exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 hermes chat -q \\"$(cat)\\" --yolo --accept-hooks"\n'
+            "    session_command:\n"
+            '      - "ssh"\n'
+            '      - "-tt"\n'
+            '      - "-i"\n'
+            '      - "/home/app/.ssh/id_hermes"\n'
+            '      - "-p"\n'
+            '      - "22"\n'
+            '      - "debian@host.docker.internal"\n'
+            '      - "cd {project_dir} && exec hermes chat"\n'
+            "    prompt_via: stdin\n"
+            "    stream_format: raw\n"
+            "    host_staging: true\n"
+            "    enabled: true\n"
+            "  codex:\n"
+            '    display_name: "Codex"\n'
+            '    command: ["codex", "exec", "--cd", "{project_dir}", "--sandbox", "workspace-write", "--color", "never", "--ephemeral", "--output-last-message", "{last_message_file}", "-"]\n'
+            "    prompt_via: stdin\n"
+            "    stream_format: codex\n"
+            "    enabled: true\n",
+            encoding="utf-8",
+        )
+        docker_cfg = load_agents_config(docker_cfg_path)
+        codex_cmd = docker_cfg.agents["codex"].command
+        sandbox_idx = codex_cmd.index("--sandbox")
+        check(
+            "docker override: codex sandbox patched",
+            codex_cmd[sandbox_idx + 1] == "danger-full-access",
+            str(codex_cmd),
+        )
+        hermes_remote = docker_cfg.agents["hermes"].command[-1]
+        check(
+            "docker override: hermes remote PATH added",
+            "export PATH=" in hermes_remote and "$HOME/.local/bin" in hermes_remote,
+            hermes_remote,
+        )
+        check(
+            "docker override: hermes project dir quoted",
+            hermes_remote.startswith('cd "{project_dir}" && '),
+            hermes_remote,
+        )
+    finally:
+        if old_sandbox is None:
+            os.environ.pop("CD_CODEX_SANDBOX", None)
+        else:
+            os.environ["CD_CODEX_SANDBOX"] = old_sandbox
 
 
 def test_worktree_merge() -> None:
