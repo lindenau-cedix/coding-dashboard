@@ -225,7 +225,20 @@ sensible defaults. Build / runtime settings:
 
 `host.docker.internal` is mapped to the host gateway via `extra_hosts` in
 `docker-compose.yml`; make sure the host's sshd listens on that interface (e.g.
-the docker bridge) and any host firewall allows it.
+the docker bridge) and any host firewall allows the Compose bridge subnet to
+connect to TCP/22. Find the exact source range from the running container:
+
+```bash
+NET=$(docker inspect -f '{{range $n, $_ := .NetworkSettings.Networks}}{{println $n}}{{end}}' \
+  "$(docker compose ps -q dashboard)" | head -n1)
+docker network inspect "$NET" \
+  -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+```
+
+Allow that CIDR, for example `172.19.0.0/16`, not the whole Docker private
+range unless you intentionally want all Docker networks to reach sshd. If you
+need a stable firewall rule, define an explicit Compose network subnet and allow
+that fixed CIDR.
 
 Docker defaults Codex to `--sandbox danger-full-access` because Codex's
 `workspace-write` sandbox uses bubblewrap/user namespaces, which many Docker
