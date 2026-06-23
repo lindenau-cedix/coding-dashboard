@@ -120,6 +120,20 @@ export interface TaskImagePayload {
   data: string;
 }
 
+/** One repo as returned by GET /api/projects/from-github. */
+export interface GithubRepo {
+  full_name: string;
+  name: string;
+  description: string;
+  private: boolean;
+  clone_url: string;
+  html_url: string;
+  default_branch: string;
+  fork: boolean;
+  archived: boolean;
+  already_imported: boolean;
+}
+
 export interface ProjectCreatePayload {
   name: string;
   description?: string;

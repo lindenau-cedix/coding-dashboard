@@ -2,6 +2,7 @@ import type {
   Agent,
   DirListing,
   FileContent,
+  GithubRepo,
   Project,
   ProjectCreatePayload,
   RunningTask,
@@ -203,6 +204,28 @@ export const api = {
 
   // Cross-project dashboard of currently running/queued agents.
   listRunning: () => request<RunningTask[]>("GET", "/running"),
+
+  // GitHub browse + bulk import ("autoclone all of the user's repos").
+  listFromGithub: () =>
+    request<{
+      repos: GithubRepo[];
+      user: string;
+    }>("GET", "/projects/from-github"),
+  syncFromGithub: (body: {
+    full_names?: string[];
+    include_forks?: boolean;
+    include_archived?: boolean;
+  }) =>
+    request<{
+      results: { full_name: string; status: "imported" | "skipped" | "failed"; detail: string; project_id: string }[];
+      imported: number;
+      skipped: number;
+      failed: number;
+    }>("POST", "/projects/sync-from-github", {
+      full_names: body.full_names ?? [],
+      include_forks: body.include_forks ?? true,
+      include_archived: body.include_archived ?? true,
+    }),
 
   // File browser
   listFiles: (projectId: string, path = "") =>

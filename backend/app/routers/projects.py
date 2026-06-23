@@ -7,7 +7,9 @@ import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from typing import Literal
 
 from .. import git_ops, github_client, uploads
 from ..auth import get_current_user
@@ -60,6 +62,237 @@ def _parse_full_name(repo: str) -> str:
 @router.get("", response_model=list[ProjectOut])
 def list_projects(db: Session = Depends(get_db)) -> list[Project]:
     return db.query(Project).order_by(Project.updated_at.desc()).all()
+
+
+# --------------------------------------------------------------------------- #
+# GitHub browse + bulk import (autoclone all of the user's repos)
+# --------------------------------------------------------------------------- #
+
+class GithubRepoOut(BaseModel):
+    """A repo from GitHub (subset of fields the UI needs)."""
+
+    full_name: str
+    name: str
+    description: str = ""
+    private: bool
+    clone_url: str
+    html_url: str
+    default_branch: str
+    fork: bool
+    archived: bool
+    already_imported: bool = False
+
+
+class GithubListResponse(BaseModel):
+    repos: list[GithubRepoOut]
+    user: str = ""
+
+
+@router.get("/from-github", response_model=GithubListResponse)
+async def list_from_github(db: Session = Depends(get_db)) -> GithubListResponse:
+    """List every repo visible to the GitHub token.
+
+    The frontend uses this to render the "Sync from GitHub" preview: each
+    entry is flagged with ``already_imported`` so the UI can preselect the
+    not-yet-imported ones for bulk clone.
+    """
+    settings = get_settings()
+    if not settings.github_token:
+        raise HTTPException(503, "GitHub-Token nicht konfiguriert (CD_GITHUB_TOKEN).")
+    existing_full_names = {
+        (p.github_full_name or "").lower() for p in db.query(Project).all()
+    }
+    owner = settings.github_owner.strip()
+    try:
+        user = await github_client.get_authenticated_user() if not owner else {}
+        repos = await github_client.list_user_repos(
+            org=owner if owner.lower() != str(user.get("login", "")).lower() else ""
+        )
+    except github_client.GitHubError as exc:
+        code = exc.status_code if 400 <= exc.status_code < 500 else 502
+        raise HTTPException(code, f"GitHub: {exc.message}")
+    out = [
+        GithubRepoOut(
+            full_name=r.get("full_name", ""),
+            name=r.get("name", ""),
+            description=r.get("description") or "",
+            private=bool(r.get("private")),
+            clone_url=r.get("clone_url", ""),
+            html_url=r.get("html_url", ""),
+            default_branch=r.get("default_branch") or settings.default_branch,
+            fork=bool(r.get("fork")),
+            archived=bool(r.get("archived")),
+            already_imported=r.get("full_name", "").lower() in existing_full_names,
+        )
+        for r in repos
+    ]
+    return GithubListResponse(repos=out, user=str(user.get("login", "")) if user else "")
+
+
+class SyncFromGithubRequest(BaseModel):
+    """Selective bulk-import: ``full_names`` lists the repos to clone.
+
+    An empty list = "everything not already imported" (the default behaviour
+    the "Sync all" button triggers).
+    """
+
+    full_names: list[str] = Field(default_factory=list)
+    include_forks: bool = True
+    include_archived: bool = True
+
+
+class SyncFromGithubResult(BaseModel):
+    full_name: str
+    status: Literal["imported", "skipped", "failed"]
+    detail: str = ""
+    project_id: str = ""
+
+
+class SyncFromGithubResponse(BaseModel):
+    results: list[SyncFromGithubResult]
+    imported: int = 0
+    skipped: int = 0
+    failed: int = 0
+
+
+@router.post("/sync-from-github", response_model=SyncFromGithubResponse)
+async def sync_from_github(
+    body: SyncFromGithubRequest, db: Session = Depends(get_db)
+) -> SyncFromGithubResponse:
+    """Clone every (or every selected) GitHub repo that is not yet imported.
+
+    Idempotent: already-imported repos are reported as ``skipped`` rather
+    than erroring, so re-running the sync after a partial outage picks up
+    where it left off.  Per-repo failures are isolated — one bad clone does
+    not abort the rest of the batch.
+    """
+    settings = get_settings()
+    if not settings.github_token:
+        raise HTTPException(503, "GitHub-Token nicht konfiguriert (CD_GITHUB_TOKEN).")
+    existing_full_names = {
+        (p.github_full_name or "").lower(): p for p in db.query(Project).all()
+    }
+
+    owner = settings.github_owner.strip()
+    try:
+        me = await github_client.get_authenticated_user() if not owner else {}
+        org = (
+            owner
+            if owner.lower() != str(me.get("login", "")).lower()
+            else ""
+        )
+        remote_repos = await github_client.list_user_repos(
+            org=org, include_forks=body.include_forks
+        )
+    except github_client.GitHubError as exc:
+        code = exc.status_code if 400 <= exc.status_code < 500 else 502
+        raise HTTPException(code, f"GitHub: {exc.message}")
+
+    wanted = {n.strip().lower() for n in body.full_names if n.strip()}
+    results: list[SyncFromGithubResult] = []
+    imported = skipped = failed = 0
+
+    for r in remote_repos:
+        full_name = (r.get("full_name") or "").strip()
+        if not full_name:
+            continue
+        if not body.include_archived and r.get("archived"):
+            results.append(SyncFromGithubResult(full_name=full_name, status="skipped", detail="archived"))
+            skipped += 1
+            continue
+        if wanted and full_name.lower() not in wanted:
+            continue
+        if full_name.lower() in existing_full_names:
+            proj = existing_full_names[full_name.lower()]
+            results.append(
+                SyncFromGithubResult(
+                    full_name=full_name,
+                    status="skipped",
+                    detail="bereits importiert",
+                    project_id=proj.id,
+                )
+            )
+            skipped += 1
+            continue
+
+        result = await _import_single_repo(db, settings, r)
+        results.append(result)
+        if result.status == "imported":
+            imported += 1
+            # Refresh local cache so a duplicate full_name later in the
+            # batch is recognised as skipped rather than racing the DB.
+            existing_full_names[full_name.lower()] = db.get(Project, result.project_id)
+        else:
+            failed += 1
+
+    return SyncFromGithubResponse(
+        results=results, imported=imported, skipped=skipped, failed=failed
+    )
+
+
+async def _import_single_repo(
+    db: Session, settings, repo_meta: dict
+) -> SyncFromGithubResult:
+    """Clone one repo into ``data_dir/projects/<slug>`` and persist a Project row.
+
+    Mirrors the create/import flow used by ``POST /projects`` so the result
+    is indistinguishable from a manual import.  All errors are caught and
+    returned as ``SyncFromGithubResult(status="failed", detail=...)`` — the
+    caller iterates over many repos and one bad apple must not abort the
+    batch.
+    """
+    full_name = repo_meta.get("full_name", "")
+    name = repo_meta.get("name") or full_name.split("/")[-1]
+    try:
+        slug = _unique_slug(db, _slugify(name))
+        local_path = settings.projects_dir / slug
+        if local_path.exists() and any(local_path.iterdir()):
+            return SyncFromGithubResult(
+                full_name=full_name,
+                status="skipped",
+                detail=f"lokales Verzeichnis existiert bereits: {local_path}",
+            )
+        clone_url = repo_meta.get("clone_url") or ""
+        default_branch = repo_meta.get("default_branch") or settings.default_branch
+        if not clone_url:
+            return SyncFromGithubResult(
+                full_name=full_name, status="failed", detail="keine clone_url von GitHub"
+            )
+        try:
+            await asyncio.to_thread(
+                git_ops.clone, clone_url, local_path, settings.github_token, default_branch
+            )
+            await asyncio.to_thread(
+                git_ops.ensure_identity,
+                local_path,
+                settings.git_author_name,
+                settings.git_author_email,
+            )
+        except Exception as exc:  # noqa: BLE001
+            shutil.rmtree(local_path, ignore_errors=True)
+            return SyncFromGithubResult(
+                full_name=full_name, status="failed", detail=f"Clone fehlgeschlagen: {exc}"
+            )
+        project = Project(
+            name=name,
+            slug=slug,
+            description=repo_meta.get("description") or "",
+            github_full_name=full_name,
+            github_url=repo_meta.get("html_url") or "",
+            clone_url=clone_url,
+            local_path=str(local_path),
+            default_branch=default_branch,
+        )
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        return SyncFromGithubResult(
+            full_name=full_name, status="imported", project_id=project.id
+        )
+    except Exception as exc:  # noqa: BLE001
+        return SyncFromGithubResult(
+            full_name=full_name, status="failed", detail=str(exc)
+        )
 
 
 @router.post("", response_model=ProjectDetail, status_code=status.HTTP_201_CREATED)

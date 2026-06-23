@@ -1232,6 +1232,118 @@ def test_session_workdir_resolution() -> None:
     git_ops.remove_worktree(str(proj), wd2)
 
 
+def _init_bare_main(remote: Path) -> None:
+    """Bare ``git init`` defaults HEAD to ``master`` (not ``main``); set it
+    to ``main`` explicitly so a fresh clone lands on ``main`` and the
+    dashboard's default-branch assumptions hold.  Used by every test that
+    creates a temporary bare remote and immediately clones it."""
+    run(["git", "init", "--bare", str(remote)])
+    run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=remote)
+
+
+def test_auto_pull_helpers() -> None:
+    """The auto-pull primitives: ``fetch_only`` is safe on a dirty tree, and
+    ``has_remote_update`` correctly detects a fast-forward situation."""
+    branch = "main"
+    remote = TMP / "ap-remote.git"
+    repo = TMP / "ap-repo"
+    _init_bare_main(remote)
+    git_ops.clone(str(remote), repo, token="")
+    git_ops.ensure_identity(repo, "T", "t@example.com")
+    (repo / "a.txt").write_text("a", encoding="utf-8")
+    git_ops.commit_all(repo, "init", "T", "t@example.com")
+    git_ops.push(repo, branch, token="")
+
+    # Same HEAD — no remote update.
+    check("auto-pull: no remote update when up to date", not git_ops.has_remote_update(repo, branch))
+
+    # Make a SECOND commit in a temp checkout, push it, then hard-reset the
+    # local clone back one commit so it is BEHIND the remote. (A plain
+    # second clone from the same remote has the same HEAD and can't be
+    # "behind" — the only way for a real dashboard install to fall behind
+    # is for a teammate to push while we're idle.)
+    sibling = TMP / "ap-sibling"
+    git_ops.clone(str(remote), sibling, token="")
+    git_ops.ensure_identity(sibling, "T", "t@example.com")
+    (sibling / "b.txt").write_text("b", encoding="utf-8")
+    git_ops.commit_all(sibling, "second", "T", "t@example.com")
+    git_ops.push(sibling, branch, token="")
+    head1 = run(["git", "rev-parse", "HEAD"], cwd=repo)
+    head2 = run(["git", "rev-parse", "HEAD"], cwd=sibling)
+    assert head1 != head2, "expected two distinct commits in test setup"
+    # Hard-reset the local clone to the older commit so origin is ahead,
+    # then fetch so origin/<branch> is updated to head2 locally.
+    run(["git", "reset", "--hard", head1], cwd=repo)
+    git_ops.fetch_only(repo, token="")
+    check("auto-pull: detects remote ahead", git_ops.has_remote_update(repo, branch))
+
+    # ``fetch_only`` is safe with a dirty tree (no merge attempted).
+    (repo / "dirty.txt").write_text("local edit", encoding="utf-8")
+    git_ops.fetch_only(repo, token="")
+    check("auto-pull: fetch_only leaves dirty tree untouched", (repo / "dirty.txt").exists())
+    # After fetch, has_remote_update still true (we haven't merged yet).
+    check("auto-pull: fetch doesn't merge", not (repo / "b.txt").exists())
+
+    # ``_pull_ff_only`` (the actual function the task runner uses) refuses
+    # to merge when the local dirty change CONFLICTS with the incoming
+    # commit, and silently fast-forwards when it doesn't.  Both branches
+    # must preserve the dirty local file (no data loss).
+    from app.task_runner import _pull_ff_only
+
+    # --- 2a. Conflict scenario: dirty change touches a file the remote
+    # commit also touched, so ``git pull --ff-only`` MUST refuse rather
+    # than silently dropping the local edit.  Real-world: the dashboard
+    # never overwrites a user edit; the user has to resolve manually.
+    (repo / "b.txt").write_text("local edit of remote-touched file", encoding="utf-8")
+    blocked = False
+    try:
+        _pull_ff_only(repo, branch, token="")
+    except git_ops.GitError:
+        blocked = True
+    check("auto-pull: pull_ff_only refuses conflicting dirty change", blocked)
+    check("auto-pull: local edit preserved on refused merge", (repo / "b.txt").read_text() == "local edit of remote-touched file")
+
+    # --- 2b. No-conflict scenario: dirty file is local-only (the remote
+    # commit doesn't touch it), so the FF is fine and the dirty file is
+    # preserved alongside the new files from the remote.
+    (repo / "dirty.txt").write_text("only local", encoding="utf-8")
+    (repo / "b.txt").unlink()  # resolve the conflict so the FF succeeds
+    _pull_ff_only(repo, branch, token="")
+    check("auto-pull: pull_ff_only succeeds when no conflict", (repo / "b.txt").exists())
+    check("auto-pull: local-only file preserved through FF", (repo / "dirty.txt").read_text() == "only local")
+    check("auto-pull: no remote update after pull", not git_ops.has_remote_update(repo, branch))
+
+
+def test_sync_from_github_validation() -> None:
+    """The /projects/from-github + /projects/sync-from-github endpoints.
+    We don't hit GitHub (no token / network) — we exercise the route's
+    validation paths and confirm the 503 fires when no token is set."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.config import get_settings
+
+    # Force "no token" AND "no auth" so list_from_github hits the 503 branch
+    # without being intercepted by the auth dependency (which would otherwise
+    # short-circuit a request without an Authorization header with 401 when
+    # ``CD_ADMIN_PASSWORD_HASH`` is configured for the rest of the suite).
+    old_token = os.environ.pop("CD_GITHUB_TOKEN", None)
+    old_hash = os.environ.pop("CD_ADMIN_PASSWORD_HASH", None)
+    get_settings.cache_clear()
+    try:
+        with TestClient(app) as client:
+            r = client.get("/api/projects/from-github")
+            check("from-github without token -> 503", r.status_code == 503, str(r.status_code))
+            r2 = client.post("/api/projects/sync-from-github", json={})
+            check("sync-from-github without token -> 503", r2.status_code == 503, str(r2.status_code))
+    finally:
+        if old_token is not None:
+            os.environ["CD_GITHUB_TOKEN"] = old_token
+        if old_hash is not None:
+            os.environ["CD_ADMIN_PASSWORD_HASH"] = old_hash
+        get_settings.cache_clear()
+
+
 def main() -> int:
     try:
         test_security()
@@ -1253,6 +1365,8 @@ def main() -> int:
         test_worktrees()
         test_session_dirs()
         test_session_workdir_resolution()
+        test_auto_pull_helpers()
+        test_sync_from_github_validation()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

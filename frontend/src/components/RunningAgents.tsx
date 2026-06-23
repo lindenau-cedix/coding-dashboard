@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api";
 import type { RunningTask } from "../types";
 import { Spinner, StatusBadge } from "./ui";
+import { openAgentWindow } from "./WindowManager";
 
 function modeLabel(t: RunningTask): string {
   if (t.is_session || t.mode === "session") return "Session";
@@ -16,7 +16,11 @@ function modeChipClass(t: RunningTask): string {
   return "bg-slate-700/60 text-slate-300";
 }
 
-/** Live cross-project dashboard of all running/queued agents. Polls /running. */
+/** Live cross-project dashboard of all running/queued agents. Polls /running.
+ *  Clicking an entry opens its console / session window directly (the floating
+ *  WindowManager). Sessions open a PTY-backed window; tasks/goals open a live
+ *  TaskConsole. The project itself is NOT navigated to — clicking just opens
+ *  the agent's window, exactly as the user requested. */
 export default function RunningAgents() {
   const [running, setRunning] = useState<RunningTask[] | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
@@ -75,10 +79,12 @@ export default function RunningAgents() {
       {running !== null && running.length > 0 && (
         <div className="divide-y divide-slate-800 border-t border-slate-800">
           {running.map((t) => (
-            <Link
+            <button
               key={t.id}
-              to={`/projects/${t.project_id}`}
-              className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 transition hover:bg-slate-800/50"
+              type="button"
+              onClick={() => openAgentWindow(t, names[t.agent] ?? t.agent)}
+              className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-left transition hover:bg-slate-800/50"
+              title="Agent-Fenster öffnen"
             >
               <StatusBadge status={t.status} />
               <span className="text-sm font-medium text-slate-200">
@@ -91,7 +97,8 @@ export default function RunningAgents() {
               <span className="min-w-0 flex-1 truncate text-sm text-slate-400">
                 {t.prompt || (t.is_session ? "interaktive Session" : "")}
               </span>
-            </Link>
+              <span className="text-xs text-slate-600">öffnen →</span>
+            </button>
           ))}
         </div>
       )}

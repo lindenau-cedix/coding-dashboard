@@ -68,6 +68,30 @@ def build_agent_prompt(
     return f"{base}\n\n---\n{context_instruction}"
 
 
+def _pull_ff_only(repo_dir: str | Path, branch: str, token: str) -> str:
+    """``git pull --ff-only`` — refuse to merge or rebase, just fast-forward.
+
+    Used by the auto-pull step before each task.  Plain ``git pull`` will
+    auto-merge when fast-forward isn't possible, which would silently make a
+    merge commit on the user's behalf; ``--ff-only`` makes the operation a
+    strict no-op (or failure) when local has diverged, so the caller can
+    decide what to do.  The token is supplied so the fetch half authenticates
+    against a private remote.
+    """
+    import subprocess as _sp
+
+    base = ["git"]
+    if token:
+        base += git_ops._auth_args(token)
+    base += ["pull", "--ff-only", "origin", branch]
+    proc = _sp.run(base, cwd=str(repo_dir), capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise git_ops.GitError(
+            (proc.stderr or proc.stdout or "git pull --ff-only failed").strip()
+        )
+    return proc.stdout.strip()
+
+
 class TaskChannel:
     """In-memory pub/sub buffer for one task's live output."""
 
@@ -316,6 +340,20 @@ class TaskManager:
         self._mark(task_id, status="running", started=True)
         ch.publish({"type": "status", "status": "running"})
 
+        # Auto-pull: keep the project's default branch in sync with the remote
+        # so the agent works against the latest code (rather than building on a
+        # stale local HEAD). Best-effort: a failed fetch/publishes a warning
+        # and the run continues — the agent still has a coherent working tree.
+        # Skipped for host-staging agents because they run in a copy that the
+        # host can't push to; the canonical repo IS the source of truth here.
+        if (
+            not getattr(spec, "host_staging", False)
+            and project_dir
+            and Path(project_dir).exists()
+            and git_ops.is_git_repo(project_dir)
+        ):
+            await self._auto_pull(project_id, project_dir, branch, settings, ch)
+
         # Run in an isolated worktree on a dedicated branch so multiple tasks
         # for the same project run in parallel without clobbering each other's
         # working tree.  The branch is merged back into the default branch (and
@@ -412,6 +450,72 @@ class TaskManager:
                 )
 
         self._publish_done(ch, task_id)
+
+    async def _auto_pull(
+        self,
+        project_id: str,
+        project_dir: str,
+        branch: str,
+        settings,
+        ch: TaskChannel,
+    ) -> None:
+        """Fetch + fast-forward the project's default branch off the remote.
+
+        Runs under the per-project lock so it serialises against another task's
+        finalize step on the same project.  Strategy:
+          1. ``git fetch origin`` (always, harmless on a dirty tree).
+          2. Skip the merge when nothing new is on the remote.
+          3. ``git pull --ff-only`` on the default branch (fast-forward only —
+             we never throw away local commits silently).
+          4. If the fast-forward is blocked (dirty tree, divergence, conflict,
+             off-host agent), publish a one-line warning to the live stream and
+             continue.  The agent still gets a coherent working tree — just one
+             based on the pre-fetch local HEAD.
+        """
+        token = settings.github_token
+
+        async with self._project_lock(project_id):
+            try:
+                fetch_out = await asyncio.to_thread(
+                    git_ops.fetch_only, project_dir, token
+                )
+                if fetch_out:
+                    ch.publish({"type": "git", "data": f"[git] fetch: {fetch_out}\n"})
+            except Exception as exc:  # noqa: BLE001
+                ch.publish(
+                    {"type": "git", "data": f"[git] auto-pull: fetch fehlgeschlagen ({exc}); nutze lokales HEAD\n"}
+                )
+                return
+
+            # Cheap no-op when there's nothing new on the remote.
+            try:
+                has_update = await asyncio.to_thread(
+                    git_ops.has_remote_update, project_dir, branch
+                )
+            except Exception:  # noqa: BLE001
+                has_update = True
+            if not has_update:
+                ch.publish({"type": "git", "data": "[git] auto-pull: bereits aktuell\n"})
+                return
+
+            try:
+                pull_out = await asyncio.to_thread(
+                    _pull_ff_only, project_dir, branch, token
+                )
+                if pull_out.strip():
+                    ch.publish({"type": "git", "data": f"[git] auto-pull: {pull_out}\n"})
+                else:
+                    ch.publish({"type": "git", "data": "[git] auto-pull: fast-forward OK\n"})
+            except Exception as exc:  # noqa: BLE001
+                ch.publish(
+                    {
+                        "type": "git",
+                        "data": (
+                            f"[git] auto-pull: fast-forward nicht möglich ({exc}); "
+                            "fahre mit lokalem HEAD fort\n"
+                        ),
+                    }
+                )
 
     async def _setup_worktree(
         self,
@@ -783,6 +887,23 @@ class SessionManager:
             if project:
                 project_dir = project.local_path
                 base_branch = project.default_branch or base_branch
+
+        # Fetch (without merging) so a long-lived session sees fresh code
+        # when it next does ``git pull`` or its CLI refetches.  Best-effort:
+        # network is not always reachable; never block the session on it.
+        # Skipped for host-staging (off-host, no shared remote-tracking ref).
+        if (
+            not getattr(spec, "host_staging", False)
+            and project_dir
+            and Path(project_dir).exists()
+            and git_ops.is_git_repo(project_dir)
+        ):
+            try:
+                await asyncio.to_thread(
+                    git_ops.fetch_only, project_dir, get_settings().github_token
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
         # Resolve the working directory before anything else. A resume must run
         # in the directory where the session was created (agents key saved
