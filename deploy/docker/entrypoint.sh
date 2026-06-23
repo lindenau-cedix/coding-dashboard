@@ -110,14 +110,27 @@ def _set_cli_option(command, option, value):
 # Task mode: the prompt is fed to ssh's stdin (prompt_via=stdin) and read on the
 # host with "$(cat)", so arbitrary multi-line prompts pass safely without argv
 # quoting games. HERMES_ACCEPT_HOOKS/NO_COLOR are set on the REMOTE side.
+# `-t <csv>` (mirroring HERMES_NON_INTERACTIVE_TOOLSETS from the Python side)
+# restricts the host's Hermes toolset to non-interactive ones (excludes
+# `clarify`, which would call into a None platform callback in this one-shot
+# mode and stall the run or bounce back with "Clarify tool is not available
+# in this execution context."). The dashboard's backfill splices this in
+# automatically for existing configs (see _backfill_hermes_flags), so legacy
+# SSH-driven installs get the flag too.
+HERMES_NON_INTERACTIVE_TOOLSETS_CSV = (
+    "web,browser,terminal,file_search,read_file,write_file,"
+    "edit_file,multi_edit,plan,session_search,kanban,image_gen,"
+    "computer_use,video_gen,tts,spotify,delegate_task,todo,cronjob"
+)
 HERMES_SSH_TASK_REMOTE = (
     f'cd "{{project_dir}}" && {hermes_remote_path} && '
     'exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 '
-    'hermes chat -q "$(cat)" --yolo --accept-hooks'
+    f'hermes chat -q "$(cat)" --yolo --accept-hooks -t {HERMES_NON_INTERACTIVE_TOOLSETS_CSV}'
 )
 # Session mode: -tt forces a remote PTY (the container side is already a PTY), so
 # the interactive TUI works through the double PTY. Start params are appended by
-# the runner as extra remote args after `hermes chat`.
+# the runner as extra remote args after `hermes chat`. NO `-t` here: the user is
+# at a real terminal and needs the full toolset (including `clarify`).
 HERMES_SSH_SESSION_REMOTE = (
     f'cd "{{project_dir}}" && {hermes_remote_path} && exec hermes chat'
 )
