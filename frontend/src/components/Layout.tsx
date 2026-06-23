@@ -1,8 +1,11 @@
 import { Link, Outlet } from "react-router-dom";
 import { useAuth } from "../auth";
+import { useProject } from "../projectContext";
+import WindowManager from "./WindowManager";
 
 export default function Layout() {
   const { username, logout, authRequired } = useAuth();
+  const { agents, project } = useProject();
   return (
     <div className="flex min-h-full flex-col">
       <header className="safe-top sticky top-0 z-10 border-b border-slate-800 bg-slate-900/80 backdrop-blur">
@@ -27,6 +30,7 @@ export default function Layout() {
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6">
         <Outlet />
       </main>
+      <WindowManager agents={agents} currentProject={project} />
     </div>
   );
 }

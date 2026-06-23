@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Projects from "./pages/Projects";
 import ProjectDetail from "./pages/ProjectDetail";
 import SessionPage from "./pages/SessionPage";
+import { ProjectProvider } from "./projectContext";
 
 function Splash() {
   return (
@@ -25,25 +26,27 @@ function Protected() {
 export default function App() {
   const { token, ready, authRequired } = useAuth();
   return (
-    <Routes>
-      <Route
-        path="/login"
-        element={
-          !ready ? (
-            <Splash />
-          ) : token || !authRequired ? (
-            <Navigate to="/" replace />
-          ) : (
-            <Login />
-          )
-        }
-      />
-      <Route element={<Protected />}>
-        <Route path="/" element={<Projects />} />
-        <Route path="/projects/:id" element={<ProjectDetail />} />
-        <Route path="/projects/:id/sessions/:taskId" element={<SessionPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Route>
-    </Routes>
+    <ProjectProvider>
+      <Routes>
+        <Route
+          path="/login"
+          element={
+            !ready ? (
+              <Splash />
+            ) : token || !authRequired ? (
+              <Navigate to="/" replace />
+            ) : (
+              <Login />
+            )
+          }
+        />
+        <Route element={<Protected />}>
+          <Route path="/" element={<Projects />} />
+          <Route path="/projects/:id" element={<ProjectDetail />} />
+          <Route path="/projects/:id/sessions/:taskId" element={<SessionPage />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Routes>
+    </ProjectProvider>
   );
 }

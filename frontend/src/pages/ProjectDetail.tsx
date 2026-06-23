@@ -15,7 +15,9 @@ import {
   StatusBadge,
   formatDate,
 } from "../components/ui";
-import type { Agent, Project, Task, TaskImagePayload, TaskMode } from "../types";
+import { useProject } from "../projectContext";
+import { openAgentWindow } from "../components/WindowManager";
+import type { Agent, Project, RunningTask, Task, TaskImagePayload, TaskMode } from "../types";
 
 const MAX_IMAGES = 6;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -31,8 +33,9 @@ function readAsDataUrl(file: File): Promise<string> {
 
 export default function ProjectDetail() {
   const { id = "" } = useParams();
-  const [project, setProject] = useState<Project | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const ctx = useProject();
+  const [project, setProject] = useState<Project | null>(ctx.project);
+  const [agents, setAgents] = useState<Agent[]>(ctx.agents);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -169,6 +172,8 @@ export default function ProjectDetail() {
         if (!active) return;
         setProject(p);
         setAgents(ag);
+        ctx.setProject(p);
+        ctx.setAgents(ag);
         setTasks(ts);
         const firstEnabled = ag.find((a) => a.enabled);
         if (firstEnabled) setAgent(firstEnabled.key);
@@ -198,6 +203,12 @@ export default function ProjectDetail() {
       setPrompt("");
       setImages([]);
       await refreshTasks();
+      // Also pin to the floating window so the user can keep watching while
+      // they create the next task or navigate elsewhere.
+      openAgentWindow(
+        toRunningTask(task, project),
+        agentName[task.agent] ?? task.agent,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Task konnte nicht gestartet werden");
     } finally {
@@ -214,11 +225,52 @@ export default function ProjectDetail() {
       setSessionDialogTaskId(task_id);
       setSessionStartArgs("");
       await refreshTasks();
+      // Pin the new session to the floating window. The legacy in-page
+      // dialog still opens for the user to type into immediately, but the
+      // window survives navigation/refresh.
+      const sessTask: Task = {
+        id: task_id,
+        project_id: id,
+        agent,
+        prompt: sessionStartArgs.trim(),
+        mode: "session",
+        model: "",
+        effort: "",
+        images: [],
+        is_session: true,
+        chat_history: [],
+        status: "running",
+        exit_code: null,
+        result_summary: "",
+        error: "",
+        branch: "",
+        merge_state: "",
+        commit_hash: "",
+        commit_message: "",
+        commit_created: false,
+        pushed: false,
+        created_at: new Date().toISOString(),
+        started_at: null,
+        finished_at: null,
+      };
+      openAgentWindow(
+        toRunningTask(sessTask, project),
+        agentName[agent] ?? agent,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Session konnte nicht gestartet werden");
     } finally {
       setSubmitting(false);
     }
+  }
+
+  /** Cast a Task to the RunningTask shape the WindowManager expects. */
+  function toRunningTask(t: Task, p: Project | null): RunningTask {
+    return {
+      ...t,
+      project_name: p?.name ?? "",
+      project_slug: p?.slug ?? "",
+    };
   }
 
   async function toggleExpand(task: Task) {

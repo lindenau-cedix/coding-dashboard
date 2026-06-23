@@ -4,6 +4,78 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-23 - codex (auto-pull, autoclone, multi-window)
+
+**Task:** Four dashboard improvements in one go:
+1. Auto-pull before every agent run so the agent works against the latest
+   remote HEAD instead of a stale local checkout.
+2. "Sync from GitHub" — bulk-import every repo visible to the token.
+3. Multiple floating agent "windows" (live consoles / sessions) opened
+   side-by-side, persisted across reloads.
+4. Clicking a running agent on the projects page opens its window
+   directly — no more routing through the project detail screen.
+
+**Result:** All four landed in backend + frontend.
+
+**What changed:**
+
+- **Backend — auto-pull** (`backend/app/task_runner.py`,
+  `backend/app/git_ops.py`).  New `TaskManager._auto_pull()` runs under the
+  per-project lock just before the worktree is created: `git fetch origin`
+  → check `has_remote_update()` → `git pull --ff-only origin <branch>`.
+  On any failure (network, dirty tree, divergence) it publishes a one-line
+  warning to the live stream and continues — the agent still gets a
+  coherent working tree, just one based on the pre-fetch local HEAD.
+  Host-staging agents (the SSH-driven Hermes) skip the auto-pull because
+  they run in a copy the host can't push to; the canonical repo IS the
+  source of truth there.  Interactive sessions get a fetch-only call at
+  `start` so a long-lived TUI sees fresh refs without racing user edits.
+- **Backend — bulk GitHub sync**
+  (`backend/app/github_client.py`,
+  `backend/app/routers/projects.py`).  New
+  `GET /api/projects/from-github` paginates every repo visible to the
+  token (`/user/repos` with `affiliation=owner,collaborator,organization_member`,
+  `/orgs/<owner>/repos` when `CD_GITHUB_OWNER` points at an org) and
+  flags already-imported ones.  New
+  `POST /api/projects/sync-from-github` clones the missing repos
+  one-by-one, returns a per-repo status (`imported` / `skipped` /
+  `failed`), and isolates failures so one bad clone doesn't abort the
+  batch.  Per-repo errors are returned as `SyncFromGithubResult.detail`
+  rather than 5xx-ing the whole call.
+- **Frontend — Sync modal**
+  (`frontend/src/components/SyncFromGithubModal.tsx`).  Preview of every
+  remote repo with checkboxes (preselected: not-yet-imported ones), filter
+  input, "include forks / archived" toggles, and a result panel showing
+  per-repo status after sync.
+- **Frontend — window manager**
+  (`frontend/src/components/WindowManager.tsx`,
+  `frontend/src/projectContext.tsx`,
+  `frontend/src/components/Layout.tsx`,
+  `frontend/src/App.tsx`).  A floating bottom tab strip + one focused
+  window at a time.  Multiple running agents can be opened simultaneously;
+  each tab is a TaskConsole (one-shot) or SessionTerminalModal (PTY TUI).
+  State persists in `localStorage` (`cd_open_windows_v1`) so a refresh
+  restores the user's open set.  New `openAgentWindow(task, label)` bus
+  via `window.dispatchEvent('cd-open-window', ...)`.  Finished windows
+  are auto-pruned after one polling cycle so the tray doesn't grow
+  forever.  A `ProjectProvider` exposes the agents list + current
+  project to descendants so the window manager doesn't refetch data the
+  page already has.
+- **Frontend — direct open from projects page**
+  (`frontend/src/components/RunningAgents.tsx`,
+  `frontend/src/pages/Projects.tsx`,
+  `frontend/src/pages/ProjectDetail.tsx`).  `RunningAgents` now dispatches
+  `openAgentWindow` on click instead of `<Link to={"/projects/..."}>`;
+  the project detail page also pins a window when a task or session is
+  started locally, so the user can keep watching it after navigating
+  away.  Projects page header gets a `⇣ Sync von GitHub` button alongside
+  the existing `+ Neues Projekt`.
+
+**Verified:** Backend smoke tests + new `test_auto_pull_helpers` and
+`test_sync_from_github_validation` (15 new checks) all pass.
+`tsc --noEmit` and `vite build` succeed (`✓ 35 modules transformed`).
+All prior smoke tests still pass.
+
 ### 2026-06-22 - codex (Docker Compose: host SSH firewall range)
 
 **Task:** Answer which firewall source range is needed so the Docker Compose

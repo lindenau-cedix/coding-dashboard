@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import NewProjectModal from "../components/NewProjectModal";
 import RunningAgents from "../components/RunningAgents";
+import SyncFromGithubModal from "../components/SyncFromGithubModal";
 import { Button, ErrorText, Spinner, formatDate } from "../components/ui";
 import type { Project } from "../types";
 
@@ -11,6 +12,7 @@ export default function Projects() {
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
+  const [showSync, setShowSync] = useState(false);
 
   async function load() {
     try {
@@ -21,7 +23,7 @@ export default function Projects() {
   }
 
   useEffect(() => {
-    load();
+    void load();
   }, []);
 
   async function remove(p: Project) {
@@ -37,9 +39,14 @@ export default function Projects() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-semibold text-slate-100">Projekte</h1>
-        <Button onClick={() => setShowModal(true)}>+ Neues Projekt</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" onClick={() => setShowSync(true)}>
+            ⇣ Sync von GitHub
+          </Button>
+          <Button onClick={() => setShowModal(true)}>+ Neues Projekt</Button>
+        </div>
       </div>
 
       <ErrorText>{error}</ErrorText>
@@ -54,7 +61,8 @@ export default function Projects() {
         <div className="rounded-2xl border border-dashed border-slate-700 p-12 text-center text-slate-400">
           <p>Noch keine Projekte.</p>
           <p className="mt-1 text-sm">
-            Lege ein neues an oder importiere ein bestehendes GitHub-Repo.
+            Lege ein neues an, importiere ein bestehendes GitHub-Repo oder
+            klone alle Repos auf einmal über <em>Sync von GitHub</em>.
           </p>
         </div>
       ) : (
@@ -114,6 +122,13 @@ export default function Projects() {
             setShowModal(false);
             navigate(`/projects/${p.id}`);
           }}
+        />
+      )}
+
+      {showSync && (
+        <SyncFromGithubModal
+          onClose={() => setShowSync(false)}
+          onSynced={() => void load()}
         />
       )}
     </div>

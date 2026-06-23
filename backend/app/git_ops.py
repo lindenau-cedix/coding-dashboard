@@ -141,6 +141,48 @@ def pull(repo_dir: str | Path, branch: str, token: str) -> str:
     return result.stdout.strip()
 
 
+def fetch_only(repo_dir: str | Path, token: str) -> str:
+    """``git fetch origin`` only — no merge, no working-tree mutation.
+
+    Returns stdout so the caller can surface it in the live task stream. Safe
+    to call on a dirty working tree (unlike ``pull``, which refuses to merge
+    with uncommitted changes). Used to keep the default branch's local tracking
+    ref up to date so the worktree base for an upcoming task reflects remote
+    HEAD without disturbing the user's working tree.
+    """
+    result = _run(["fetch", "origin"], cwd=repo_dir, token=token, check=False)
+    return (result.stdout + result.stderr).strip()
+
+
+def has_remote_update(repo_dir: str | Path, branch: str) -> bool:
+    """True if ``origin/<branch>`` is ahead of the local branch HEAD.
+
+    Returns False on any error — callers should treat "can't tell" as "no
+    update", since a missed refresh just costs one extra fetch on the next
+    check.
+    """
+    head = _run(["rev-parse", "--verify", "HEAD"], cwd=repo_dir, check=False)
+    remote = _run(
+        ["rev-parse", "--verify", "--quiet", f"origin/{branch}"],
+        cwd=repo_dir,
+        check=False,
+    )
+    if head.returncode != 0 or remote.returncode != 0:
+        return False
+    local = head.stdout.strip()
+    upstream = remote.stdout.strip()
+    if not local or not upstream or local == upstream:
+        return False
+    # Is upstream reachable from local? -> local is ahead (no update needed).
+    behind = _run(
+        ["rev-list", "--count", f"{upstream}..{local}"], cwd=repo_dir, check=False
+    )
+    ahead = _run(
+        ["rev-list", "--count", f"{local}..{upstream}"], cwd=repo_dir, check=False
+    )
+    return ahead.returncode == 0 and (ahead.stdout.strip() or "0") != "0"
+
+
 # --------------------------------------------------------------------------- #
 # Worktrees & branch merging
 #
