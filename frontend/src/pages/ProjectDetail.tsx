@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
 import FileBrowser from "../components/FileBrowser";
-import SessionTerminalModal from "../components/SessionTerminalModal";
 import TaskConsole from "../components/TaskConsole";
 import TaskImages from "../components/TaskImages";
 import {
@@ -52,7 +51,6 @@ export default function ProjectDetail() {
   // Multiple tasks/goals can run at once (each on its own branch); show a live
   // console for every one that's active.
   const [activeTaskIds, setActiveTaskIds] = useState<string[]>([]);
-  const [sessionDialogTaskId, setSessionDialogTaskId] = useState<string | null>(null);
 
   const [expanded, setExpanded] = useState<string | null>(null);
   const [outputs, setOutputs] = useState<Record<string, string>>({});
@@ -222,12 +220,11 @@ export default function ProjectDetail() {
     setError("");
     try {
       const { task_id } = await api.createSession(id, agent, "", "", sessionStartArgs.trim());
-      setSessionDialogTaskId(task_id);
       setSessionStartArgs("");
       await refreshTasks();
-      // Pin the new session to the floating window. The legacy in-page
-      // dialog still opens for the user to type into immediately, but the
-      // window survives navigation/refresh.
+      // Pin the new session to its own browser tab. Closing the tab does NOT
+      // end the session — the user can reopen it from the dashboard's tray
+      // tab or from the projects page history.
       const sessTask: Task = {
         id: task_id,
         project_id: id,
@@ -275,7 +272,12 @@ export default function ProjectDetail() {
 
   async function toggleExpand(task: Task) {
     if (task.is_session || task.mode === "session") {
-      setSessionDialogTaskId(task.id);
+      // Sessions live in their own browser tab — opening it from history is
+      // the same gesture as starting one: a single click pops the dedicated
+      // window (or pins to the floating tray if popups are blocked). The
+      // session itself keeps running until the user clicks "Session beenden"
+      // inside that window.
+      openAgentWindow(toRunningTask(task, project), agentName[task.agent] ?? task.agent);
       return;
     }
     if (expanded === task.id) {
@@ -815,18 +817,6 @@ export default function ProjectDetail() {
           </div>
         </Modal>
       )}
-      {sessionDialogTaskId && (
-        <SessionTerminalModal
-          project={project}
-          agents={agents}
-          taskId={sessionDialogTaskId}
-          onClose={() => setSessionDialogTaskId(null)}
-          onEnded={() => {
-            void refreshTasks();
-          }}
-        />
-      )}
-
       {fsOutput && (
         <FullscreenShell
           title={

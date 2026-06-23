@@ -4,6 +4,56 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-23 - hermes (agent windows pop out, single-click session close)
+
+**Task:** Fix the "double-click to close a session" UX and let sessions and
+running tasks open in their own browser window.
+
+**Result:** Single-click close on sessions + a dedicated popup-tab view
+(`/windows/task/:id`, `/windows/session/:id`) becomes the default surface;
+the in-tab floating tray stays as a fallback when popups are blocked.
+
+**What changed:**
+
+- **New route + standalone page**
+  (`frontend/src/pages/AgentWindowPage.tsx`,
+  `frontend/src/App.tsx`). Two new HashRouter routes
+  (`/windows/task/:taskId`, `/windows/session/:taskId`) render an
+  agent's UI in a clean fullscreen view, deliberately outside the
+  dashboard `Layout` (no header, no project nav, no width cap). A small
+  `RequireAuthInline` wrapper gates them so a missing token still
+  redirects to `/login`. Closing the popup tab does **not** end the
+  underlying task / session — only the browser tab goes away; the
+  backend keeps streaming output, so reopening the window from the
+  dashboard reconnects to the same WS with the live buffer.
+- **WindowManager helpers**
+  (`frontend/src/components/WindowManager.tsx`). New
+  `openAgentWindowInNewTab(task)` does the actual `window.open(...)`
+  against the new route URL; `pinAgentWindow(task, label)` is the
+  imperative-bus pin that was previously called `openAgentWindow`. The
+  default `openAgentWindow(task, label)` now tries the popup first and
+  falls back to the in-tab tray if the browser blocked the popup (so
+  silent failures become visible). The focused window's title bar gets
+  a new `⧉` button that promotes any pinned window to a popup. The
+  tray tab's `✕` and the focused window's "Schließen" / header `✕`
+  now all call `closeWindow(taskId)` directly — a single click closes
+  any agent window end-to-end, no more "minimise first, then dismiss"
+  two-step dance that bit sessions hardest.
+- **ProjectDetail cleanup**
+  (`frontend/src/pages/ProjectDetail.tsx`). The inline
+  `sessionDialogTaskId` modal is gone — `startSession()` and clicking a
+  session in history both go straight to `openAgentWindow(...)`, which
+  pops the dedicated session tab. The legacy
+  `/projects/:id/sessions/:taskId` URL is preserved as a redirect to
+  `/windows/session/:taskId` (`SessionPage.tsx`).
+
+**Verified:** `tsc --noEmit` and `vite build` succeed
+(`✓ 36 modules transformed`, +1 over the previous run — the new
+`AgentWindowPage`). Backend untouched; no smoke-test rerun needed.
+No regressions in the existing tray / pinned-window / persistence
+behavior — the floating tray still works for the popup-blocked case
+and survives reloads via `localStorage` (`cd_open_windows_v1`).
+
 ### 2026-06-23 - codex (auto-pull, autoclone, multi-window)
 
 **Task:** Four dashboard improvements in one go:
@@ -132,8 +182,8 @@ backend/app/
   main.py          app factory, lifespan, SPA serving (fallback)
 frontend/src/
   api.ts (REST + apiBase/token), auth.tsx, types.ts
-  pages/ (Login, Projects, ProjectDetail, SessionPage wrapper)
-  components/ (TaskConsole, SessionTerminalModal, TaskImages, ui, ...)
+  pages/ (Login, Projects, ProjectDetail, SessionPage redirect, AgentWindowPage)
+  components/ (TaskConsole, SessionTerminalModal, WindowManager, TaskImages, ui, ...)
 deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, nginx, *.example
 ```
 
@@ -413,6 +463,16 @@ is not in front.
 Frontend is a HashRouter SPA: `api.ts` centralizes REST + base URL / token (base URL is
 build-time `VITE_API_BASE`, overridable at runtime on the login screen for the Android
 app), pages live in `pages/`, and the task console + session modal are in `components/`.
+**Agent windows.** `openAgentWindow(task, label)` in `components/WindowManager.tsx`
+opens the agent in its own browser tab via `window.open(...)` against the
+`#/windows/task/:id` or `#/windows/session/:id` route (rendered by
+`pages/AgentWindowPage.tsx`, deliberately outside the dashboard `Layout` so the popup
+fills its viewport with no header / width cap). When popups are blocked, it falls
+back to the in-tab floating tray. Closing the popup tab never ends the underlying
+task / session — only the tab goes away; reopening it from the dashboard
+reconnects to the same WebSocket with the live buffer intact. The tray's `✕`,
+the focused window's "Schließen" and header `✕` all call `closeWindow(taskId)`
+directly: one click closes any agent window.
 
 ## Gotchas
 
