@@ -1344,6 +1344,154 @@ def test_sync_from_github_validation() -> None:
         get_settings.cache_clear()
 
 
+def test_hermes_clarify_disabled() -> None:
+    """Hermes in non-interactive mode must NOT expose the `clarify` toolset.
+
+    `hermes chat -q "<prompt>"` is one-shot and non-interactive: the dashboard
+    streams stdout to a browser tab with no way to type back.  The `clarify`
+    toolset would call into a None platform callback and either stall the run
+    or bounce back with "Clarify tool is not available in this execution
+    context."  Fix: pass `-t <csv>` excluding `clarify`.
+
+    Interactive sessions (`session_command` = `hermes chat`, real TUI) keep
+    the full toolset so the user can answer questions there.
+    """
+    from app.config import (
+        HERMES_NON_INTERACTIVE_TOOLSETS,
+        default_agents,
+        load_agents_config,
+    )
+
+    hermes = default_agents()["hermes"]
+    csv = HERMES_NON_INTERACTIVE_TOOLSETS
+    toolsets = [t.strip() for t in csv.split(",")]
+
+    # --- Built-in defaults ---
+    check("hermes default: -t flag present", "-t" in hermes.command, str(hermes.command))
+    # The CSV sits at the index right after -t.
+    t_idx = hermes.command.index("-t")
+    check(
+        "hermes default: toolset CSV immediately after -t",
+        hermes.command[t_idx + 1] == csv,
+        str(hermes.command),
+    )
+    check(
+        "hermes default: toolsets exclude clarify",
+        "clarify" not in toolsets,
+        csv,
+    )
+    check(
+        "hermes default: non-empty toolset list (>= 10 entries)",
+        len(toolsets) >= 10,
+        f"len={len(toolsets)}",
+    )
+    check(
+        "hermes default: session_command left untouched",
+        hermes.session_command == ["hermes", "chat"],
+        str(hermes.session_command),
+    )
+
+    # --- Legacy installer config (flat argv) ---
+    legacy = TMP / "hermes-legacy.yaml"
+    legacy.write_text(
+        "agents:\n"
+        "  hermes:\n"
+        '    display_name: "Hermes"\n'
+        '    command: ["hermes", "chat", "-q", "{prompt}"]\n'
+        "    stream_format: raw\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    cfg = load_agents_config(legacy)
+    cmd = cfg.agents["hermes"].command
+    check("hermes legacy: -t appended as separate argv tokens", "-t" in cmd, str(cmd))
+    check("hermes legacy: -t toolsets exclude clarify", "clarify" not in toolsets, csv)
+    # The original tail (--yolo --accept-hooks) must also still be there.
+    check("hermes legacy: --yolo + --accept-hooks backfilled", "--yolo" in cmd and "--accept-hooks" in cmd, str(cmd))
+
+    # --- SSH-driven Docker config (remote-shell string in last argv token) ---
+    ssh_yaml = TMP / "hermes-ssh.yaml"
+    ssh_yaml.write_text(
+        "agents:\n"
+        "  hermes:\n"
+        '    display_name: "Hermes"\n'
+        "    command:\n"
+        '      - "ssh"\n'
+        '      - "-i"\n'
+        '      - "/home/app/.ssh/id_hermes"\n'
+        '      - "-p"\n'
+        '      - "22"\n'
+        '      - "debian@host.docker.internal"\n'
+        '      - "cd {project_dir} && exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 hermes chat -q \\"$(cat)\\" --yolo --accept-hooks"\n'
+        "    session_command:\n"
+        '      - "ssh"\n'
+        '      - "-tt"\n'
+        '      - "-i"\n'
+        '      - "/home/app/.ssh/id_hermes"\n'
+        '      - "-p"\n'
+        '      - "22"\n'
+        '      - "debian@host.docker.internal"\n'
+        '      - "cd {project_dir} && exec hermes chat"\n'
+        "    prompt_via: stdin\n"
+        "    stream_format: raw\n"
+        "    host_staging: true\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    ssh_cfg = load_agents_config(ssh_yaml)
+    ssh_cmd = ssh_cfg.agents["hermes"].command
+    # The command still has 7 tokens (no extra ssh argv leaked).
+    check(
+        "hermes ssh legacy: command still has 7 tokens (no extra argv leaked)",
+        len(ssh_cmd) == 7,
+        str(ssh_cmd),
+    )
+    # The remote-shell string is the last token and now contains the splice.
+    remote = ssh_cmd[-1]
+    # Find the position of `--accept-hooks` and confirm `-t <csv>` immediately
+    # follows it (separated by spaces).
+    padded = " " + remote + " "
+    ah_pos = padded.find(" --accept-hooks ")
+    check(
+        "hermes ssh legacy: --accept-hooks found with surrounding spaces",
+        ah_pos >= 0,
+        repr(remote),
+    )
+    after_ah = padded[ah_pos + len(" --accept-hooks ") :]
+    # After `--accept-hooks `, the next two whitespace-separated tokens must be
+    # `-t` and the CSV (in that order).
+    parts = after_ah.split(" ", 2)
+    check(
+        "hermes ssh legacy: -t immediately follows --accept-hooks",
+        len(parts) >= 2 and parts[0] == "-t",
+        f"got {parts[:2]!r}",
+    )
+    check(
+        "hermes ssh legacy: toolset CSV immediately follows -t",
+        len(parts) >= 3 and parts[1] == csv,
+        f"got {parts[1] if len(parts) >= 2 else None!r}",
+    )
+    # No duplicate `-t` in the remote string (idempotency).
+    check(
+        "hermes ssh legacy: exactly one -t in remote string",
+        remote.count(" -t ") == 1,
+        f"remote.count(' -t ') = {remote.count(' -t ')}",
+    )
+    # And the toolset list does not include `clarify` even after splice.
+    check(
+        "hermes ssh legacy: clarify excluded from the spliced -t",
+        "clarify" not in csv,
+        csv,
+    )
+    # session_command is NOT modified (interactive TUI needs full toolset).
+    sc = ssh_cfg.agents["hermes"].session_command
+    check(
+        "hermes ssh legacy: session_command not modified",
+        "-t" not in sc,
+        str(sc),
+    )
+
+
 def main() -> int:
     try:
         test_security()
@@ -1367,6 +1515,7 @@ def main() -> int:
         test_session_workdir_resolution()
         test_auto_pull_helpers()
         test_sync_from_github_validation()
+        test_hermes_clarify_disabled()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 
