@@ -4,6 +4,50 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-06-23 - hermes (drop in-tab window + taskbar; popup is the only surface)
+
+**Task:** Remove the duplicate in-page agent window and the bottom taskbar
+that appeared next to the popup whenever a Task or Session was started.
+
+**Result:** Only the popup now opens. The in-tab floating window (the
+"focused window" overlay) and the bottom tab strip are both gone. The
+`/windows/{task,session}/:id` popup route is now the single source of
+truth for agent UI - no in-tab tray, no fallback dock, no localStorage
+state for open windows.
+
+**What changed:**
+
+- **`WindowManager` slimmed to a popup helper** (`frontend/src/components/WindowManager.tsx`).
+  The 428-line default-exported `WindowManager` component, the `OpenWindow`
+  type, the `pinAgentWindow` / `cd-open-window` event bus, the `cd_open_windows_v1`
+  localStorage cache, the focused-window overlay, and the bottom tab strip
+  are all gone. The file now exports only `openAgentWindowInNewTab(task)`
+  (which does the `window.open` against `/windows/{kind}/:id`) and a thin
+  `openAgentWindow(task, agentLabel)` wrapper that calls it. The `_agentLabel`
+  parameter is intentionally unused; popup-based windows render their own
+  agent badge from `/api/agents`.
+- **`Layout` no longer mounts the tray** (`frontend/src/components/Layout.tsx`).
+  Dropped the `useProject` import and the `<WindowManager agents={agents}
+  currentProject={project} />` line. The page now just renders
+  `<Outlet />` inside the header / main shell. The `ProjectProvider` in
+  `projectContext.tsx` is kept because `ProjectDetail` still uses
+  `useProject()` for its agent / project cache.
+- **No backend or routing changes.** `AgentWindowPage.tsx`, the
+  `#/windows/task/:taskId` and `#/windows/session/:taskId` routes, the
+  PTY / WS plumbing, and the `SessionTerminalModal` / `TaskConsole` bodies
+  are all untouched. The popup still hosts the agent in its own tab; only
+  the in-page shadow is removed.
+
+**Verified:** `tsc --noEmit` clean; `vite build` succeeds
+(`✓ 36 modules transformed`, same module count as before - the smaller
+`WindowManager.tsx` still counts as one module, and the removed mount
+in `Layout.tsx` doesn't add a new one). `git status` shows exactly the
+two intended files. No `OpenWindow` / `pinAgentWindow` / `cd-open-window`
+/ `cd_open_windows_v1` references remain anywhere in `src/`. The
+`/windows/{task,session}/:id` route is what the popup still opens, so
+resuming / closing / the focused window's `⧉` button / persisted
+behavior described in the 2026-06-23 "pop out" run still work.
+
 ### 2026-06-23 - hermes (agent windows pop out, single-click session close)
 
 **Task:** Fix the "double-click to close a session" UX and let sessions and
@@ -467,12 +511,11 @@ app), pages live in `pages/`, and the task console + session modal are in `compo
 opens the agent in its own browser tab via `window.open(...)` against the
 `#/windows/task/:id` or `#/windows/session/:id` route (rendered by
 `pages/AgentWindowPage.tsx`, deliberately outside the dashboard `Layout` so the popup
-fills its viewport with no header / width cap). When popups are blocked, it falls
-back to the in-tab floating tray. Closing the popup tab never ends the underlying
-task / session — only the tab goes away; reopening it from the dashboard
-reconnects to the same WebSocket with the live buffer intact. The tray's `✕`,
-the focused window's "Schließen" and header `✕` all call `closeWindow(taskId)`
-directly: one click closes any agent window.
+fills its viewport with no header / width cap). The popup is the only surface — there
+is no in-tab tray or focused-window overlay (see the 2026-06-23 "drop in-tab window"
+run). Closing the popup tab never ends the underlying task / session — only the tab
+goes away; reopening it from the dashboard reconnects to the same WebSocket with the
+live buffer intact.
 
 ## Gotchas
 
