@@ -68,6 +68,12 @@ agents:
     # `hermes chat -q "<prompt>"`: einzelne, nicht-interaktive Query, die
     # Zwischenschritte (Tool-Previews) LIVE streamt. --yolo überspringt Approvals,
     # --accept-hooks läuft headless. AGENTS.md wird automatisch aus dem CWD geladen.
+    # `-t <csv>` schränkt die Tool-Auswahl auf nicht-interaktive Toolsets ein
+    # (ohne `clarify`, das in dieser Einbahn-Konsole keinen Platform-Callback
+    # hätte und den Run mit "Clarify tool is not available in this execution
+    # context." abbrechen würde). Interaktive TUI-Sessions (`hermes chat` ohne
+    # -q) behalten absichtlich das volle Toolset, damit der User dort antworten
+    # kann. Passende Liste: HERMES_NON_INTERACTIVE_TOOLSETS in backend/app/config.py.
     command:
       - "hermes"
       - "chat"
@@ -75,6 +81,8 @@ agents:
       - "{prompt}"
       - "--yolo"
       - "--accept-hooks"
+      - "-t"
+      - "web,browser,terminal,file_search,read_file,write_file,edit_file,multi_edit,plan,session_search,kanban,image_gen,computer_use,video_gen,tts,spotify,delegate_task,todo,cronjob"
     prompt_via: arg
     stream_format: raw
     enabled: true

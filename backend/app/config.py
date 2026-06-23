@@ -8,6 +8,7 @@ server without touching code.
 from __future__ import annotations
 
 import os
+import shlex
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional
@@ -15,6 +16,22 @@ from typing import Literal, Optional
 import yaml
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Hermes toolsets allowed in NON-INTERACTIVE task / goal runs.
+#
+# In one-shot `hermes chat -q {prompt} --yolo --accept-hooks` the dashboard streams
+# stdout to a browser tab with no way to type back, so the `clarify` toolset would
+# call into a None platform callback and either stall the run or bounce back with
+# "Clarify tool is not available in this execution context."  Pass `-t <csv>` so
+# the model never even sees `clarify` as an option.  Interactive TUI sessions
+# (`session_command` = `hermes chat`) intentionally keep the full default toolset
+# — the user can answer there.
+HERMES_NON_INTERACTIVE_TOOLSETS = (
+    "web,browser,terminal,file_search,read_file,write_file,"
+    "edit_file,multi_edit,plan,session_search,kanban,image_gen,"
+    "computer_use,video_gen,tts,spotify,delegate_task,todo,cronjob"
+)
 
 
 class Settings(BaseSettings):
@@ -168,6 +185,12 @@ Wichtiger Projekt-Kontext (immer beachten):
    und was die wichtigste Aenderung oder Erkenntnis war. Dieser Block wird vom Dashboard
    NICHT mehr geschrieben; nur das Dashboard entfernt noch alte "Letzte Tasks"-Bloecke
    (von Dashboards vor Version 2026-06-12), falls solche noch in der Datei existieren.
+6. **Stelle KEINE Rueckfragen an den User.** Du laeufst nicht-interaktiv: das Dashboard
+   streamt deine Ausgabe nur in den Browser, es gibt keine Moeglichkeit zu antworten.
+   Wenn etwas mehrdeutig ist oder du mehr Informationen brauchst, triff eine
+   vernuenftige Annahme (dokumentiere sie kurz in AGENTS.md / im Latest-Run-Block)
+   und mach weiter. Nur in einem offenen TUI-Session-Modus (`hermes chat`, `claude`,
+   `codex` ohne `-q`) hat der User eine Tastatur -- dort sind Rueckfragen erlaubt.
 """
 
 
@@ -201,7 +224,21 @@ def default_agents() -> dict[str, AgentSpec]:
             # `chat -q`: single non-interactive query that STREAMS intermediate
             # steps (tool previews) live. --yolo bypasses approvals, --accept-hooks
             # runs headless. AGENTS.md is auto-injected from the CWD.
-            command=["hermes", "chat", "-q", "{prompt}", "--yolo", "--accept-hooks"],
+            # `-t <csv>` restricts the toolset to non-interactive ones (excludes
+            # `clarify`, which would call into a None platform callback in this
+            # one-shot mode and stall the run or bounce back with
+            # "Clarify tool is not available in this execution context.").
+            # See HERMES_NON_INTERACTIVE_TOOLSETS for the rationale + list.
+            command=[
+                "hermes",
+                "chat",
+                "-q",
+                "{prompt}",
+                "--yolo",
+                "--accept-hooks",
+                "-t",
+                HERMES_NON_INTERACTIVE_TOOLSETS,
+            ],
             prompt_via="arg",
             stream_format="raw",
             env={"HERMES_ACCEPT_HOOKS": "1", "NO_COLOR": "1"},
@@ -310,6 +347,104 @@ def _apply_runtime_agent_overrides(agents: dict[str, AgentSpec]) -> dict[str, Ag
     return agents
 
 
+def _splice_flags_into_hermes_remote(
+    command: list[str], flags: list[str]
+) -> list[str] | None:
+    """Insert ``flags`` into the SSH remote-shell string at the end of ``command``.
+
+    The Docker / SSH-driven Hermes agent has its last token as a single-quoted shell
+    string passed to ``ssh user@host '<remote-cmd>'`` (e.g.
+    ``cd "{project_dir}" && export PATH=... && exec env ... hermes chat -q "$(cat)" --yolo --accept-hooks``).
+    When the built-in command grows (e.g. we add ``-t <csv>`` to disable ``clarify``)
+    a naive "append the missing tail as separate argv" would leak those flags into
+    ssh's argv and break the remote call.  Instead we splice them into the remote
+    string right after ``--accept-hooks``, so the host's Hermes sees them as its
+    own CLI flags.
+
+    Returns the new command list, or ``None`` if ``command`` is not in the expected
+    ``ssh ... <remote-shell-string>`` shape.
+    """
+    if not command or not flags:
+        return None
+    last = command[-1]
+    if not isinstance(last, str) or "--accept-hooks" not in last:
+        return None
+    quoted = " ".join(shlex.quote(f) for f in flags)
+    if " --accept-hooks" in last:
+        spliced = last.replace(
+            " --accept-hooks", f" --accept-hooks {quoted}", 1
+        )
+    elif last.endswith("--accept-hooks"):
+        spliced = f"{last} {quoted}"
+    else:
+        return None
+    return list(command[:-1]) + [spliced]
+
+
+def _backfill_hermes_flags(spec: dict) -> None:
+    """Apply Hermes-specific command backfill (mutates ``spec["command"]`` in place).
+
+    Two cases:
+
+    * **SSH-driven Hermes** (last argv token is a remote-shell string containing
+      ``--accept-hooks``): the host's Hermes CLI runs INSIDE that string.  The
+      new built-in added ``-t <csv>`` to disable ``clarify``; that flag must be
+      spliced INTO the remote string (right after ``--accept-hooks``) so the
+      host actually receives it.  Appending it as separate ssh argv would leak
+      it into the ssh command line and break the remote call.
+    * **Local / flat-argv Hermes** (a normal argv list): mirror the generic
+      "append the missing tail" backfill so any newly-added built-in flags
+      (e.g. ``--yolo``, ``--accept-hooks`` from a much older installer config,
+      or the new ``-t <csv>``) are picked up on the next restart.
+
+    Idempotent: running this twice does not duplicate flags.  Skipped entirely
+    when the spec's command is already as long as the built-in (the user has
+    fully overridden the command).
+    """
+    command = spec.get("command")
+    if not isinstance(command, list) or not command:
+        return
+    builtin_cmd = default_agents()["hermes"].command
+    if len(command) >= len(builtin_cmd):
+        return  # user has overridden or matched the built-in
+    # Already has -t with our toolset list?  -> no-op (idempotency).
+    # We have to look BOTH at the top-level argv AND inside the SSH remote
+    # string (where -t may have been spliced on a previous run).
+    def _has_csv() -> bool:
+        # Top-level argv check
+        for i, tok in enumerate(command):
+            if tok == "-t" and i + 1 < len(command):
+                if command[i + 1] == HERMES_NON_INTERACTIVE_TOOLSETS:
+                    return True
+                # User pinned a different toolset list; respect it (don't overwrite).
+                return True
+        # SSH remote string check: look for " -t <csv>" anywhere in any token.
+        for tok in command:
+            if (
+                isinstance(tok, str)
+                and f" -t {HERMES_NON_INTERACTIVE_TOOLSETS}" in tok
+            ):
+                return True
+        return False
+
+    if _has_csv():
+        return
+    # SSH-driven case: the last token is a remote-shell string.  Splice the
+    # new ``-t <csv>`` pair in right after ``--accept-hooks`` so the host's
+    # Hermes CLI sees it as its own flag.
+    last = command[-1]
+    if isinstance(last, str) and "--accept-hooks" in last:
+        spliced = _splice_flags_into_hermes_remote(
+            command, ["-t", HERMES_NON_INTERACTIVE_TOOLSETS]
+        )
+        if spliced is not None:
+            spec["command"] = spliced
+            return
+    # Flat-argv case: append the missing tail (legacy installer config that
+    # had only `["hermes", "chat", "-q", "{prompt}"]` etc.).
+    spec["command"] = command + builtin_cmd[len(command) :]
+
+
 def load_agents_config(path: Path) -> AgentsConfig:
     if not path.exists():
         return AgentsConfig(agents=_apply_runtime_agent_overrides(default_agents()))
@@ -327,15 +462,22 @@ def load_agents_config(path: Path) -> AgentsConfig:
         if key in builtin:
             merged = builtin[key].model_dump()
             # command is a list: if the YAML spec has a shorter command than the
-            # built-in, the extra elements (e.g. --use-auth-token) must be
-            # APPENDED to the spec's command, not prepended (which would dup
-            # the base CLI).  A full YAML command (same length) replaces outright.
+            # built-in, the extra elements (e.g. --use-auth-token, or the new
+            # Hermes -t <csv>) must be added.  For most agents, appending them
+            # is the right move: they land at the end of a flat argv list.
+            # Special case: Hermes (handled by _backfill_hermes_flags) needs to
+            # splice new flags into the SSH remote-shell string when present,
+            # so they reach the host's Hermes CLI instead of leaking into ssh's
+            # argv.
             if (
                 "command" in spec
                 and isinstance(spec["command"], list)
                 and len(merged["command"]) > len(spec["command"])
             ):
-                spec["command"] = spec["command"] + merged["command"][len(spec["command"]) :]
+                if key == "hermes":
+                    _backfill_hermes_flags(spec)
+                else:
+                    spec["command"] = spec["command"] + merged["command"][len(spec["command"]) :]
             merged.update(spec)
             spec = merged
         spec["key"] = key

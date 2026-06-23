@@ -165,8 +165,11 @@ agents:
     display_name: "Hermes"
     # hermes chat -q: einzelne nicht-interaktive Query, streamt Zwischenschritte live;
     # --yolo (Approvals aus), --accept-hooks (headless), AGENTS.md aus CWD.
+    # -t <csv>: schränkt die Toolsets auf nicht-interaktive ein (ohne clarify,
+    # das in diesem Einbahn-Modus keinen Platform-Callback hat und den Run
+    # abbrechen würde). Interaktive TUI-Sessions behalten das volle Toolset.
     # Leise Alternative ohne Live-Stream: command ["$HERMES_BIN", "-z", "{prompt}"]
-    command: ["$HERMES_BIN", "chat", "-q", "{prompt}", "--yolo", "--accept-hooks"]
+    command: ["$HERMES_BIN", "chat", "-q", "{prompt}", "--yolo", "--accept-hooks", "-t", "web,browser,terminal,file_search,read_file,write_file,edit_file,multi_edit,plan,session_search,kanban,image_gen,computer_use,video_gen,tts,spotify,delegate_task,todo,cronjob"]
     prompt_via: arg
     stream_format: raw
     enabled: true

@@ -4,6 +4,7 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+<<<<<<< HEAD
 ### 2026-06-23 - hermes (drop in-tab window + taskbar; popup is the only surface)
 
 **Task:** Remove the duplicate in-page agent window and the bottom taskbar
@@ -47,6 +48,64 @@ two intended files. No `OpenWindow` / `pinAgentWindow` / `cd-open-window`
 `/windows/{task,session}/:id` route is what the popup still opens, so
 resuming / closing / the focused window's `⧉` button / persisted
 behavior described in the 2026-06-23 "pop out" run still work.
+=======
+### 2026-06-23 - hermes (clarify disabled for non-interactive Hermes runs)
+
+**Task:** In one-shot `hermes chat -q "<prompt>"` runs the dashboard streams
+stdout to a browser tab with no way to type back, so the `clarify` toolset
+calls into a None platform callback and either stalls the run or bounces
+back with "Clarify tool is not available in this execution context."
+Fix that dashboard-side so the model never sees `clarify` as an option in
+non-interactive task / goal mode, while keeping the full toolset in real
+TUI sessions.
+
+**Result:** Pass `-t <csv>` to `hermes chat -q` excluding `clarify`. The CSV
+(`HERMES_NON_INTERACTIVE_TOOLSETS` in `backend/app/config.py`) lists every
+non-interactive toolset (web/browser/terminal/file_*/plan/session_search/...).
+`session_command` is left at `hermes chat` (full toolset, real TUI). The
+context instruction gains a 6th paragraph: "Stelle KEINE Rueckfragen an den
+User" — explicit "no back-questions in non-interactive mode". Backfill in
+`load_agents_config` now splices the new `-t <csv>` into existing SSH
+remote-shell strings (Docker / SSH-driven Hermes) so the flag reaches the
+host's Hermes CLI without leaking into ssh's argv.
+
+**What changed:**
+
+- `backend/app/config.py` — new `HERMES_NON_INTERACTIVE_TOOLSETS` constant
+  and `import shlex`. Hermes built-in `command` now ends with `-t <csv>`.
+  `DEFAULT_CONTEXT_INSTRUCTION` got a 6th paragraph ("Stelle KEINE
+  Rueckfragen an den User"). Two new helpers:
+  `_splice_flags_into_hermes_remote(command, flags)` (inserts a flag
+  pair right after `--accept-hooks` inside the SSH remote-shell string
+  using `shlex.quote`) and `_backfill_hermes_flags(spec)` (special-cases
+  Hermes: SSH shape → splice; flat argv → append the missing tail;
+  idempotent). `load_agents_config` routes Hermes through the new
+  backfill; other agents keep the generic "append the tail" behaviour.
+- `deploy/config.example.yaml` + `deploy/install.sh` — mirror the new
+  `-t <csv>` in the shipped hermes command (heredoc + example).
+- `deploy/docker/entrypoint.sh` — `HERMES_SSH_TASK_REMOTE` now ends with
+  `-t <csv>` (mirrored as `HERMES_NON_INTERACTIVE_TOOLSETS_CSV` in the
+  embedded Python block). `HERMES_SSH_SESSION_REMOTE` stays alone so
+  the user can still use `clarify` at a real TUI.
+- `backend/tests/smoke.py` — new `test_hermes_clarify_disabled` (13
+  checks): default built-in has `-t` immediately before the CSV, the CSV
+  excludes `clarify`, `session_command` is untouched, the legacy
+  installer flat-argv config gets `-t <csv>` appended, the SSH-driven
+  Docker config still has 7 tokens (no ssh-argv leak), the splice puts
+  `-t <csv>` immediately after `--accept-hooks` inside the remote
+  string, no duplicate `-t` (idempotency), and `session_command` is
+  not modified. Wired into `main()` after `test_sync_from_github_validation`.
+- `AGENTS.md` — this block + the new "Open items" entry + the updated
+  "Agent config" paragraph describing the new `-t <csv>` flag and the
+  6th context-instruction paragraph.
+
+**Verified:** `backend/tests/smoke.py` — `ALL SMOKE TESTS PASSED`
+(200+ pre-existing checks + the 13 new hermes checks). Existing
+`test_config_backfill` still passes (claude + hermes + codex built-in
+backfill is unaffected; the only behavioural change is that the hermes
+default now has 8 tokens and backfill produces 8 tokens for short
+hermes configs).
+>>>>>>> 1f309de7d28fc977f7fa34c92a266dd9098fd079
 
 ### 2026-06-23 - hermes (agent windows pop out, single-click session close)
 
@@ -289,16 +348,24 @@ deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, 
   an existing config untouched). Claude: `claude -p ... stream-json` (the parser shows
   tool calls with detail, e.g. `[tool] Bash: ls -la` / `[tool] Read: path`, instead of
   only the tool name). Both command variants (task + goal) work without
-  `--use-auth-token`. Hermes: `hermes chat -q {prompt} --yolo --accept-hooks`
-  (non-interactive, streams intermediate steps, loads AGENTS.md from the CWD; with
-  `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1` and `unset_env: [PYTHONPATH, PYTHONHOME]`).
+  `--use-auth-token`. Hermes: `hermes chat -q {prompt} --yolo --accept-hooks -t
+  <csv>` (non-interactive, streams intermediate steps, loads AGENTS.md from the CWD;
+  `-t <csv>` = `HERMES_NON_INTERACTIVE_TOOLSETS` from `backend/app/config.py`,
+  excluding `clarify` so the one-shot run can't call into a None platform callback;
+  `env: HERMES_ACCEPT_HOOKS=1, NO_COLOR=1`; `unset_env: [PYTHONPATH, PYTHONHOME]`).
   Codex: `codex exec --cd {project_dir} --sandbox workspace-write --color never
   --ephemeral --output-last-message {last_message_file} -` with `prompt_via: stdin`
   (no `goal_command`, so no goal mode for Codex). Current Codex versions do not have
   `--ask-for-approval` - the command is non-interactive on its own when given a
   prompt. Raw output is ANSI-filtered in the runner. TUI session defaults:
-  Claude `claude`, Hermes `hermes chat`, Codex `codex`; extra flags only through the
-  startup parameter field.
+  Claude `claude`, Hermes `hermes chat` (intentionally FULL toolset, no `-t`, so
+  the user can use `clarify` in the real TUI), Codex `codex`; extra flags only
+  through the startup parameter field. **Hermes backfill** is special-cased in
+  `_backfill_hermes_flags`: the Docker / SSH-driven Hermes keeps its last argv
+  token as a single remote-shell string passed to ssh, so the new `-t <csv>` is
+  spliced INTO that string (right after `--accept-hooks`) via
+  `_splice_flags_into_hermes_remote`; local Hermes gets `-t <csv>` appended like
+  any other flag. Idempotent.
 - **AGENTS.md update:** after each completed task (success or failure), the agent
   writes a short summary of what happened in the `## Latest Run` block at the very top
   of AGENTS.md (immediately after the title and purpose paragraph) through the
@@ -556,6 +623,21 @@ Git commit / push cycle against a local bare repo, REST, and a complete task run
 
 ## Open items / possible next steps
 
+- **2026-06-23 (Fix):** Hermes' `clarify` toolset used to fire in non-interactive
+  task / goal runs (`hermes chat -q {prompt}`), where the dashboard can only
+  stream stdout. The tool called into a None platform callback and either
+  stalled the run or bounced back with "Clarify tool is not available in this
+  execution context." Fix: pass `-t <csv>` excluding `clarify` to the
+  non-interactive Hermes (`HERMES_NON_INTERACTIVE_TOOLSETS` in
+  `backend/app/config.py`; mirrored as `HERMES_NON_INTERACTIVE_TOOLSETS_CSV` in
+  the Docker entrypoint). `session_command` (`hermes chat`) keeps the full
+  toolset so interactive TUI sessions still allow `clarify`. The context
+  instruction now explicitly tells the agent "Stelle KEINE Rueckfragen an den
+  User" in non-interactive mode. `load_agents_config._backfill_hermes_flags`
+  splices the new flag into existing SSH remote-shell strings (Docker) and
+  appends it to flat-argv configs (systemd installs); idempotent; covered by
+  `test_hermes_clarify_disabled`. Effective after `update.sh` /
+  `systemctl restart coding-dashboard` (or on next container start for Docker).
 - **2026-06-13 (Fix):** Session paste via Ctrl+V failed for Codex with
   "Failed to paste image: clipboard unavailable: X11 server connection timed out",
   Claude Code said "no image found", Hermes did nothing. Cause:
