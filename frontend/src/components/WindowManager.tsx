@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { Agent, Project, RunningTask, Task, TaskMode } from "../types";
+import type { Agent, Project, RunningTask, TaskMode } from "../types";
 import SessionTerminalModal from "./SessionTerminalModal";
 import TaskConsole from "./TaskConsole";
 import { IconButton, Spinner, StatusBadge } from "./ui";
@@ -54,10 +54,34 @@ function savePersisted(windows: OpenWindow[]) {
   }
 }
 
+/** Resolve the agent route that hosts this task in its own browser tab. */
+function agentWindowUrl(task: RunningTask): string {
+  const isSession = task.is_session || task.mode === "session";
+  const kind = isSession ? "session" : "task";
+  return `#/windows/${kind}/${task.id}`;
+}
+
+/** Open an agent run in its own browser tab. The window keeps streaming
+ *  output / PTY bytes even when the user closes the popup — the backend
+ *  task / session itself is unaffected, only the tab goes away.
+ *
+ *  Returns the opened Window reference (or null when the popup was
+ *  blocked, so the caller can decide whether to fall back to the in-tab
+ *  floating window). */
+export function openAgentWindowInNewTab(task: RunningTask): Window | null {
+  if (typeof window === "undefined") return null;
+  const url = `${window.location.origin}${window.location.pathname}${agentWindowUrl(task)}`;
+  // Reasonable default size for the popup; the user can resize freely. We
+  // intentionally don't pass `noopener` — the popup shares origin / storage
+  // so it can read the auth token + open WebSocket connections.
+  const features = "width=1100,height=820,resizable=yes,scrollbars=no";
+  return window.open(url, `agent-${task.id}`, features);
+}
+
 /** Imperative bus: components dispatch a CustomEvent when they want to
- *  open a console for a running task. The WindowManager (mounted once in
- *  Layout) listens and surfaces it as a floating tab. */
-export function openAgentWindow(task: RunningTask, agentLabel: string): void {
+ *  pin a console for a running task to the floating tray (used when the
+ *  popup was blocked or the user explicitly wants the in-tab dock). */
+export function pinAgentWindow(task: RunningTask, agentLabel: string): void {
   if (typeof window === "undefined") return;
   const detail: Omit<OpenWindow, "pinned"> = {
     taskId: task.id,
@@ -76,6 +100,24 @@ export function openAgentWindow(task: RunningTask, agentLabel: string): void {
   window.dispatchEvent(new CustomEvent("cd-open-window", { detail }));
 }
 
+/** Default user-facing entry point: try the popup first; fall back to the
+ *  in-tab tray if popups are blocked. This is the function UI handlers
+ *  (RunningAgents click, history click, "Session starten") should call. */
+export function openAgentWindow(task: RunningTask, agentLabel: string): void {
+  const popup = openAgentWindowInNewTab(task);
+  if (!popup) {
+    // Popup blocked — fall back to the floating window so the user still
+    // sees something rather than a silent nothing.
+    pinAgentWindow(task, agentLabel);
+  } else {
+    // Keep the tray tab in sync too: if the user later closes the popup and
+    // comes back to the dashboard, the tray tab lets them reopen it without
+    // a second network round-trip to /running. Stays open and pinned
+    // (popup close ≠ backend stop).
+    pinAgentWindow(task, agentLabel);
+  }
+}
+
 /** Bottom-right floating tray + the currently focused window. Click a tab
  *  to focus a window; "×" to close it (and remove from persisted state). */
 export default function WindowManager({
@@ -88,7 +130,6 @@ export default function WindowManager({
   const [windows, setWindows] = useState<OpenWindow[]>(loadPersisted);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
-  const [loadedTaskIds, setLoadedTaskIds] = useState<Set<string>>(new Set());
   const [agentNames, setAgentNames] = useState<Record<string, string>>({});
   const initial = useRef(true);
 
@@ -124,9 +165,7 @@ export default function WindowManager({
   }, [agents]);
 
   // For tasks opened from a project page, drop their entry from the tray once
-  // they finish so the tray doesn't grow forever. ``loadedTaskIds`` keeps
-  // windows that are still alive (still in the running list) — finished
-  // windows are removed automatically by the cleanup pass below.
+  // they finish so the tray doesn't grow forever.
   useEffect(() => {
     let active = true;
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -136,12 +175,6 @@ export default function WindowManager({
         const running = await api.listRunning();
         if (!active) return;
         const alive = new Set(running.map((t) => t.id));
-        // Augment titles for fresh opens (e.g. prompt may have updated).
-        setAgentNames((prev) => {
-          // Reuse the agent list — no per-task patch needed beyond title.
-          void prev;
-          return prev;
-        });
         setWindows((prev) => {
           let changed = false;
           const next = prev.filter((w) => {
@@ -160,20 +193,16 @@ export default function WindowManager({
               }
               return true;
             }
-            // Still alive: refresh title + status from the live record.
+            // Still alive: refresh status from the live record.
             const r = running.find((x) => x.id === w.taskId);
-            if (r && (r.status !== w.status || r.prompt !== w.title)) {
+            if (r && r.status !== w.status) {
               changed = true;
-              return { ...w, status: r.status, title: r.prompt.slice(0, 60) };
+              return { ...w, status: r.status };
             }
             return true;
           });
           return changed ? next : prev;
         });
-        // Track which taskIds we know are still alive so a fresh open from
-        // the project page (where the user is already on the detail screen)
-        // doesn't immediately duplicate the tray.
-        setLoadedTaskIds(alive);
       } catch {
         /* polling is best-effort */
       }
@@ -235,6 +264,14 @@ export default function WindowManager({
       : resolvedProjects[focused.projectId] || null
     : null;
 
+  // Single-click close: the user clicked "Schließen" inside the session
+  // modal (or the tray tab's ×). Either way we drop the window entirely.
+  // Minimize (─) is the separate, explicit way to keep the tray tab but
+  // hide the body.
+  function closeFocused() {
+    if (focused) closeWindow(focused.taskId);
+  }
+
   return (
     <>
       {/* Focused window (one at a time, like a tabbed dock). */}
@@ -258,10 +295,45 @@ export default function WindowManager({
               </span>
             </div>
             <div className="flex items-center gap-2">
+              <IconButton
+                label="In eigenem Fenster öffnen"
+                onClick={() => {
+                  const task: RunningTask = {
+                    id: focused.taskId,
+                    project_id: focused.projectId,
+                    agent: focused.agentLabel,
+                    prompt: focused.title,
+                    mode: focused.mode,
+                    model: "",
+                    effort: "",
+                    images: [],
+                    is_session: focused.isSession,
+                    chat_history: [],
+                    status: focused.status,
+                    exit_code: null,
+                    result_summary: "",
+                    error: "",
+                    branch: "",
+                    merge_state: "",
+                    commit_hash: "",
+                    commit_message: "",
+                    commit_created: false,
+                    pushed: false,
+                    created_at: new Date().toISOString(),
+                    started_at: null,
+                    finished_at: null,
+                    project_name: focused.projectName,
+                    project_slug: focused.projectName,
+                  };
+                  openAgentWindowInNewTab(task);
+                }}
+              >
+                ⧉
+              </IconButton>
               <IconButton label="Minimieren" onClick={() => setMinimized(true)}>
                 ─
               </IconButton>
-              <IconButton label="Schließen" onClick={() => closeWindow(focused.taskId)}>
+              <IconButton label="Schließen" onClick={closeFocused}>
                 ✕
               </IconButton>
             </div>
@@ -273,7 +345,7 @@ export default function WindowManager({
                   project={projectForWindow}
                   agents={agents}
                   taskId={focused.taskId}
-                  onClose={() => setMinimized(true)}
+                  onClose={closeFocused}
                   onEnded={() => {
                     /* session ended: re-poll will mark it finished and drop it */
                   }}
@@ -288,6 +360,7 @@ export default function WindowManager({
                 <TaskConsole
                   taskId={focused.taskId}
                   title={`${agentNames[focused.agentLabel] || focused.agentLabel} — ${focused.title}`}
+                  onDismiss={() => closeWindow(focused.taskId)}
                 />
               </div>
             )}
@@ -322,11 +395,15 @@ export default function WindowManager({
               <span
                 onClick={(e) => {
                   e.stopPropagation();
+                  // Single click closes the tray tab (and the window it
+                  // represents). No double-click dance: the previous behaviour
+                  // of "Schließen" minimising while the tray × actually
+                  // removed the window confused users.
                   closeWindow(w.taskId);
                 }}
                 role="button"
                 tabIndex={-1}
-                className={`ml-1 flex h-4 w-4 items-center justify-center rounded-full text-[10px] ${
+                className={`ml-1 flex h-4 w-4 cursor-pointer items-center justify-center rounded-full text-[10px] ${
                   active ? "hover:bg-cyan-700" : "hover:bg-slate-600"
                 }`}
                 aria-label="Schließen"

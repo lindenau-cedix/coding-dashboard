@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { useAuth } from "./auth";
 import Layout from "./components/Layout";
 import { Spinner } from "./components/ui";
+import AgentWindowPage from "./pages/AgentWindowPage";
 import Login from "./pages/Login";
 import Projects from "./pages/Projects";
 import ProjectDetail from "./pages/ProjectDetail";
@@ -46,7 +47,39 @@ export default function App() {
           <Route path="/projects/:id/sessions/:taskId" element={<SessionPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
+
+        {/* Standalone agent windows — rendered OUTSIDE the dashboard Layout
+            so they fill their own browser tab without the header / main
+            width constraint. Still gated on auth via a tiny ProtectedInline
+            wrapper so a missing token sends the user to /login. */}
+        <Route
+          path="/windows/task/:taskId"
+          element={
+            <RequireAuthInline>
+              <AgentWindowPage kind="task" />
+            </RequireAuthInline>
+          }
+        />
+        <Route
+          path="/windows/session/:taskId"
+          element={
+            <RequireAuthInline>
+              <AgentWindowPage kind="session" />
+            </RequireAuthInline>
+          }
+        />
       </Routes>
     </ProjectProvider>
   );
+}
+
+/** Tiny auth guard for routes that intentionally don't render the dashboard
+ *  Layout (popup tabs). Same logic as Protected but renders a minimal splash
+ *  / login link instead of nesting inside Layout — that way the popup's
+ *  body fills its viewport, not a flex container with the dashboard header. */
+function RequireAuthInline({ children }: { children: React.ReactNode }) {
+  const { token, ready, authRequired } = useAuth();
+  if (!ready) return <Splash />;
+  if (authRequired && !token) return <Navigate to="/login" replace />;
+  return <>{children}</>;
 }
