@@ -49,6 +49,10 @@ class ProjectOut(BaseModel):
     github_full_name: str
     github_url: str
     default_branch: str
+    # Archived projects are hidden from the default list; UI uses this to
+    # show an "Archiviert" badge and render the card with reduced opacity.
+    archived: bool = False
+    archived_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

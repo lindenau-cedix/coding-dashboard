@@ -66,6 +66,7 @@ export default function ProjectDetail() {
     output: "",
     success: false,
   });
+  const [unarchiving, setUnarchiving] = useState(false);
 
   const agentName = useMemo(() => {
     const m: Record<string, string> = {};
@@ -339,6 +340,20 @@ export default function ProjectDetail() {
     }
   }
 
+  /** Pull an archived project back into the active list from the detail page. */
+  async function unarchive() {
+    setUnarchiving(true);
+    try {
+      const updated = await api.unarchiveProject(id);
+      setProject(updated);
+      ctx.setProject(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Wiederherstellen fehlgeschlagen");
+    } finally {
+      setUnarchiving(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex justify-center py-16 text-slate-500">
@@ -372,6 +387,11 @@ export default function ProjectDetail() {
             <span className="rounded bg-slate-800 px-2 py-0.5 text-xs">
               ⎇ {project.default_branch}
             </span>
+            {project.archived && (
+              <span className="rounded bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
+                Archiviert
+              </span>
+            )}
             <button
               onClick={pull}
               disabled={pulling}
@@ -379,6 +399,16 @@ export default function ProjectDetail() {
             >
               {pulling ? "Pulling…" : "Pull"}
             </button>
+            {project.archived && (
+              <button
+                onClick={unarchive}
+                disabled={unarchiving}
+                title="Aus dem Archiv zurückholen"
+                className="rounded border border-cyan-700 bg-cyan-900/30 px-2.5 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-900/60 disabled:opacity-50"
+              >
+                {unarchiving ? "Hole zurück…" : "↩ Wiederherstellen"}
+              </button>
+            )}
           </div>
         </div>
         {project.description && (

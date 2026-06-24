@@ -32,6 +32,15 @@ class Project(Base):
     local_path: Mapped[str] = mapped_column(String(1024), default="")
     default_branch: Mapped[str] = mapped_column(String(128), default="main")
 
+    # Archived projects are hidden from the default project list. The repo
+    # stays on disk, history stays in the DB, tasks can still be inspected
+    # by id - the only effect of archiving is keeping the start page focused
+    # on the user's currently-active work.
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

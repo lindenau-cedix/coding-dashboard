@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import NewProjectModal from "../components/NewProjectModal";
@@ -7,27 +7,35 @@ import SyncFromGithubModal from "../components/SyncFromGithubModal";
 import { Button, ErrorText, Spinner, formatDate } from "../components/ui";
 import type { Project } from "../types";
 
+type ArchiveFilter = "active" | "archived";
+
 export default function Projects() {
   const navigate = useNavigate();
+  const [archiveFilter, setArchiveFilter] = useState<ArchiveFilter>("active");
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState("");
   const [showModal, setShowModal] = useState(false);
   const [showSync, setShowSync] = useState(false);
 
-  async function load() {
+  const load = useCallback(async () => {
     try {
-      setProjects(await api.listProjects());
+      const archived = archiveFilter === "archived" ? "true" : "false";
+      setProjects(await api.listProjects(archived));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Laden fehlgeschlagen");
     }
-  }
+  }, [archiveFilter]);
 
   useEffect(() => {
     void load();
-  }, []);
+  }, [load]);
 
   async function remove(p: Project) {
-    if (!confirm(`Projekt "${p.name}" lokal entfernen?\n(Das GitHub-Repository bleibt bestehen.)`))
+    if (
+      !confirm(
+        `Projekt "${p.name}" lokal entfernen?\n(Das GitHub-Repository bleibt bestehen.)`,
+      )
+    )
       return;
     try {
       await api.deleteProject(p.id, false);
@@ -37,11 +45,95 @@ export default function Projects() {
     }
   }
 
+  async function toggleArchive(p: Project) {
+    const wasArchived = p.archived;
+    if (wasArchived) {
+      // Restoring is reversible; no confirm needed.
+    } else if (
+      !confirm(
+        `Projekt "${p.name}" archivieren?\n\nEs verschwindet aus der Standardansicht, bleibt aber auf der Festplatte und in der Historie erhalten. Über "Archiv anzeigen" kannst du es jederzeit zurückholen.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const updated = wasArchived
+        ? await api.unarchiveProject(p.id)
+        : await api.archiveProject(p.id);
+      // Drop the card from the current view (the filter no longer matches
+      // after archive/unarchive); a reload afterwards reconciles the
+      // inverse view so the other tab stays consistent.
+      setProjects((prev) =>
+        prev?.filter((x) => x.id !== p.id) ?? null,
+      );
+      void load();
+      setError("");
+    } catch (err) {
+      setError(
+        `${wasArchived ? "Wiederherstellen" : "Archivieren"} fehlgeschlagen: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  const emptyHint =
+    archiveFilter === "active"
+      ? {
+          title: "Noch keine aktiven Projekte.",
+          body: (
+            <>
+              Lege ein neues an, importiere ein bestehendes GitHub-Repo oder
+              klone alle Repos auf einmal über <em>Sync von GitHub</em>.
+            </>
+          ),
+        }
+      : {
+          title: "Keine archivierten Projekte.",
+          body: (
+            <>
+              Über das <em>📦</em>-Symbol auf einer Projektkarte kannst du
+              ein nicht mehr aktiv benötigtes Projekt hierher auslagern.
+            </>
+          ),
+        };
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-2xl font-semibold text-slate-100">Projekte</h1>
         <div className="flex items-center gap-2">
+          {/* Archive toggle: two pills, mutually exclusive. */}
+          <div
+            role="tablist"
+            aria-label="Projektfilter"
+            className="inline-flex overflow-hidden rounded-lg border border-slate-700"
+          >
+            <button
+              role="tab"
+              aria-selected={archiveFilter === "active"}
+              onClick={() => setArchiveFilter("active")}
+              className={`px-3 py-1.5 text-sm transition ${
+                archiveFilter === "active"
+                  ? "bg-cyan-600 text-white"
+                  : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+              }`}
+            >
+              Aktiv
+            </button>
+            <button
+              role="tab"
+              aria-selected={archiveFilter === "archived"}
+              onClick={() => setArchiveFilter("archived")}
+              className={`px-3 py-1.5 text-sm transition ${
+                archiveFilter === "archived"
+                  ? "bg-cyan-600 text-white"
+                  : "bg-slate-800 text-slate-300 hover:bg-slate-700"
+              }`}
+            >
+              📦 Archiv
+            </button>
+          </div>
           <Button variant="ghost" onClick={() => setShowSync(true)}>
             ⇣ Sync von GitHub
           </Button>
@@ -59,33 +151,50 @@ export default function Projects() {
         </div>
       ) : projects.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-700 p-12 text-center text-slate-400">
-          <p>Noch keine Projekte.</p>
-          <p className="mt-1 text-sm">
-            Lege ein neues an, importiere ein bestehendes GitHub-Repo oder
-            klone alle Repos auf einmal über <em>Sync von GitHub</em>.
-          </p>
+          <p>{emptyHint.title}</p>
+          <p className="mt-1 text-sm">{emptyHint.body}</p>
         </div>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2">
           {projects.map((p) => (
             <div
               key={p.id}
-              className="group flex flex-col rounded-2xl border border-slate-800 bg-slate-900 p-5 transition-colors hover:border-slate-700"
+              className={`group flex flex-col rounded-2xl border border-slate-800 bg-slate-900 p-5 transition-colors hover:border-slate-700 ${
+                p.archived ? "opacity-70" : ""
+              }`}
             >
               <div className="flex items-start justify-between gap-2">
-                <Link
-                  to={`/projects/${p.id}`}
-                  className="text-lg font-medium text-slate-100 hover:text-cyan-400"
-                >
-                  {p.name}
-                </Link>
-                <button
-                  onClick={() => remove(p)}
-                  title="Projekt entfernen"
-                  className="rounded-lg px-2 py-1 text-slate-600 opacity-0 transition-opacity hover:bg-slate-800 hover:text-red-400 group-hover:opacity-100"
-                >
-                  🗑
-                </button>
+                <div className="flex min-w-0 items-center gap-2">
+                  <Link
+                    to={`/projects/${p.id}`}
+                    className="truncate text-lg font-medium text-slate-100 hover:text-cyan-400"
+                  >
+                    {p.name}
+                  </Link>
+                  {p.archived && (
+                    <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300">
+                      Archiviert
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => toggleArchive(p)}
+                    title={p.archived ? "Aus Archiv zurückholen" : "Archivieren"}
+                    aria-label={p.archived ? "Aus Archiv zurückholen" : "Archivieren"}
+                    className="rounded-lg px-2 py-1 text-slate-600 opacity-0 transition-opacity hover:bg-slate-800 hover:text-cyan-400 group-hover:opacity-100"
+                  >
+                    {p.archived ? "↩" : "📦"}
+                  </button>
+                  <button
+                    onClick={() => remove(p)}
+                    title="Projekt entfernen"
+                    aria-label="Projekt entfernen"
+                    className="rounded-lg px-2 py-1 text-slate-600 opacity-0 transition-opacity hover:bg-slate-800 hover:text-red-400 group-hover:opacity-100"
+                  >
+                    🗑
+                  </button>
+                </div>
               </div>
               {p.description && (
                 <p className="mt-1 line-clamp-2 text-sm text-slate-400">{p.description}</p>
@@ -103,7 +212,13 @@ export default function Projects() {
                   </a>
                 )}
                 <span>•</span>
-                <span>{formatDate(p.updated_at)}</span>
+                {p.archived && p.archived_at ? (
+                  <span title={`Archiviert: ${formatDate(p.archived_at)}`}>
+                    Archiviert {formatDate(p.archived_at)}
+                  </span>
+                ) : (
+                  <span>{formatDate(p.updated_at)}</span>
+                )}
               </div>
               <div className="mt-4">
                 <Button variant="subtle" onClick={() => navigate(`/projects/${p.id}`)}>

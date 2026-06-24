@@ -1492,6 +1492,205 @@ def test_hermes_clarify_disabled() -> None:
     )
 
 
+def test_project_archive() -> None:
+    """The archive feature: hidden from default list, idempotent,
+    visible-by-default-with-?archived=true, round-trippable, surviving
+    ``GET /api/projects/{id}`` (so the user can still inspect history
+    while the project is archived) and ``GET /api/running`` (archive is
+    a UI concern, it does not stop running tasks).
+
+    We don't run a real agent here - we exercise the routes against an
+    inserted Project row + the existing auth header from the suite.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.database import session_scope
+    from app.main import app
+    from app.models import Project
+
+    # Make a fresh project row pointing at a temp repo (we don't need a
+    # remote - archive must work without one).
+    remote = TMP / "archive-remote.git"
+    proj = TMP / "data" / "projects" / "archive-me"
+    if remote.exists():
+        shutil.rmtree(remote, ignore_errors=True)
+    if proj.exists():
+        shutil.rmtree(proj, ignore_errors=True)
+    run(["git", "init", "--bare", str(remote)])
+    run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=remote)
+    git_ops.clone(str(remote), proj, token="")
+    git_ops.ensure_identity(proj, "Tester", "t@example.com")
+    (proj / "README.md").write_text("# archive-me\n", encoding="utf-8")
+    git_ops.commit_all(proj, "init", "Tester", "t@example.com")
+    git_ops.push(proj, "main", token="")
+
+    with session_scope() as db:
+        p = Project(
+            name="archive-me",
+            slug="archive-me",
+            local_path=str(proj),
+            default_branch="main",
+            clone_url=str(remote),
+            github_full_name="local/archive-me",
+        )
+        db.add(p)
+        db.flush()
+        pid = p.id
+        # Sanity: a brand-new project is NOT archived.
+        check(
+            "archive: fresh project archived=False",
+            db.get(Project, pid).archived is False,
+            "default not False",
+        )
+
+    with TestClient(app) as client:
+        ok = client.post("/api/auth/login", json={"username": "admin", "password": "secret-pw"})
+        check("archive: login ok", ok.status_code == 200, str(ok.status_code))
+        H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+        # --- Default list: project visible (it is fresh, archived=False) ---
+        lst_default = client.get("/api/projects", headers=H).json()
+        ids = [p["id"] for p in lst_default]
+        check(
+            "archive: visible in default /api/projects when fresh",
+            pid in ids,
+            f"pid NOT in default list (ids={[i[:6] for i in ids]})",
+        )
+        check(
+            "archive: /api/projects default rows have archived=false",
+            all(p.get("archived") is False for p in lst_default),
+            str([p.get("archived") for p in lst_default]),
+        )
+
+        # --- archived=true list: project not there yet (it is fresh) ---
+        lst_archived = client.get("/api/projects?archived=true", headers=H).json()
+        check(
+            "archive: NOT in ?archived=true when fresh",
+            not any(p["id"] == pid for p in lst_archived),
+            f"pid in archived list (count={len(lst_archived)})",
+        )
+        check(
+            "archive: ?archived=true rows all archived=true",
+            all(p.get("archived") is True for p in lst_archived),
+            str([p.get("archived") for p in lst_archived]),
+        )
+
+        # --- archived=all: includes both ---
+        lst_all = client.get("/api/projects?archived=all", headers=H).json()
+        check(
+            "archive: ?archived=all returns both",
+            any(p["id"] == pid for p in lst_all)
+            and any(p["id"] not in [pp["id"] for pp in lst_archived] for p in lst_all),
+            f"len(all)={len(lst_all)} len(archived)={len(lst_archived)}",
+        )
+
+        # --- POST /api/projects/{id}/archive ---
+        r = client.post(f"/api/projects/{pid}/archive", headers=H)
+        check("archive: archive -> 200", r.status_code == 200, str(r.status_code))
+        body = r.json()
+        check(
+            "archive: response body archived=true",
+            body.get("archived") is True,
+            str(body.get("archived")),
+        )
+        check(
+            "archive: response body archived_at set",
+            bool(body.get("archived_at")),
+            str(body.get("archived_at")),
+        )
+
+        # --- Default list now hides it ---
+        ids2 = [p["id"] for p in client.get("/api/projects", headers=H).json()]
+        check("archive: hidden from default after archive", pid not in ids2)
+
+        # --- archived=true list shows it ---
+        ids3 = [p["id"] for p in client.get("/api/projects?archived=true", headers=H).json()]
+        check("archive: appears in ?archived=true after archive", pid in ids3)
+
+        # --- GET /api/projects/{id} still works (full ProjectDetail) ---
+        detail = client.get(f"/api/projects/{pid}", headers=H)
+        check(
+            "archive: GET detail still works while archived",
+            detail.status_code == 200,
+            str(detail.status_code),
+        )
+        check(
+            "archive: detail exposes archived=true",
+            detail.json().get("archived") is True,
+            str(detail.json().get("archived")),
+        )
+
+        # --- Idempotent: archiving twice is a no-op (same archived_at) ---
+        again = client.post(f"/api/projects/{pid}/archive", headers=H).json()
+        check(
+            "archive: archive is idempotent (archived_at unchanged)",
+            again.get("archived_at") == body.get("archived_at"),
+            f"{again.get('archived_at')} vs {body.get('archived_at')}",
+        )
+
+        # --- Unknown id -> 404 ---
+        r404a = client.post("/api/projects/does-not-exist/archive", headers=H)
+        check("archive: unknown id -> 404", r404a.status_code == 404, str(r404a.status_code))
+        r404u = client.post("/api/projects/does-not-exist/unarchive", headers=H)
+        check("unarchive: unknown id -> 404", r404u.status_code == 404, str(r404u.status_code))
+
+        # --- POST /api/projects/{id}/unarchive ---
+        u = client.post(f"/api/projects/{pid}/unarchive", headers=H)
+        check("unarchive: unarchive -> 200", u.status_code == 200, str(u.status_code))
+        body2 = u.json()
+        check(
+            "unarchive: archived=false after unarchive",
+            body2.get("archived") is False,
+            str(body2.get("archived")),
+        )
+        check(
+            "unarchive: archived_at cleared",
+            body2.get("archived_at") in (None, ""),
+            str(body2.get("archived_at")),
+        )
+
+        # --- Idempotent unarchive: archived_at stays None ---
+        u2 = client.post(f"/api/projects/{pid}/unarchive", headers=H).json()
+        check(
+            "unarchive: idempotent (archived_at stays None)",
+            u2.get("archived_at") in (None, ""),
+            str(u2.get("archived_at")),
+        )
+
+        # --- And the project is back in the default list ---
+        ids4 = [p["id"] for p in client.get("/api/projects", headers=H).json()]
+        check("unarchive: visible in default list again", pid in ids4)
+
+        # --- Tasks for an archived project: still listed, archive is a UI
+        # concern, not a teardown.  Re-archive and check that an existing
+        # task's GET still works (no FK cascade). ---
+        client.post(f"/api/projects/{pid}/archive", headers=H)
+        with session_scope() as db:
+            from app.models import Task
+
+            t = Task(
+                project_id=pid,
+                agent="fake",
+                prompt="pre-archive",
+                mode="task",
+                status="success",
+                result_summary="done",
+            )
+            db.add(t)
+            db.flush()
+            tid = t.id
+        ts = client.get(f"/api/projects/{pid}/tasks", headers=H).json()
+        check(
+            "archive: tasks for archived project still listed",
+            any(t["id"] == tid for t in ts),
+            str(len(ts)),
+        )
+        # Clean up the orphan task so other tests don't trip on it.
+        with session_scope() as db:
+            db.query(Task).filter(Task.id == tid).delete()
+            db.query(Project).filter(Project.id == pid).delete()
+
+
 def main() -> int:
     try:
         test_security()
@@ -1516,6 +1715,7 @@ def main() -> int:
         test_auto_pull_helpers()
         test_sync_from_github_validation()
         test_hermes_clarify_disabled()
+        test_project_archive()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

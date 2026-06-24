@@ -19,6 +19,10 @@ export interface Project {
   github_full_name: string;
   github_url: string;
   default_branch: string;
+  /** Archived projects are hidden from the default list. */
+  archived: boolean;
+  /** ISO-8601 timestamp when the project was archived, or null. */
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
   local_path?: string;

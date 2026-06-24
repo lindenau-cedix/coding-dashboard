@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -60,8 +61,26 @@ def _parse_full_name(repo: str) -> str:
 
 
 @router.get("", response_model=list[ProjectOut])
-def list_projects(db: Session = Depends(get_db)) -> list[Project]:
-    return db.query(Project).order_by(Project.updated_at.desc()).all()
+def list_projects(
+    archived: Literal["all", "true", "false"] = Query("false"),
+    db: Session = Depends(get_db),
+) -> list[Project]:
+    """List projects.
+
+    - ``archived=false`` (default) returns only ACTIVE projects; archived
+      ones are hidden to keep the start page focused on live work.
+    - ``archived=true`` returns only ARCHIVED projects (the "Archiv"
+      view of the start page).
+    - ``archived=all`` returns everything (handy for admin / debugging).
+
+    Order is by ``updated_at DESC`` so freshly-touched projects surface first.
+    """
+    q = db.query(Project).order_by(Project.updated_at.desc())
+    if archived == "true":
+        q = q.filter(Project.archived.is_(True))
+    elif archived == "false":
+        q = q.filter(Project.archived.is_(False))
+    return q.all()
 
 
 # --------------------------------------------------------------------------- #
@@ -497,6 +516,49 @@ def read_file(
         except UnicodeDecodeError:
             return FileContent(path=rel, size=size, is_binary=True, truncated=truncated, content="")
     return FileContent(path=rel, size=size, is_binary=False, truncated=truncated, content=text)
+
+
+# --------------------------------------------------------------------------- #
+# Archive / unarchive (hide from the start page without losing history)
+# --------------------------------------------------------------------------- #
+
+@router.post("/{project_id}/archive", response_model=ProjectDetail)
+def archive_project(project_id: str, db: Session = Depends(get_db)) -> Project:
+    """Mark a project as archived.
+
+    The repo, its worktrees and the entire task history stay intact. The
+    project simply disappears from the default project list (and from
+    ``GET /api/running``-style overviews) until unarchived again.
+    Running tasks / open sessions are NOT stopped — archiving is a UI
+    concern, not a teardown. ``archived_at`` is set so the UI can show
+    "Archiviert am …" in the archive view.
+    """
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if project.archived:
+        # Idempotent: archiving an already-archived project is a no-op.
+        return project
+    project.archived = True
+    project.archived_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+@router.post("/{project_id}/unarchive", response_model=ProjectDetail)
+def unarchive_project(project_id: str, db: Session = Depends(get_db)) -> Project:
+    """Reverse of archive: the project reappears in the default list."""
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if not project.archived:
+        return project
+    project.archived = False
+    project.archived_at = None
+    db.commit()
+    db.refresh(project)
+    return project
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

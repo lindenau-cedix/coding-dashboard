@@ -165,12 +165,17 @@ export const api = {
     request<{ auth_required: boolean }>("GET", "/auth/status"),
   agents: () => request<Agent[]>("GET", "/agents"),
 
-  listProjects: () => request<Project[]>("GET", "/projects"),
+  listProjects: (archived: "all" | "true" | "false" = "false") =>
+    request<Project[]>("GET", `/projects?archived=${archived}`),
   createProject: (data: ProjectCreatePayload) =>
     request<Project>("POST", "/projects", data),
   getProject: (id: string) => request<Project>("GET", `/projects/${id}`),
   deleteProject: (id: string, deleteRemote: boolean) =>
     request<void>("DELETE", `/projects/${id}?delete_remote=${deleteRemote}`),
+  archiveProject: (id: string) =>
+    request<Project>("POST", `/projects/${id}/archive`),
+  unarchiveProject: (id: string) =>
+    request<Project>("POST", `/projects/${id}/unarchive`),
   agentsMd: (id: string) =>
     request<{ exists: boolean; content: string }>(
       "GET",

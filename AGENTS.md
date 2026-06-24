@@ -4,7 +4,79 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
-<<<<<<< HEAD
+### 2026-06-24 - hermes (projects archivable: hide from start page without losing history)
+
+**Task:** Add an archive toggle so finished work doesn't clutter the start page
+without losing the repo, the worktree or the task history. Deleting a project
+is destructive (rmtree); archive must be reversible and cheap.
+
+**Result:** Soft-delete via two new columns (`projects.archived`,
+`projects.archived_at`) + two new endpoints (`POST /api/projects/{id}/archive`
+and `…/unarchive`) + an `?archived=all|true|false` filter on
+`GET /api/projects`. The frontend gets a two-pill "Aktiv / 📦 Archiv"
+toggle on the start page, a `📦` action on each active card (with
+confirm) and a `↩` action on archived cards (no confirm). Opening a
+project by id still works while archived - the detail page just gets an
+"Archiviert" badge and a "↩ Wiederherstellen" button next to the Pull
+control. Archive is purely a UI concern: running tasks and open
+sessions are NOT stopped, history is NOT purged, the repo on disk is
+untouched.
+
+**What changed:**
+
+- `backend/app/models.py` — new `Project.archived` (Boolean, default
+  False) + `Project.archived_at` (TIMESTAMP, nullable).
+- `backend/app/database.py` — additive migration in
+  `_SQLITE_COLUMN_ADDITIONS["projects"]` so existing SQLite DBs get the
+  two columns on next `init_db()` (idempotent `ALTER TABLE`, same
+  pattern as the `tasks` additions).
+- `backend/app/schemas.py` — `ProjectOut` (and therefore
+  `ProjectDetail`) now exposes `archived: bool` + `archived_at:
+  Optional[datetime]`.
+- `backend/app/routers/projects.py` —
+  * `list_projects(archived: Literal["all","true","false"]="false")`
+    filters the SQL query accordingly; default = active only.
+  * New `POST /{id}/archive` flips `archived=True`, stamps
+    `archived_at=datetime.now(timezone.utc)`, commits; idempotent
+    (already-archived → no-op, same `archived_at`).
+  * New `POST /{id}/unarchive` does the inverse (`archived=False`,
+    `archived_at=None`); idempotent.
+  * `GET /{id}` is unaffected - the user can still drill into an
+    archived project's history.
+- `frontend/src/types.ts` + `frontend/src/api.ts` — `Project.archived`
+  and `Project.archived_at` added; `api.listProjects(archived?)` gains
+  the same string param; new `api.archiveProject(id)` /
+  `api.unarchiveProject(id)` helpers.
+- `frontend/src/pages/Projects.tsx` — rewritten header row with an
+  `Aktiv | 📦 Archiv` pill toggle (aria roles), per-card `📦` /
+  `↩` action (confirm only when archiving, not when restoring),
+  optimistic card removal + reload to reconcile the other tab,
+  distinct empty hints for the two views, archived cards rendered
+  with `opacity-70` and an "Archiviert" badge, archived_at shown in
+  the metadata row when present.
+- `frontend/src/pages/ProjectDetail.tsx` — `↩ Wiederherstellen`
+  button next to Pull when `project.archived`, plus an "Archiviert"
+  badge in the header chip row. Updates the local project + project
+  context on success.
+- `backend/tests/smoke.py` — new `test_project_archive` (18 checks):
+  fresh project visible in default list + hidden in `?archived=true`
+  + `?archived=all` returns both; archive → 200 + `archived=true` +
+  `archived_at` set; hidden from default after archive; appears in
+  `?archived=true` after archive; `GET /{id}` still works while
+  archived; archive is idempotent (same `archived_at`); unknown id →
+  404; unarchive → 200 + `archived=false` + `archived_at=None`;
+  unarchive idempotent; visible in default list after unarchive;
+  archived project's tasks are still listed (no FK cascade); wired
+  into `main()` after `test_hermes_clarify_disabled`.
+
+**Verified:** `backend/tests/smoke.py` → `ALL SMOKE TESTS PASSED`
+(200+ pre-existing checks + the 18 new archive checks). `tsc
+--noEmit` clean; `vite build` succeeds (`✓ 36 modules transformed`,
+same module count as before - the heavier `Projects.tsx` and the
+tweaked `ProjectDetail.tsx` stay inside their existing module slots).
+Git status shows exactly the 9 intended files (no accidental
+changes).
+
 ### 2026-06-23 - hermes (drop in-tab window + taskbar; popup is the only surface)
 
 **Task:** Remove the duplicate in-page agent window and the bottom taskbar
@@ -48,7 +120,6 @@ two intended files. No `OpenWindow` / `pinAgentWindow` / `cd-open-window`
 `/windows/{task,session}/:id` route is what the popup still opens, so
 resuming / closing / the focused window's `⧉` button / persisted
 behavior described in the 2026-06-23 "pop out" run still work.
-=======
 ### 2026-06-23 - hermes (clarify disabled for non-interactive Hermes runs)
 
 **Task:** In one-shot `hermes chat -q "<prompt>"` runs the dashboard streams
@@ -105,8 +176,6 @@ host's Hermes CLI without leaking into ssh's argv.
 backfill is unaffected; the only behavioural change is that the hermes
 default now has 8 tokens and backfill produces 8 tokens for short
 hermes configs).
->>>>>>> 1f309de7d28fc977f7fa34c92a266dd9098fd079
-
 ### 2026-06-23 - hermes (agent windows pop out, single-click session close)
 
 **Task:** Fix the "double-click to close a session" UX and let sessions and
@@ -623,6 +692,23 @@ Git commit / push cycle against a local bare repo, REST, and a complete task run
 
 ## Open items / possible next steps
 
+- **2026-06-24 (Feature):** Projects can now be archived. Soft-delete via
+  ``projects.archived`` + ``projects.archived_at`` columns; two new
+  endpoints (``POST /api/projects/{id}/archive`` and ``…/unarchive``,
+  idempotent); ``GET /api/projects`` now accepts ``?archived=all|true|false``
+  and hides archived ones by default. Frontend gets an ``Aktiv | 📦 Archiv``
+  pill toggle on the start page, a per-card ``📦`` (with confirm) /
+  ``↩`` action, and a "↩ Wiederherstellen" button in the project detail
+  header when archived. Archive is a UI concern only - the repo stays on
+  disk, history stays in the DB, running tasks / open sessions are not
+  stopped, and ``GET /api/projects/{id}`` still works for archived projects
+  (so the user can still inspect / pull / resume). Covered by
+  ``test_project_archive`` in ``backend/tests/smoke.py`` (18 checks).
+  Effective after ``update.sh`` / ``systemctl restart coding-dashboard``
+  (or on next container start for Docker). New ``archived`` /
+  ``archived_at`` columns are added idempotently by
+  ``database._ensure_sqlite_columns()`` on the next service start, so
+  existing DBs do not need a manual migration.
 - **2026-06-23 (Fix):** Hermes' `clarify` toolset used to fire in non-interactive
   task / goal runs (`hermes chat -q {prompt}`), where the dashboard can only
   stream stdout. The tool called into a None platform callback and either

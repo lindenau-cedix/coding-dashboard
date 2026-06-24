@@ -37,6 +37,10 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "merge_state": "VARCHAR(32) NOT NULL DEFAULT ''",
         "workdir": "VARCHAR(1024) NOT NULL DEFAULT ''",
     },
+    "projects": {
+        "archived": "BOOLEAN NOT NULL DEFAULT 0",
+        "archived_at": "TIMESTAMP NULL",
+    },
 }
 
 
