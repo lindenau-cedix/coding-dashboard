@@ -36,6 +36,9 @@
 # Quick start (from the repo root):
 #   cp deploy/docker/coding-dashboard.docker.env.example deploy/docker/coding-dashboard.docker.env
 #   mkdir -p /tmp/coding-dashboard-hermes                              # host staging dir (owned by you)
+#   mkdir -p /var/lock/coding-dashboard && chown "$(id -u)":"$(id -g)" /var/lock/coding-dashboard
+#   # the dashboard drops one lock file per active task/goal/session here; without
+#   # the bind-mount the operator on the host can't see whether something is running
 #   ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_coding_dashboard          # container -> host key
 #   cat ~/.ssh/id_coding_dashboard.pub >> ~/.ssh/authorized_keys       # let the container in
 #   APP_UID=$(id -u) APP_GID=$(id -g) docker compose build
@@ -83,6 +86,13 @@ services:
       # MUST equal the host path of the staging bind mount below so {project_dir}
       # resolves to the same files in the container and on the host.
       - CD_HERMES_STAGING_DIR=${CD_HERMES_STAGING_HOST_DIR:-/tmp/coding-dashboard-hermes}
+      # Host-visible lock dir: a tiny shared path where the dashboard stamps
+      # ``<kind>-<id>.lock`` while a task/goal/session is active.  Must equal
+      # CD_HOST_LOCK_HOST_DIR below so writes from inside the container land
+      # on the host.  Defaults to /var/lock/coding-dashboard (a conventional
+      # lock-dir path shipped with every distro); override only if you need
+      # an unusual layout.
+      - CD_HOST_LOCK_DIR=${CD_HOST_LOCK_HOST_DIR:-/var/lock/coding-dashboard}
       # Docker normally cannot run Codex's bubblewrap workspace sandbox unless the
       # host allows unprivileged user namespaces. The dashboard already isolates
       # each run in a worktree/staging copy, so Docker defaults Codex to no
@@ -110,6 +120,17 @@ services:
       # CD_HERMES_SSH_USER. Read-only; its .pub must be in that user's
       # authorized_keys on the host. Override the host source via CD_HERMES_SSH_KEY_HOST.
       - "${CD_HERMES_SSH_KEY_HOST:-${HOME}/.ssh/id_coding_dashboard}:/home/app/.ssh/id_hermes:ro"
+      # Host-visible lock dir: the dashboard drops one lock file here per
+      # active task/goal/session.  MUST equal CD_HOST_LOCK_DIR (above) so the
+      # container path tracks the host path.  Default /var/lock/coding-dashboard
+      # (the conventional /var/lock is shipped by the OS, but the dashboard's
+      # subdir may not exist yet — a fresh container creates it on first run).
+      # Override with CD_HOST_LOCK_HOST_DIR (host) / CD_HOST_LOCK_DIR (container,
+      # auto-derived in compose).  Bind-mounting at an IDENTICAL path host<->container
+      # mirrors the staging-dir pattern so files the dashboard writes end up on
+      # the host.  Mounting root_squashed means we cannot see anything else in
+      # /var/lock on the host, only the dashboard's own subdir.
+      - "${CD_HOST_LOCK_HOST_DIR:-/var/lock/coding-dashboard}:${CD_HOST_LOCK_HOST_DIR:-/var/lock/coding-dashboard}"
 
 volumes:
   cd-data:

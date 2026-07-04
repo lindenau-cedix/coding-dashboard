@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     # (Hermes edits).  Default lives under /tmp and is cleaned per run.
     hermes_staging_dir: Path = Path("/tmp/coding-dashboard-hermes")
 
+    # --- Host-visible lock dir (one file per active task/goal/session) ---
+    # Path the dashboard writes ``<kind>-<id>.lock`` files into while a task,
+    # goal or session is running.  In Docker this MUST be a bind-mount that
+    # reaches the host (otherwise the lock files are only visible inside the
+    # container's private volumes); systemd installs naturally run on the
+    # host, so any path the service user can write to works.  Default lives
+    # under the conventional /var/lock so it survives reboots in the usual way;
+    # Docker users bind-mount CD_HOST_LOCK_HOST_DIR (host path) at the SAME
+    # path inside the container (``/var/lock/coding-dashboard``) so file
+    # creation from the container hits the host.  The files are best-effort
+    # visibility only — a failure to write never aborts a run.
+    host_lock_dir: Path = Path("/var/lock/coding-dashboard")
+
     # --- Files / serving ---
     agents_config_path: Path = Path("./config.yaml")
     frontend_dist: Path = Path("../frontend/dist")

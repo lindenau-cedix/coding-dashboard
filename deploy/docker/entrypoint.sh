@@ -43,6 +43,13 @@ HERMES_STAGING_DIR="${CD_HERMES_STAGING_DIR:-/tmp/coding-dashboard-hermes}"
 HERMES_KNOWN_HOSTS="$HOME/.ssh_known_hosts"
 [[ -n "$HERMES_SSH_USER" ]] && { : > "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; touch "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; }
 
+# --- Host-visible lock dir (one lock file per active task/goal/session) ---
+# Bind-mounted from the host by docker-compose so operators can see at a glance
+# "is something running?" without poking inside the container.  Create on boot
+# so the app user owns the subdir even when the host bind-mount is empty.
+HOST_LOCK_DIR="${CD_HOST_LOCK_DIR:-/var/lock/coding-dashboard}"
+mkdir -p "$HOST_LOCK_DIR" 2>/dev/null || true
+
 # --- self-heal a SELF-CONTAINED (in-image) Hermes install ------------------
 # Only relevant when you opted into an in-image Hermes (HERMES_INSTALL_CMD): its
 # own installer drops a venv under ~/.hermes plus a launcher shim in ~/.local/bin.

@@ -113,10 +113,13 @@ RUN set -eux; \
     useradd -o -m -u "$APP_UID" -g "$APP_GID" -s /bin/bash app; \
     mkdir -p /var/lib/coding-dashboard /etc/coding-dashboard \
              /tmp/coding-dashboard-hermes \
+             /var/lock/coding-dashboard \
              /home/app/.ssh /home/app/.local/bin; \
     chmod 700 /home/app/.ssh; \
     chown -R app:app /var/lib/coding-dashboard /etc/coding-dashboard \
-                     /tmp/coding-dashboard-hermes /app /home/app
+                     /tmp/coding-dashboard-hermes \
+                     /var/lock/coding-dashboard \
+                     /app /home/app
 
 # --- runtime configuration (paths are fixed; secrets come from env_file) ----
 ENV HOME=/home/app \

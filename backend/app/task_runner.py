@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import git_ops, host_staging, session_dirs, uploads
+from . import git_ops, host_lock, host_staging, session_dirs, uploads
 from .agents import run_agent
 from .config import get_agents_config, get_settings
 from .database import session_scope
@@ -263,6 +263,11 @@ class TaskManager:
         return True
 
     async def _run(self, task_id: str, project_id: str, ch: TaskChannel) -> None:
+        # The host-visible lock file is stamped inside `_run_inner` once we know
+        # the agent + project + mode (after the DB lookup).  Cleanup is fanned
+        # out to every exit path here, so cancel / error / success all drop it.
+        # We still defensively remove in `_run_inner` itself when mode resolution
+        # fails early (unknown agent) so an interrupted loop can never leak.
         try:
             await self._run_inner(task_id, project_id, ch)
         except asyncio.CancelledError:
@@ -282,6 +287,7 @@ class TaskManager:
             ch.publish({"type": "status", "status": "error"})
             self._publish_done(ch, task_id)
         finally:
+            host_lock.remove("task", task_id)
             ch.close()
 
     def _cleanup_worktree(self, task_id: str) -> None:
@@ -339,6 +345,10 @@ class TaskManager:
 
         self._mark(task_id, status="running", started=True)
         ch.publish({"type": "status", "status": "running"})
+        # Stamp the host-visible lock file.  One per active run; the host sees
+        # ``task-<id>.lock`` appear here and disappear again in `_run`'s
+        # finally.  Best-effort: failure to write does NOT abort the run.
+        host_lock.write("task", task_id, project_id, agent_key, mode)
 
         # Auto-pull: keep the project's default branch in sync with the remote
         # so the agent works against the latest code (rather than building on a
@@ -1023,6 +1033,12 @@ class SessionManager:
         }
         self._procs[task_id] = proc_info  # type: ignore[assignment]
 
+        # Stamp the host-visible lock file.  The session lives until
+        # `end_session` (manual stop, frontend disconnect-via-stop endpoint,
+        # or end-of-process), which always removes the lock in its `finally`.
+        # Best-effort: a failure here does not abort the session.
+        host_lock.write("session", task_id, project_id, agent_key, "session")
+
         # Surface the working directory (resume target / isolated worktree) so it
         # is visible in the terminal transcript and persisted with the session.
         if workdir_note:
@@ -1320,6 +1336,28 @@ class SessionManager:
                 if task:
                     project_id = task.project_id
 
+        try:
+            return await self._end_session_locked(
+                task_id, project_id, commit_message, terminate
+            )
+        finally:
+            # Always drop the host-visible lock file: success, manual stop,
+            # backend-restart-detected-via-pump-failure, AND an exception
+            # raised by the commit/push step.  Idempotent if the file was
+            # already gone (another concurrent end_session removed it).
+            host_lock.remove("session", task_id)
+            self._ending.discard(task_id)
+
+    async def _end_session_locked(
+        self,
+        task_id: str,
+        project_id: str,
+        commit_message: str,
+        terminate: bool,
+    ) -> dict:
+        """Original end_session body, kept verbatim but isolated so the host
+        lock removal in the outer ``end_session`` finally runs in every case.
+        """
         proc_info = self._procs.pop(task_id, None)
         ch = self._channels.get(task_id)
         lock = self._locks.pop(task_id, None)
@@ -1484,7 +1522,6 @@ class SessionManager:
             ch.close()
         self._channels.pop(task_id, None)
         self._task_projects.pop(task_id, None)
-        self._ending.discard(task_id)
 
         return {"status": status, "summary": summary, "commit_hash": commit_hash, "pushed": pushed}
 
@@ -1586,6 +1623,14 @@ def reset_interrupted() -> None:
     # Drop throwaway per-task host-staging copies (per-project session copies are
     # kept so an interrupted session can still be resumed into the same cwd).
     host_staging.cleanup_task_staging()
+    # Drop every stale host-visible lock file too: a crashed dashboard leaves
+    # them behind, and on next start we want a clean slate so the host does
+    # not see ghost "running" runs.
+    for stale in host_lock.list_active():
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     for project_dir in project_dirs:
         if Path(project_dir).exists():
             try:
