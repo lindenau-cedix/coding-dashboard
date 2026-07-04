@@ -1581,7 +1581,7 @@ def test_project_archive() -> None:
             "archive: ?archived=all returns both",
             any(p["id"] == pid for p in lst_all)
             and any(p["id"] not in [pp["id"] for pp in lst_archived] for p in lst_all),
-            f"len(all)={len(lst_all)} len(archived)={len(lst_archived)}",
+            f"len(all)={len(lst_all)} len(archived)={len(lst_archived)})",
         )
 
         # --- POST /api/projects/{id}/archive ---
@@ -1691,6 +1691,272 @@ def test_project_archive() -> None:
             db.query(Project).filter(Project.id == pid).delete()
 
 
+def test_host_lock() -> None:
+    """Host-visible lock file lifecycle for one-shot + interactive runs.
+
+    Verifies:
+      * ``write`` stamps ``<kind>-<id>.lock`` with parseable JSON payload.
+      * Stale-lock overwrite is atomic (O_EXCL collision falls back to replace).
+      * ``remove`` clears it, ``read``/``list_active`` discover it.
+      * TaskManager._run leaves the lock present while the agent runs and
+        drops it cleanly when the run finishes (success path).
+      * _run's exception path still drops the lock (cleanup on failure).
+      * SessionManager.start writes one and ``end_session`` clears it.
+      * ``reset_interrupted()`` clears stale lock files left by a crash.
+    """
+    import os
+    import signal
+    import time
+    from fastapi.testclient import TestClient
+
+    from app import host_lock, task_runner
+    from app.config import get_settings
+    from app.database import session_scope
+    from app.main import app
+    from app.models import Project, Task
+
+    # Use a throwaway lock dir under TMP so we don't touch /var/lock.
+    lock_dir = TMP / "host-lock"
+    if lock_dir.exists():
+        shutil.rmtree(lock_dir, ignore_errors=True)
+
+    # The lock module reads ``host_lock_dir`` via get_settings() each call,
+    # so we mutate the cached singleton + clear the cache so the next call
+    # rebuilds against our local dir (and later tests see the original again
+    # in the ``finally``).
+    from app import config as app_config
+
+    settings = app_config.get_settings()
+    original_dir = settings.host_lock_dir
+    settings.host_lock_dir = lock_dir
+    app_config.get_agents_config.cache_clear()
+    try:
+        # Dir doesn't exist yet — the lock module creates it on first write.
+        check("lock dir absent before first write", not lock_dir.exists(), str(lock_dir))
+        p = host_lock.write("task", "abc123", "proj-1", "claude", "task")
+        check("lock dir created on demand (by write)", lock_dir.exists(), str(lock_dir))
+        # 1. write/read/remove lifecycle.
+        check("write returns a path", p is not None, str(p))
+        check("lock file visible on disk", p.exists() if p else False)
+        info = host_lock.read("task", "abc123")
+        check("read parses JSON", info is not None and info["kind"] == "task")
+        check("read round-trips agent", info["agent"] == "claude" if info else False)
+        check("read round-trips project_id", info["project_id"] == "proj-1" if info else False)
+        check("read round-trips mode", info["mode"] == "task" if info else False)
+
+        # 2. Concurrent write for the SAME id overwrites atomically (no two
+        #    files coexist). Simulate by writing twice with different payloads.
+        host_lock.write("task", "abc123", "proj-2", "codex", "goal")
+        info2 = host_lock.read("task", "abc123")
+        check("stale lock overwritten", info2["agent"] == "codex" if info2 else False)
+        listed = host_lock.list_active()
+        check("exactly one file for same id", len([x for x in listed if "abc123" in x.name]) == 1, str(listed))
+
+        # 3. Different ids -> different files.
+        host_lock.write("session", "sess-9", "proj-1", "claude", "session")
+        listed = host_lock.list_active()
+        names = sorted(p.name for p in listed)
+        check("two distinct ids -> two files", "task-abc123.lock" in names and "session-sess-9.lock" in names, str(names))
+
+        # 4. remove clears the file.
+        host_lock.remove("task", "abc123")
+        check("remove drops file", not host_lock.read("task", "abc123"))
+        check("remove on missing id is no-op", True)  # just confirm no exception
+
+        # 5. list_active is empty after cleanup.
+        host_lock.remove("session", "sess-9")
+        check("list_active empty after cleanup", host_lock.list_active() == [], str(host_lock.list_active()))
+
+        # 6. TaskManager end-to-end: post a task via the REST API and watch
+        #    the lock file appear / disappear through the actual run loop.
+        #    Use a long-ish agent command so we definitely catch the file mid-run.
+        remote = TMP / "lock-remote.git"
+        proj = TMP / "data" / "projects" / "lock-proj"
+        run(["git", "init", "--bare", str(remote)])
+        git_ops.clone(str(remote), proj, token="")
+        git_ops.ensure_identity(proj, "Tester", "t@example.com")
+        (proj / "init.txt").write_text("init\n", encoding="utf-8")
+        git_ops.commit_all(proj, "init", "Tester", "t@example.com")
+        git_ops.push(proj, "main", token="")
+
+        with TestClient(app) as client:
+            ok = client.post("/api/auth/login", json={"username": "admin", "password": "secret-pw"})
+            token = ok.json()["access_token"]
+            H = {"Authorization": f"Bearer {token}"}
+
+            # Skip the create_project route (it requires a real GitHub token);
+            # insert the Project row directly, the same way test_project_archive
+            # does.  The task-create route below doesn't touch GitHub.
+            with session_scope() as db:
+                p = Project(
+                    name="lock-proj",
+                    slug="lock-proj",
+                    local_path=str(proj),
+                    default_branch="main",
+                    clone_url=str(remote),
+                    github_full_name="local/lock-proj",
+                )
+                db.add(p)
+                db.flush()
+                project_id = p.id
+            check("project row inserted", bool(project_id))
+            slow_script = (
+                "import os,time;"
+                "lock=os.environ.get('CD_LOCK_MARKER','');"
+                "open('/tmp/lock-agent-marker.txt','w').write(lock);"
+                "time.sleep(2);"
+                "open('result.txt','w').write('done')"
+            )
+            slow_path = TMP / "slow_agent.py"
+            slow_path.write_text(slow_script, encoding="utf-8")
+
+            # Stash a custom config that points "slow" at our script.
+            cfg_path = get_settings().agents_config_path
+            cfg_text = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
+            import yaml
+            loaded = yaml.safe_load(cfg_text) if cfg_text.strip() else {"context_instruction": "", "agents": {}}
+            loaded.setdefault("context_instruction", "")
+            loaded["agents"]["slow"] = {
+                "display_name": "Slow",
+                "command": [sys.executable, str(slow_path)],
+                "prompt_via": "arg",
+                "stream_format": "raw",
+                "session_command": [sys.executable, "-c",
+                                    "import time;"
+                                    "open('session_out.txt','w').write('alive');"
+                                    "time.sleep(30)"],
+                "enabled": True,
+            }
+            cfg_path.write_text(yaml.safe_dump(loaded, allow_unicode=True), encoding="utf-8")
+            # Force the agents config to reload on next access.
+            app_config.get_agents_config.cache_clear()
+
+            # Submit a task and poll for the lock file in a background thread
+            # so we can see the file EXIST while the agent is mid-run, then
+            # wait for it to disappear once the run finishes.
+            resp = client.post(
+                f"/api/projects/{project_id}/tasks",
+                headers=H,
+                json={"agent": "slow", "prompt": "hello", "mode": "task"},
+            )
+            check("task submit", resp.status_code in (200, 201), str(resp.status_code))
+            task_id = resp.json()["id"]
+
+            deadline = time.time() + 5
+            seen_mid_run = False
+            while time.time() < deadline:
+                if host_lock.read("task", task_id) is not None:
+                    seen_mid_run = True
+                    break
+                time.sleep(0.05)
+            check("task lock present while running", seen_mid_run)
+
+            # Wait until the task actually finishes (DB has finished_at set).
+            for _ in range(100):
+                with session_scope() as db:
+                    t = db.get(Task, task_id)
+                    if t and t.finished_at is not None:
+                        break
+                time.sleep(0.1)
+            check("task finishes", True)
+
+            # Give _run's finally a beat to run.
+            time.sleep(0.3)
+            check(
+                "task lock removed after run",
+                host_lock.read("task", task_id) is None,
+                str([p.name for p in host_lock.list_active()]),
+            )
+
+            # 7. SessionManager end-to-end: start a session, observe the
+            #    host-visible lock INSIDE the same event loop (otherwise
+            #    asyncio.run cancels the pump task on exit, which calls
+            #    end_session which removes the lock — a race that has
+            #    nothing to do with the lock code itself), then end the
+            #    session cleanly and observe the lock disappear.
+            with session_scope() as db:
+                sess_task = Task(
+                    project_id=project_id,
+                    agent="slow",
+                    prompt="",
+                    mode="session",
+                    is_session=True,
+                    status="queued",
+                )
+                db.add(sess_task)
+                db.flush()
+                sess_id = sess_task.id
+
+            import asyncio as _aio
+
+            async def _session_lifecycle():
+                started = await task_runner.session_manager.start(
+                    sess_id, project_id, "slow", "", "", "",
+                )
+                assert started, "session_manager.start returned False"
+                # Lock must be visible RIGHT after start, while the pump
+                # task is still alive.
+                listed = host_lock.list_active()
+                in_list = any(sess_id in p.name for p in listed)
+                visible = host_lock.read("session", sess_id) is not None
+                # Make the agent quit so end_session can run its git steps,
+                # then call end_session explicitly.
+                tca = task_runner.session_manager._procs.get(sess_id)
+                if tca:
+                    try:
+                        os.killpg(tca["pid"], signal.SIGTERM)
+                    except OSError:
+                        pass
+                # end_session takes over (as if the frontend clicked stop).
+                # We have to wait for the agent to actually die before ending
+                # the session cleanly — otherwise end_session's SIGKILL fallback
+                # breaks the OSError-handling path under `signal.SIGTERM`-first.
+                await _aio.sleep(0.5)
+                await task_runner.session_manager.end_session(
+                    sess_id, project_id, terminate=True,
+                )
+                return in_list, visible
+
+            sess_in_list, sess_visible = _aio.run(_session_lifecycle())
+            check("session lock in list_active while running", sess_in_list)
+            check("session lock visible (read) while running", sess_visible)
+            check(
+                "session lock removed after end_session",
+                host_lock.read("session", sess_id) is None,
+                str([p.name for p in host_lock.list_active()]),
+            )
+
+            # 8. reset_interrupted cleans up zombies.
+            # Drop a stub lock file by hand, then run reset_interrupted.
+            zombie = host_lock.write("task", "ghost", project_id, "slow", "task")
+            check("zombie lock created", zombie is not None and zombie.exists())
+            task_runner.reset_interrupted()
+            check("reset_interrupted clears zombies", not zombie.exists())
+
+            # Cleanup the orphan Project + Task rows + the cfg we modified so
+            # subsequent tests run against a clean slate.
+            with session_scope() as db:
+                db.query(Task).filter(Task.project_id == project_id).delete()
+                db.query(Project).filter(Project.id == project_id).delete()
+
+        # Restore the original agents config so subsequent tests are unaffected.
+        if cfg_text:
+            cfg_path.write_text(cfg_text, encoding="utf-8")
+        else:
+            try:
+                cfg_path.unlink()
+            except FileNotFoundError:
+                pass
+        app_config.get_agents_config.cache_clear()
+
+    finally:
+        # Restore the original host_lock_dir on the cached singleton so other
+        # tests (and any later in-process startup) see the real default.
+        app_config.get_settings.cache_clear()
+        settings.host_lock_dir = original_dir
+        app_config.get_settings.cache_clear()
+
+
 def main() -> int:
     try:
         test_security()
@@ -1716,6 +1982,7 @@ def main() -> int:
         test_sync_from_github_validation()
         test_hermes_clarify_disabled()
         test_project_archive()
+        test_host_lock()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

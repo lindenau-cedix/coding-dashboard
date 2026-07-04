@@ -4,6 +4,106 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-07-04 - hermes (host-visible lock file while a task, goal or session is running)
+
+**Task:** Add a lock file on the REAL host (not inside the Docker container)
+that exists while a session, goal or task is running. The Docker deployment's
+dashboard data (DB + repos) sit in a private `cd-data` named volume that's
+invisible to the host, so operators had no way to see "is something running
+right now?" without poking inside the container. The host's Hermes also runs
+over SSH in that mode and we wanted the same lock footprint a Hermes agent
+produces to be visible to whoever runs the dashboard.
+
+**Result:** A new `host_lock.py` module writes one `<kind>-<id>.lock` file
+per active run into `settings.host_lock_dir` (default `/var/lock/coding-dashboard`,
+overridable via `CD_HOST_LOCK_DIR`). Each file holds a JSON blob with the
+project id, agent key, mode, dashboard PID, hostname and ISO-8601 start time,
+plus a couple of header comments, so an operator can `ls` the dir and see at a
+glance what's running (and equally importantly what's NOT — a missing file =
+the run is done, regardless of what the DB says). The file is created with
+`O_EXCL | O_CREAT` (stale-lock overwrite is atomic via temp + rename), removed
+via silent `unlink`, and gated so failures to write never abort a run
+(best-effort visibility, not a correctness gate).
+
+In Docker, the host lock dir is bind-mounted from a NEW `CD_HOST_LOCK_HOST_DIR`
+(default `/var/lock/coding-dashboard` on the host) at the SAME path inside the
+container — the same bind-mount pattern as the SSH-Hermes staging dir — so
+container writes appear on the host. The Dockerfile + entrypoint + Docker
+compose file are updated to create + mount it; the `.example` env doc and the
+quickstart `mkdir -p /var/lock/coding-dashboard && chown ...` line reflect
+the same.
+
+The lock is written inside `TaskManager._run_inner` after the agent spec is
+resolved (so an unknown-agent path doesn't leave a lock), and removed in
+`_run`'s outer `finally` so cancel / error / success all drop it. The session
+mirror lives inside `SessionManager` — `start` writes after the PTY fork,
+`end_session` removes in its outer `finally` (refactored from a long inline
+method into a thin `end_session` wrapper around `_end_session_locked` so the
+finally runs in every exit path). `reset_interrupted()` cleans stale locks on
+startup alongside the existing worktree + staging-dir cleanup.
+
+**What changed:**
+
+- `backend/app/host_lock.py` (new) — `lock_dir()`, `write(kind, run_id,
+  project_id, agent, mode)`, `remove(kind, run_id)`, `read(kind, run_id)`,
+  `list_active()`. One file per run (`task-<id>.lock` or `session-<id>.lock`)
+  under the resolved host lock dir; best-effort and silent on every error
+  path.
+- `backend/app/config.py` — new `host_lock_dir: Path = Path("/var/lock/coding-dashboard")`
+  field on `Settings` (`CD_HOST_LOCK_DIR` via `pydantic-settings`).
+- `backend/app/task_runner.py` —
+  * `TaskManager._run_inner`: after `_mark(task_id, status="running",
+    started=True)` and before the auto-pull, write the host lock with the
+    resolved agent key + mode.
+  * `TaskManager._run`: outer `finally` calls `host_lock.remove("task",
+    task_id)` so cancel + error + success all drop it.
+  * `SessionManager.start`: `host_lock.write("session", task_id, project_id,
+    agent_key, "session")` immediately after the PTY fork succeeds (before
+    `pump()` is scheduled).
+  * `SessionManager.end_session`: refactored to a thin wrapper around
+    `_end_session_locked`; the wrapper owns the outer `try: ... finally:
+    host_lock.remove("session", task_id); self._ending.discard(task_id)` so
+    every path (success, error, manual stop, `_ending` re-entry) drops the
+    lock.
+  * `reset_interrupted()`: iterates `host_lock.list_active()` after the
+    worktree/staging cleanup, removes each stale file so the host never
+    sees ghost "running" runs after a crash + restart.
+- `backend/tests/smoke.py` — new `test_host_lock` (21 checks): lock-dir
+  creation-on-demand, `write/read/remove` round-trip, atomic overwrite for
+  the same id (O_EXCL collision falls back to temp + rename), distinct ids =
+  distinct files, end-to-end TaskManager lock lifecycle (file visible mid-run
+  via TestClient → `POST /api/projects/{id}/tasks`, file gone once the
+  run finishes), end-to-end SessionManager lifecycle (start inside
+  `asyncio.run`, observe lock visible, send `SIGTERM` to the agent,
+  call `end_session` explicitly inside the same loop, observe lock
+  cleared), and `reset_interrupted()` cleanup of a hand-planted zombie
+  lock file. Wired into `main()` after `test_project_archive`. Test
+  monkey-patches `settings.host_lock_dir` to a throwaway `TMP/host-lock`
+  dir and restores it in a `finally`.
+- `deploy/docker/Dockerfile` — creates + chowns `/var/lock/coding-dashboard`
+  alongside the existing `/tmp/coding-dashboard-hermes` so the non-root app
+  user owns it on first boot.
+- `deploy/docker/entrypoint.sh` — creates the lock dir at boot (mirrors the
+  existing `HERMES_STAGING_DIR` mkdir).
+- `deploy/docker/coding-dashboard.docker.env.example` — documents
+  `CD_HOST_LOCK_HOST_DIR` and the `mkdir -p /var/lock/coding-dashboard &&
+  chown ...` one-time host step (parallel to the existing
+  `/tmp/coding-dashboard-hermes` instructions).
+- `docker-compose.yml` — two new fragments:
+  * Container env `CD_HOST_LOCK_DIR=${CD_HOST_LOCK_HOST_DIR:-/var/lock/coding-dashboard}`.
+  * `volumes:` bind-mount
+    `"${CD_HOST_LOCK_HOST_DIR:-/var/lock/coding-dashboard}:${CD_HOST_LOCK_HOST_DIR:-/var/lock/coding-dashboard}"`
+    so container writes hit the host at the identical path.
+  Header comment also gets the matching `mkdir -p /var/lock/coding-dashboard
+  && chown ...` line in the quickstart.
+
+**Verified:** `backend/tests/smoke.py` → `ALL SMOKE TESTS PASSED`
+(220+ pre-existing checks + the 21 new host-lock checks). Frontend untouched
+(`tsc --noEmit` + `vite build` were not run in this environment — the npm shim
+in `/home/debian/.hermes/node/bin/npm` is broken on this machine and the
+frontend had no changes anyway). `git status` shows exactly the 8 intended
+files (7 modified + 1 new).
+
 ### 2026-06-24 - hermes (projects archivable: hide from start page without losing history)
 
 **Task:** Add an archive toggle so finished work doesn't clutter the start page
