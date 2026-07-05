@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "model": "opus",
+  "enableWorkflows": true,
+  "effortLevel": "max",
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark"
+}
+

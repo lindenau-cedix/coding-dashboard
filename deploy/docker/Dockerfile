@@ -91,6 +91,11 @@ RUN pip install --no-cache-dir --upgrade pip \
 COPY backend/ /app/backend/
 COPY deploy/docker/entrypoint.sh /usr/local/bin/cd-entrypoint
 COPY --from=frontend /app/frontend/dist /app/frontend/dist
+#RUN echo 'export ANTHROPIC_BASE_URL="https://minimax.io/anthropic"' > /home/app/.bashrc
+#RUN echo 'export ANTHROPIC_AUTH_TOKEN="sk-cp-Z51fZTM_TUDCi9gQDmtJYT03ayqugEWJCYi8gqSFlIFfnMjTxrkIdHCXD2gQuIKiE1u8kRnrkTG1BCMrvEfiCk2v9I5nEHd1hyrN5-uH2nIMhZ6tMG-B2IE"' > /home/app/.bashrc
+#RUN echo 'export ANTHROPIC_API_KEY=""' > /home/app/.bashrc
+#COPY deploy/docker/bashrc /home/app/.bashrc
+#COPY deploy/docker/settings.json /home/app/.claude/settings.json
 RUN chmod +x /usr/local/bin/cd-entrypoint
 
 # --- non-root user ----------------------------------------------------------
