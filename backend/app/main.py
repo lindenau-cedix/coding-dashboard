@@ -11,7 +11,9 @@ from fastapi.responses import FileResponse
 
 from .config import get_agents_config, get_settings
 from .database import init_db
+from .heartbeat import heartbeat
 from .routers import auth as auth_router
+from .routers import heartbeat as heartbeat_router
 from .routers import projects as projects_router
 from .routers import sessions as sessions_router
 from .routers import tasks as tasks_router
@@ -28,7 +30,15 @@ async def lifespan(app: FastAPI):
     reset_interrupted()
     cfg = get_agents_config()
     log.info("Agents konfiguriert: %s", ", ".join(cfg.agents.keys()) or "(keine)")
-    yield
+    # Start the dashboard heartbeat (auto-poll GitHub issues, auto-spawn
+    # Claude Code tasks). Honours CD_HEARTBEAT_ENABLED + a global toggle
+    # in /api/heartbeat. Cancellation in the post-yield ``finally``
+    # guarantees the background task can't outlive the process.
+    await heartbeat.start()
+    try:
+        yield
+    finally:
+        await heartbeat.stop()
 
 
 def create_app() -> FastAPI:
@@ -59,6 +69,14 @@ def create_app() -> FastAPI:
     app.include_router(projects_router.router, prefix="/api")
     app.include_router(tasks_router.router, prefix="/api")
     app.include_router(sessions_router.router, prefix="/api")
+    # Global heartbeat routes (``/api/heartbeat/...``). The router already
+    # carries ``prefix="/heartbeat"`` so we mount it at ``/api``.
+    app.include_router(heartbeat_router.router, prefix="/api")
+    # Per-project heartbeat routes (``/api/projects/{id}/heartbeat/...``).
+    # Lives next to ``routers/projects.py`` so the URL hierarchy stays
+    # parallel: every project's heartbeat sub-resources sit under the
+    # project id, just like ``/tasks`` and ``/archive`` do.
+    app.include_router(heartbeat_router.projects_router, prefix="/api")
     app.include_router(ws_router.router, prefix="/api")
 
     @app.get("/api/health")

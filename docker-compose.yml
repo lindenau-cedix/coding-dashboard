@@ -47,6 +47,9 @@
 #   docker compose run --rm dashboard python -m app.cli hash-password 'choose-a-password'
 #   # edit deploy/docker/coding-dashboard.docker.env: paste secret + GitHub token, and
 #   #   set CD_HERMES_SSH_USER (the host user that runs Hermes) to enable Hermes.
+#   # Optional: enable the heartbeat (auto-poll GitHub issues + auto-spawn Claude Code
+#   #   tasks) by setting CD_HEARTBEAT_ENABLED=true in the same .env. See
+#   #   coding-dashboard.docker.env.example for the rest of the CD_HEARTBEAT_* knobs.
 #   docker compose up -d
 #   docker compose exec dashboard claude        # claude + codex log in once -> cd-home volume
 #   docker compose exec dashboard codex login   #   "
@@ -98,6 +101,17 @@ services:
       # each run in a worktree/staging copy, so Docker defaults Codex to no
       # inner sandbox; override to workspace-write if your host supports it.
       - CD_CODEX_SANDBOX=${CD_CODEX_SANDBOX:-danger-full-access}
+      # Heartbeat (auto-poll GitHub issues + auto-spawn Claude Code tasks).
+      # Default off; set CD_HEARTBEAT_ENABLED=true to turn it on. The other
+      # CD_HEARTBEAT_* knobs (interval, cooldown, agent key, labels, ...) are
+      # documented in coding-dashboard.docker.env.example.
+      - CD_HEARTBEAT_ENABLED=${CD_HEARTBEAT_ENABLED:-false}
+      - CD_HEARTBEAT_INTERVAL_SECONDS=${CD_HEARTBEAT_INTERVAL_SECONDS:-900}
+      - CD_HEARTBEAT_MAX_CONCURRENT=${CD_HEARTBEAT_MAX_CONCURRENT:-2}
+      - CD_HEARTBEAT_COOLDOWN_MINUTES=${CD_HEARTBEAT_COOLDOWN_MINUTES:-30}
+      - CD_HEARTBEAT_AGENT_KEY=${CD_HEARTBEAT_AGENT_KEY:-claude}
+      - CD_HEARTBEAT_LOOKBACK_HOURS=${CD_HEARTBEAT_LOOKBACK_HOURS:-24}
+      - CD_HEARTBEAT_LABELS=${CD_HEARTBEAT_LABELS:-}
     # Reach the host's sshd from inside the container via host.docker.internal.
     extra_hosts:
       - "host.docker.internal:host-gateway"
