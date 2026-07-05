@@ -36,10 +36,17 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "chat_history": "TEXT NOT NULL DEFAULT ''",
         "merge_state": "VARCHAR(32) NOT NULL DEFAULT ''",
         "workdir": "VARCHAR(1024) NOT NULL DEFAULT ''",
+        "heartbeat_spawned": "BOOLEAN NOT NULL DEFAULT 0",
+        "heartbeat_issue_number": "INTEGER NULL",
     },
     "projects": {
         "archived": "BOOLEAN NOT NULL DEFAULT 0",
         "archived_at": "TIMESTAMP NULL",
+        "heartbeat_enabled": "BOOLEAN NOT NULL DEFAULT 1",
+        "last_heartbeat_at": "TIMESTAMP NULL",
+        "last_issue_poll_at": "TIMESTAMP NULL",
+        "last_heartbeat_status": "VARCHAR(32) NOT NULL DEFAULT ''",
+        "last_heartbeat_error": "TEXT NOT NULL DEFAULT ''",
     },
 }
 

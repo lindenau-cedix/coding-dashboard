@@ -258,6 +258,16 @@ CD_FRONTEND_DIST=$APP_DIR/frontend/dist
 CD_CORS_ORIGINS=*
 CD_HOST=127.0.0.1
 CD_PORT=$PORT
+
+# Heartbeat: auto-poll GitHub issues + auto-spawn Claude Code tasks.
+# Standardmaessig AUS; via /heartbeat UI im laufenden Prozess einschaltbar.
+CD_HEARTBEAT_ENABLED=false
+CD_HEARTBEAT_INTERVAL_SECONDS=900
+CD_HEARTBEAT_MAX_CONCURRENT=2
+CD_HEARTBEAT_COOLDOWN_MINUTES=30
+CD_HEARTBEAT_AGENT_KEY=claude
+CD_HEARTBEAT_LOOKBACK_HOURS=24
+CD_HEARTBEAT_LABELS=
 ENV
   chown root:"$SERVICE_USER" "$ENV_FILE"; chmod 640 "$ENV_FILE"
   ok "Env geschrieben: $ENV_FILE"

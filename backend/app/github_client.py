@@ -112,3 +112,45 @@ async def get_repo(full_name: str) -> dict:
 
 async def delete_repo(full_name: str) -> None:
     await _request("DELETE", f"/repos/{full_name}")
+
+
+async def list_issues(
+    full_name: str,
+    *,
+    state: str = "open",
+    labels: list[str] | None = None,
+    since: str | None = None,
+    per_page: int = 50,
+    max_pages: int = 5,
+) -> list[dict]:
+    """Page through the issues of a repo. Returns RAW issue objects
+    including pull requests — callers MUST filter ``r.get("pull_request")``
+    if they only want real issues.
+
+    - ``since``: ISO-8601 timestamp; GitHub returns issues updated at or
+      after this moment. Used by the heartbeat for incremental polling.
+    - ``labels``: comma-joined list; GitHub filters to issues that have
+      AT LEAST ONE of these labels.
+    - Pagination mirrors ``list_user_repos`` (per_page = GitHub cap,
+      max_pages caps total pages so a runaway repo can't burn quota).
+    """
+    out: list[dict] = []
+    for page in range(1, max_pages + 1):
+        params: dict[str, str] = {
+            "state": state,
+            "per_page": str(per_page),
+            "page": str(page),
+            "sort": "updated",
+            "direction": "desc",
+        }
+        if labels:
+            params["labels"] = ",".join(labels)
+        if since:
+            params["since"] = since
+        chunk = await _request("GET", f"/repos/{full_name}/issues", params=params)
+        if not isinstance(chunk, list) or not chunk:
+            break
+        out.extend(chunk)
+        if len(chunk) < per_page:
+            break
+    return out

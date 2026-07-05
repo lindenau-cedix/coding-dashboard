@@ -3,6 +3,7 @@ import { useAuth } from "./auth";
 import Layout from "./components/Layout";
 import { Spinner } from "./components/ui";
 import AgentWindowPage from "./pages/AgentWindowPage";
+import Heartbeat from "./pages/Heartbeat";
 import Login from "./pages/Login";
 import Projects from "./pages/Projects";
 import ProjectDetail from "./pages/ProjectDetail";
@@ -45,6 +46,7 @@ export default function App() {
           <Route path="/" element={<Projects />} />
           <Route path="/projects/:id" element={<ProjectDetail />} />
           <Route path="/projects/:id/sessions/:taskId" element={<SessionPage />} />
+          <Route path="/heartbeat" element={<Heartbeat />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
 

@@ -4,6 +4,149 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-07-05 - claude (heartbeat: auto-poll GitHub issues + auto-spawn Claude Code tasks)
+
+**Task:** Add a background loop to the dashboard that periodically polls
+GitHub for open issues on active projects and auto-spawns Claude Code
+tasks (default agent; configurable via `CD_HEARTBEAT_AGENT_KEY`) with
+generated prompts to investigate, reproduce and fix the issue.
+
+**Result:** Single long-lived `asyncio.Task` (one per process) started
+from `lifespan()` in `main.py` that wakes up every
+`CD_HEARTBEAT_INTERVAL_SECONDS` (default 900s = 15 min), walks every
+active (non-archived) project with a `github_full_name`, fetches open
+issues via the new `github_client.list_issues()` helper, filters out
+PRs and optionally by labels, dedups against the new `heartbeat_seen`
+ledger table (one row per `(project_id, issue_number)` pair — INSERT OR
+IGNORE-style idempotency), and dispatches one task per *newly-seen*
+issue through the existing `manager.submit()` flow. The auto-spawned
+tasks go through the SAME path as user tasks: host lock, auto-pull,
+agent run, auto-commit, auto-push, AGENTS.md maintenance, result
+summary — nothing about the agent pipeline had to change.
+
+A per-project cooldown (default 30 min) blocks re-dispatch ONLY when
+the last heartbeat-spawned task for that project reached `success`;
+failed/error/cancelled runs do NOT start the cooldown, so a misfiring
+agent gets another chance next tick. Per-project opt-out via
+`projects.heartbeat_enabled` (default `true`); global toggle via
+`POST /api/heartbeat/{enable,disable}` (in-process, mirrors
+`CD_HEARTBEAT_ENABLED`) plus the env var for persistence. Manual
+trigger via `POST /api/heartbeat/trigger` for the "▶ Run now" button.
+
+The auto-generated prompt is built from
+`DEFAULT_HEARTBEAT_PROMPT_TEMPLATE` in `backend/app/config.py` — a
+6-step "investigate → reproduce → implement → branch
+`heartbeat/fix-N-slug` → PR `Fix #N: title` → status" workflow plus
+safety guard rails (no destructive ops, no manual commit/push, no
+back-questions). Override the whole template via
+`CD_HEARTBEAT_PROMPT_TEMPLATE`.
+
+UI: a dedicated `/heartbeat` page with the global toggle + per-project
+toggles + per-project status table (last tick, last status, error
+message, inflight task count) + a "recent heartbeat-spawned tasks"
+feed. Project cards get a small `🤖 vor 12 Min` / `🤖 Fehler` chip; the
+task history shows `🤖 Auto-Fix #N` on each spawned task.
+
+**What changed:**
+
+- `backend/app/heartbeat.py` (new) — `HeartbeatRunner` (singleton at
+  `heartbeat = HeartbeatRunner()`) with `start()`, `stop()`, `tick_now()`
+  (re-entrant guard), `_tick()` / `_tick_locked()` (sync DB ops via
+  `asyncio.to_thread`), `_loop()` (background), `_process_project()`
+  (per-project async coroutine gated by an `asyncio.Semaphore` of size
+  `CD_HEARTBEAT_MAX_CONCURRENT`), `_build_prompt()`, `_spawn_task()`,
+  and the dedup helpers `_list_active_projects()`, `_in_cooldown()`,
+  `_claim_issue()`, `_record_dispatch()`, `_set_project_status()`.
+- `backend/app/config.py` — `DEFAULT_HEARTBEAT_PROMPT_TEMPLATE`
+  constant + 8 new fields on `Settings`: `heartbeat_enabled`,
+  `heartbeat_interval_seconds`, `heartbeat_max_concurrent`,
+  `heartbeat_cooldown_minutes`, `heartbeat_agent_key` (default
+  `"claude"`), `heartbeat_lookback_hours`,
+  `heartbeat_prompt_template`, `heartbeat_labels`. Plus a
+  `heartbeat_labels_list` property that splits the comma-separated
+  value.
+- `backend/app/models.py` — 5 new `Project` columns
+  (`heartbeat_enabled`, `last_heartbeat_at`, `last_issue_poll_at`,
+  `last_heartbeat_status`, `last_heartbeat_error`), 2 new `Task`
+  columns (`heartbeat_spawned`, `heartbeat_issue_number`), and a new
+  `HeartbeatSeen` model (composite PK on `(project_id, issue_number)`,
+  caches `issue_title` / `issue_url`, stamps `dispatched_task_id` once
+  an agent is dispatched).
+- `backend/app/database.py` — `_SQLITE_COLUMN_ADDITIONS["projects"]` and
+  `_SQLITE_COLUMN_ADDITIONS["tasks"]` extended; the `heartbeat_seen`
+  table is created by `create_all()` (new model, no manual migration).
+- `backend/app/github_client.py` — new `list_issues(full_name, *,
+  state, labels, since, per_page, max_pages)` paginator mirroring
+  `list_user_repos`. Callers MUST filter `i.get("pull_request")` if they
+  want real issues only (the heartbeat does this in `_process_project`).
+- `backend/app/routers/heartbeat.py` (new) — two routers:
+  `router` (mounted at `/api/heartbeat`, carries `prefix="/heartbeat"`
+  on the global routes) and `projects_router` (mounted at `/api`,
+  carries the `/projects/{id}/heartbeat/...` per-project routes).
+  Endpoints: `GET /api/heartbeat` (status + per-project snapshot),
+  `POST /api/heartbeat/{enable,disable,trigger}` (trigger awaits
+  completion so the HTTP response doubles as a 'done' signal),
+  `POST /api/projects/{id}/heartbeat/{enable,disable}`,
+  `GET /api/projects/{id}/heartbeat/issues` (the `heartbeat_seen`
+  ledger), `GET /api/projects/{id}/heartbeat/open` (live GitHub
+  open issues, PRs filtered out). All HTTP routes take
+  `Depends(get_current_user)` in the signature; no router-level
+  security dep (consistency with the WebSocket-router gotcha).
+- `backend/app/main.py` — `lifespan()` now `await heartbeat.start()`
+  before `yield` and `await heartbeat.stop()` in a `try/finally` after
+  `yield`; both routers registered (`prefix="/api"` for both).
+- `backend/app/schemas.py` — `ProjectOut` extended with
+  `heartbeat_enabled`, `last_heartbeat_at`,
+  `last_heartbeat_status`, `last_heartbeat_error`;
+  `TaskOut` extended with `heartbeat_spawned`,
+  `heartbeat_issue_number`; new `HeartbeatStatus`,
+  `HeartbeatProjectStatus`, `HeartbeatIssueSeen` schemas.
+- `frontend/src/types.ts` — `Project` and `Task` extended with the
+  same fields; new `HeartbeatProjectStatus`, `HeartbeatStatus`,
+  `HeartbeatIssueSeen`, `OpenGithubIssue` interfaces.
+- `frontend/src/api.ts` — new helpers: `getHeartbeat`,
+  `setHeartbeatEnabled`, `triggerHeartbeat`,
+  `setProjectHeartbeatEnabled`, `listHeartbeatIssues`,
+  `listProjectOpenIssues`.
+- `frontend/src/pages/Heartbeat.tsx` (new) — the dedicated overview
+  page (global toggle + per-project toggles + status table + "▶ Run
+  now" + "Zuletzt automatisch gestartete Tasks" feed). Polls every
+  5s — no WebSocket for v1.
+- `frontend/src/App.tsx` — `/heartbeat` route inside `<Protected>`.
+- `frontend/src/components/Layout.tsx` — added a `🤖 Heartbeat` nav
+  link next to `Projekte`.
+- `frontend/src/pages/Projects.tsx` — small `HeartbeatChip` per card
+  showing `🤖 vor 12 Min` / `🤖 Fehler` / `🤖 aus`.
+- `frontend/src/pages/ProjectDetail.tsx` — `🤖 Auto-Fix #N` badge on
+  heartbeat-spawned tasks in the history list; the optimistic
+  `Task` literal (built when starting a session) got the same two
+  new fields.
+- `deploy/coding-dashboard.env.example`,
+  `deploy/docker/coding-dashboard.docker.env.example`,
+  `deploy/install.sh`, `docker-compose.yml` — new
+  `CD_HEARTBEAT_*` env vars documented and threaded through the
+  systemd env generator + the Docker compose file (the Docker compose
+  block uses `${CD_HEARTBEAT_ENABLED:-false}` etc., so the defaults
+  are visible without uncommenting anything).
+
+**Verified:** `backend/tests/smoke.py` → ALL SMOKE TESTS PASSED with
+the 2 PRE-EXISTING CORS failures still failing (also failing on
+`main`, unrelated to this change). 73 new heartbeat checks in
+`test_heartbeat` all pass: settings fields, in-process enable/disable
+state, `_list_active_projects` filtering (active / archived /
+no-github), `_build_prompt` substitution, PR filter, dedup
+INSERT-OR-IGNORE idempotency, `_record_dispatch`, `_set_project_status`,
+`_in_cooldown` (success vs failed vs aged-out), `_spawn_task`
+(creates a `Task` with `heartbeat_spawned=True` +
+`heartbeat_issue_number=N`), full REST surface via TestClient
+(`GET /api/heartbeat`, `POST /api/heartbeat/{enable,disable,trigger}`,
+per-project enable/disable, `GET .../heartbeat/issues`), and an
+end-to-end tick (`POST /trigger` with a stubbed `list_issues` →
+observed task created in DB). Frontend untouched by this run but
+verified: `tsc --noEmit` clean; `vite build` succeeds (`✓ 37 modules
+transformed`, +1 over the previous run for the new `Heartbeat.tsx`).
+`git status` shows exactly 19 files (16 modified + 3 new).
+
 ### 2026-07-04 - hermes (host-visible lock file while a task, goal or session is running)
 
 **Task:** Add a lock file on the REAL host (not inside the Docker container)
@@ -437,11 +580,11 @@ Hermes, or Codex: create/import a repo -> give an agent a task -> watch live out
 backend/app/
   config.py        Settings (env CD_*) + agent config (YAML) + context_instruction
   database.py      Engine / session (SQLite), init_db, session_scope
-  models.py        Project, Task
+  models.py        Project, Task, HeartbeatSeen
   schemas.py       Pydantic I/O
   security.py      pbkdf2 hash + JWT
   auth.py          get_current_user (Bearer), user_from_token (WS)
-  github_client.py GitHub REST (create / get / delete repo)
+  github_client.py GitHub REST (create / get / delete repo / list_issues)
   git_ops.py       clone / commit / push (token only as http.extraheader, never in config)
   agents.py        run_agent(): subprocess + streaming, claude-json/raw parser,
                    model / effort arg injection, final output extraction
@@ -450,11 +593,14 @@ backend/app/
                    stored under data_dir/task_images/{task_id}/
   task_runner.py   TaskManager: per-project lock, WS pub/sub, AGENTS.md maintenance,
                    auto-commit + push
-  routers/         auth, projects, tasks, ws
-  main.py          app factory, lifespan, SPA serving (fallback)
+  heartbeat.py     HeartbeatRunner: background loop, auto-poll GitHub issues,
+                   auto-spawn Claude Code tasks; singleton at `heartbeat`
+  routers/         auth, projects, tasks, sessions, heartbeat, ws
+  main.py          app factory, lifespan (starts/stops the heartbeat), SPA serving
 frontend/src/
   api.ts (REST + apiBase/token), auth.tsx, types.ts
-  pages/ (Login, Projects, ProjectDetail, SessionPage redirect, AgentWindowPage)
+  pages/ (Login, Projects, ProjectDetail, SessionPage redirect, AgentWindowPage,
+          Heartbeat)
   components/ (TaskConsole, SessionTerminalModal, WindowManager, TaskImages, ui, ...)
 deploy/            install.sh, update.sh, uninstall.sh, build-android.sh, unit, nginx, *.example
 ```
@@ -715,6 +861,27 @@ AGENTS.md ships). Live output reaches the browser over WS `/api/ws/tasks/{id}`, 
 replay from buffer / DB for late or reconnecting clients. A per-**project**
 `asyncio.Lock` serializes git; different projects run in parallel.
 
+**Heartbeat path.** `heartbeat.HeartbeatRunner` is a single long-lived
+`asyncio.Task` started from `main.lifespan()`. Every
+`settings.heartbeat_interval_seconds` it walks every active (non-archived)
+project with a `github_full_name`, fetches open issues via
+`github_client.list_issues()`, filters out PRs and (optionally) by
+labels, dedups against the `heartbeat_seen` ledger, and for each
+*newly-seen* issue calls the same `task_runner.TaskManager.submit()`
+as a hand-submitted task — so heartbeat-spawned tasks inherit the
+host lock, auto-pull, auto-commit + push, AGENTS.md maintenance and
+result summary for free. The auto-spawned tasks are marked
+`tasks.heartbeat_spawned=True` + `tasks.heartbeat_issue_number=N`
+for the UI's `🤖 Auto-Fix #N` badge. The `routers/heartbeat.py` module
+exposes both the global `/api/heartbeat/...` routes (status, enable /
+disable / trigger) and the per-project `/api/projects/{id}/heartbeat/...`
+routes (enable / disable, the dedup ledger, the live open-issues list).
+Sync DB ops live in `_tick_locked()` behind `asyncio.to_thread`; per-tick
+parallelism is gated by an `asyncio.Semaphore` of size
+`settings.heartbeat_max_concurrent`. The prompt is built from
+`DEFAULT_HEARTBEAT_PROMPT_TEMPLATE` (overridable via
+`CD_HEARTBEAT_PROMPT_TEMPLATE`).
+
 **Interactive session path.** `routers/sessions.py` + `task_runner.SessionManager`.
 A real PTY (`os.openpty` + `os.fork`) runs the agent's `session_command` as a TUI;
 raw bytes stream both ways over WS `/api/ws/sessions/{id}`. The browser side
@@ -784,6 +951,31 @@ live buffer intact.
 - Agents run autonomously (`--dangerously-skip-permissions` / `--yolo` / Codex
   non-interactive) and push without confirmation - intended for private repos with a
   dedicated token; the service runs as a non-root user.
+- **Heartbeat off by default.** `CD_HEARTBEAT_ENABLED=false` is the shipped
+  default (both systemd `install.sh` and Docker compose). The dashboard
+  only ticks when an operator opts in; this avoids runaway PR-generation
+  on fresh installs. The `/heartbeat` UI's "Aktivieren" toggle is
+  in-memory only and resets on restart; for persistence, set
+  `CD_HEARTBEAT_ENABLED=true` in the service config and restart.
+- **Heartbeat dedup is a one-way insert.** `heartbeat_seen` uses a
+  composite primary key `(project_id, issue_number)`. Once an issue
+  is recorded (whether or not a task was actually dispatched), it is
+  never re-considered. If the operator wants the heartbeat to retry
+  the same issue, the row has to be deleted by hand (or the issue
+  closed + reopened, which gets a new `created_at` but the same
+  `number` -- still deduped). A future iteration may key on
+  `updated_at` for retry-on-update semantics.
+- **`POST /api/heartbeat/trigger` awaits the tick.** Unlike most
+  "fire-and-forget" admin endpoints, the trigger returns only after
+  the tick completes (or after a `tick_lock` collision -- in which
+  case it returns `summary={'status': 'already_running'}`). This makes
+  it a usable 'Run now' button and a reliable test entry point.
+- **`CD_HEARTBEAT_AGENT_KEY` must exist in `agents.config`.** If it
+  doesn't (e.g. the operator left it at the default `claude` but the
+  config only defines `codex`), the tick returns `no_agent` and
+  dispatches nothing -- it does NOT fall back to another agent. Fix:
+  either set `CD_HEARTBEAT_AGENT_KEY` to a defined key, or define the
+  agent in `config.yaml`.
 
 ## Tests
 
@@ -792,6 +984,39 @@ Git commit / push cycle against a local bare repo, REST, and a complete task run
 
 ## Open items / possible next steps
 
+- **2026-07-05 (Feature):** Dashboard heartbeat: a single long-lived
+  `asyncio.Task` started from `main.lifespan()` polls GitHub for open
+  issues on active (non-archived) projects every
+  `CD_HEARTBEAT_INTERVAL_SECONDS` (default 15 min) and auto-spawns a
+  Claude Code task per *newly-seen* open issue with a structured
+  "investigate → reproduce → fix → PR" prompt scaffold
+  (`DEFAULT_HEARTBEAT_PROMPT_TEMPLATE` in `backend/app/config.py`,
+  overridable via `CD_HEARTBEAT_PROMPT_TEMPLATE`). Dedup is per
+  `(project_id, issue_number)` via a new `heartbeat_seen` table
+  (idempotent insert). Per-project opt-out via
+  `projects.heartbeat_enabled`; global toggle via
+  `POST /api/heartbeat/{enable,disable}` (in-process, mirrors the
+  `CD_HEARTBEAT_ENABLED` env var). Manual trigger via
+  `POST /api/heartbeat/trigger`. The auto-spawned tasks run through the
+  same `manager.submit()` path as user tasks, so they get the host
+  lock, auto-pull, auto-commit, auto-push, AGENTS.md maintenance and
+  result summary for free. Frontend gets a dedicated `/heartbeat` page
+  (global + per-project toggles + status table + "▶ Run now" + recent
+  heartbeat-spawned tasks feed), an `🤖 vor 12 Min / Fehler / aus`
+  chip on each project card, and a `🤖 Auto-Fix #N` badge on each
+  spawned task in the history list. New columns on `projects`
+  (`heartbeat_enabled`, `last_heartbeat_at`, `last_issue_poll_at`,
+  `last_heartbeat_status`, `last_heartbeat_error`) and on `tasks`
+  (`heartbeat_spawned`, `heartbeat_issue_number`) are added
+  idempotently by `database._ensure_sqlite_columns()` on next service
+  start, so existing DBs do not need a manual migration; the new
+  `heartbeat_seen` table is created by `create_all()`. Covered by
+  `test_heartbeat` in `backend/tests/smoke.py` (73 checks). Effective
+  after `update.sh` / `systemctl restart coding-dashboard` (or on next
+  container start for Docker). No new WebSocket protocol yet — the
+  `/heartbeat` page polls every 5s; per-project per-issue WebSocket
+  broadcasts and exponential backoff on GitHub errors are noted as
+  next-iteration candidates.
 - **2026-06-24 (Feature):** Projects can now be archived. Soft-delete via
   ``projects.archived`` + ``projects.archived_at`` columns; two new
   endpoints (``POST /api/projects/{id}/archive`` and ``…/unarchive``,

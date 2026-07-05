@@ -41,6 +41,26 @@ class Project(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Per-project heartbeat opt-out (default ON). The user can flip this off
+    # on the /heartbeat page or via POST /api/projects/{id}/heartbeat/disable.
+    heartbeat_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Last time the heartbeat even LOOKED at this project (regardless of
+    # whether it dispatched a task). UI shows "vor 12 Min".
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Last time the heartbeat successfully fetched open issues from GitHub.
+    # Drives the ``since`` parameter on subsequent polls (incremental fetch).
+    last_issue_poll_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Short status string for the /heartbeat UI:
+    # "" (never ticked) | "success" | "skipped" | "cooldown" |
+    # "error" | "no_github" | "no_issues".
+    last_heartbeat_status: Mapped[str] = mapped_column(String(32), default="")
+    # On error: human-readable one-liner for the UI / logs.
+    last_heartbeat_error: Mapped[str] = mapped_column(Text, default="")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -96,6 +116,13 @@ class Task(Base):
     commit_created: Mapped[bool] = mapped_column(Boolean, default=False)
     pushed: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Heartbeat marker: True when the task was auto-spawned by the heartbeat
+    # loop (vs hand-created by the user). Drives the "🤖 Auto-Fix" badge in
+    # the task history and the heartbeat's "recent tasks" overview.
+    heartbeat_spawned: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The GitHub issue number that triggered this task (NULL for hand tasks).
+    heartbeat_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, index=True
     )
@@ -103,3 +130,33 @@ class Task(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped["Project"] = relationship(back_populates="tasks")
+
+
+class HeartbeatSeen(Base):
+    """Dedup ledger: one row per (project, GitHub issue) the heartbeat has
+    already considered. Insert here first (idempotent INSERT OR IGNORE);
+    the heartbeat only spawns a task when the row was ACTUALLY new. This is
+    a separate table so an issue that's been around for months doesn't get
+    re-dispatched every poll — only newly-opened issues trigger a spawn.
+    """
+
+    __tablename__ = "heartbeat_seen"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    issue_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Issue title at first sight (cached for the /heartbeat UI list).
+    issue_title: Mapped[str] = mapped_column(String(512), default="")
+    issue_url: Mapped[str] = mapped_column(String(512), default="")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now
+    )
+    # Which task was dispatched for this issue, if any. NULL if the issue
+    # was filtered out (e.g. heartbeat was off, or labels didn't match).
+    dispatched_task_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+
+    project: Mapped["Project"] = relationship()

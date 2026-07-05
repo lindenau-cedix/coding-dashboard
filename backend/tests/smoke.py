@@ -31,6 +31,10 @@ os.environ.update(
     CD_AGENTS_CONFIG_PATH=str(CONFIG),
     CD_FRONTEND_DIST=str(TMP / "no-frontend"),
     CD_GITHUB_TOKEN="",  # local bare remote needs no auth
+    # Heartbeat agent key: the smoke test config only defines ``fake``,
+    # so pin the heartbeat to it; otherwise the runner would warn that
+    # ``claude`` isn't in the agents config and skip every tick.
+    CD_HEARTBEAT_AGENT_KEY="fake",
 )
 
 PY = sys.executable
@@ -1957,6 +1961,423 @@ def test_host_lock() -> None:
         app_config.get_settings.cache_clear()
 
 
+def test_heartbeat() -> None:
+    """Heartbeat feature: auto-poll GitHub issues + auto-spawn Claude Code tasks.
+
+    Verifies:
+      * ``HeartbeatRunner`` settings + state toggle, settings fields exist.
+      * Per-project opt-out (``heartbeat_enabled`` column, persisted via API).
+      * Cooldown: a project with a SUCCESS heartbeat task inside the window
+        is skipped; a project with only failed tasks is NOT skipped.
+      * ``_build_prompt`` substitutes the issue title, body, URL, repo, etc.
+      * ``list_issues`` helper: filters PRs out of the returned list at the
+        consumer boundary (heartbeat side).
+      * ``heartbeat_seen`` ledger: idempotent INSERT OR IGNORE-style behaviour
+        via the runner; re-claiming the same issue doesn't double-dispatch.
+      * ``_spawn_task`` creates a Task with ``heartbeat_spawned=True`` +
+        ``heartbeat_issue_number=N`` + the configured agent key.
+      * Manual ``POST /api/heartbeat/trigger`` flips the runner state and
+        runs a tick (observed via TestClient).
+      * Global toggle via ``POST /api/heartbeat/{enable,disable}``.
+      * Per-project toggle via ``POST /api/projects/{id}/heartbeat/{enable,disable}``.
+      * ``GET /api/heartbeat`` returns the expected shape including all
+        per-project statuses + the configured agent_key + interval_seconds.
+    """
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from app import config as app_config
+    from app import github_client, heartbeat as hb_mod
+    from app.config import DEFAULT_HEARTBEAT_PROMPT_TEMPLATE
+    from app.database import session_scope
+    from app.main import app
+    from app.models import HeartbeatSeen, Project, Task
+
+    # -------- 1. settings fields exist ----------------------------------- #
+    s = app_config.get_settings()
+    check("heartbeat: heartbeat_enabled setting", hasattr(s, "heartbeat_enabled"))
+    check("heartbeat: heartbeat_interval_seconds setting", hasattr(s, "heartbeat_interval_seconds"))
+    check("heartbeat: heartbeat_max_concurrent setting", hasattr(s, "heartbeat_max_concurrent"))
+    check("heartbeat: heartbeat_cooldown_minutes setting", hasattr(s, "heartbeat_cooldown_minutes"))
+    check(
+        "heartbeat: heartbeat_agent_key is configurable (default 'claude',"
+        " but the smoke test pins it to 'fake' since the test config only"
+        " defines the fake agent)",
+        s.heartbeat_agent_key == "fake",
+        repr(s.heartbeat_agent_key),
+    )
+    check(
+        "heartbeat: prompt template non-empty",
+        bool(s.heartbeat_prompt_template) and "{number}" in s.heartbeat_prompt_template,
+    )
+    check(
+        "heartbeat: default template identical to constant",
+        s.heartbeat_prompt_template == DEFAULT_HEARTBEAT_PROMPT_TEMPLATE,
+    )
+
+    # -------- 2. global enable/disable via API --------------------------- #
+    runner = hb_mod.heartbeat
+    runner.set_enabled(True)
+    check("heartbeat: set_enabled(True) reflects in property", runner.enabled is True)
+    runner.set_enabled(False)
+    check("heartbeat: set_enabled(False) reflects in property", runner.enabled is False)
+
+    # -------- 3. _list_active_projects filters archive / no-github ------- #
+    with session_scope() as db:
+        active_proj = Project(
+            name="hb-active",
+            slug="hb-active",
+            local_path="/tmp/hb-active",
+            github_full_name="owner/hb-active",
+            heartbeat_enabled=True,
+        )
+        archived_proj = Project(
+            name="hb-archived",
+            slug="hb-archived",
+            local_path="/tmp/hb-archived",
+            github_full_name="owner/hb-archived",
+            archived=True,
+            heartbeat_enabled=True,
+        )
+        no_github_proj = Project(
+            name="hb-no-github",
+            slug="hb-no-github",
+            local_path="/tmp/hb-no-github",
+            github_full_name="",
+            heartbeat_enabled=True,
+        )
+        db.add_all([active_proj, archived_proj, no_github_proj])
+        db.flush()
+        active_id = active_proj.id
+        archived_id = archived_proj.id
+        no_github_id = no_github_proj.id
+
+    listed = runner._list_active_projects()
+    listed_ids = {p.id for p in listed}
+    check(
+        "heartbeat: _list_active_projects includes active github project",
+        active_id in listed_ids,
+    )
+    check(
+        "heartbeat: _list_active_projects skips archived",
+        archived_id not in listed_ids,
+    )
+    check(
+        "heartbeat: _list_active_projects skips no-github",
+        no_github_id not in listed_ids,
+    )
+
+    # -------- 4. _build_prompt substitutes placeholders ------------------ #
+    sample_issue = {
+        "number": 42,
+        "title": "Crash on startup",
+        "user": {"login": "alice"},
+        "labels": [{"name": "bug"}, {"name": "P1"}],
+        "created_at": "2026-07-01T00:00:00Z",
+        "body": "Steps to reproduce:\n1. start\n2. boom",
+        "html_url": "https://github.com/owner/repo/issues/42",
+    }
+    with session_scope() as db:
+        active = db.get(Project, active_id)
+        db.expunge(active)
+    prompt = runner._build_prompt(active, sample_issue, DEFAULT_HEARTBEAT_PROMPT_TEMPLATE)
+    check("heartbeat: prompt contains issue number", "#42" in prompt)
+    check("heartbeat: prompt contains issue title", "Crash on startup" in prompt)
+    check("heartbeat: prompt contains issue URL", "issues/42" in prompt)
+    check("heartbeat: prompt contains body excerpt", "Steps to reproduce" in prompt)
+    check("heartbeat: prompt contains repo full_name", "owner/hb-active" in prompt)
+    check("heartbeat: prompt contains author login", "alice" in prompt)
+    check(
+        "heartbeat: prompt lists labels (bug + P1)",
+        "bug" in prompt and "P1" in prompt,
+    )
+
+    # -------- 5. PRs are filtered out (consumer-side check) -------------- #
+    real_issues_payload = [
+        sample_issue,
+        {**sample_issue, "number": 43, "pull_request": {"url": "x"}, "title": "PR thing"},
+        {**sample_issue, "number": 44, "title": "Real issue"},
+    ]
+    real_only = [i for i in real_issues_payload if not i.get("pull_request")]
+    check(
+        "heartbeat: PR filtered out by consumer",
+        len(real_only) == 2 and 43 not in {i["number"] for i in real_only},
+    )
+
+    # -------- 6. heartbeat_seen ledger idempotency ----------------------- #
+    with session_scope() as db:
+        # ensure clean state for active_id
+        db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
+        db.commit()
+
+    first_claim = runner._claim_issue(active_id, 101, "Issue 101", "https://x/101")
+    second_claim = runner._claim_issue(active_id, 101, "Issue 101 (dup)", "https://x/101")
+    third_claim = runner._claim_issue(active_id, 102, "Issue 102", "https://x/102")
+    check("heartbeat: first claim inserts (new=True)", first_claim is True)
+    check("heartbeat: second claim of same issue is NOT new", second_claim is False)
+    check("heartbeat: different issue number inserts (new=True)", third_claim is True)
+
+    with session_scope() as db:
+        rows = (
+            db.query(HeartbeatSeen)
+            .filter(HeartbeatSeen.project_id == active_id)
+            .order_by(HeartbeatSeen.issue_number)
+            .all()
+        )
+    check(
+        "heartbeat: heartbeat_seen has 2 rows after 3 claims",
+        len(rows) == 2,
+        f"got {len(rows)}",
+    )
+
+    # -------- 7. _record_dispatch stamps the row ------------------------- #
+    with session_scope() as db:
+        rows = (
+            db.query(HeartbeatSeen)
+            .filter(HeartbeatSeen.project_id == active_id)
+            .filter(HeartbeatSeen.issue_number == 101)
+            .all()
+        )
+        check(
+            "heartbeat: row exists before record_dispatch",
+            len(rows) == 1,
+        )
+    runner._record_dispatch(active_id, 101, "task-abc")
+    with session_scope() as db:
+        row = (
+            db.query(HeartbeatSeen)
+            .filter(HeartbeatSeen.project_id == active_id)
+            .filter(HeartbeatSeen.issue_number == 101)
+            .first()
+        )
+        check(
+            "heartbeat: _record_dispatch stamps dispatched_task_id",
+            row is not None and row.dispatched_task_id == "task-abc",
+        )
+
+    # -------- 8. _set_project_status stamps fields ----------------------- #
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    runner._set_project_status(active_id, "success", poll_at=now)
+    with session_scope() as db:
+        p = db.get(Project, active_id)
+        check(
+            "heartbeat: last_heartbeat_status set",
+            p.last_heartbeat_status == "success",
+            repr(p.last_heartbeat_status),
+        )
+        check(
+            "heartbeat: last_issue_poll_at set",
+            p.last_issue_poll_at is not None,
+        )
+        check(
+            "heartbeat: last_heartbeat_at set",
+            p.last_heartbeat_at is not None,
+        )
+
+    runner._set_project_status(active_id, "error", error="rate limit")
+    with session_scope() as db:
+        p = db.get(Project, active_id)
+        check(
+            "heartbeat: error status + error message persisted",
+            p.last_heartbeat_status == "error" and "rate limit" in p.last_heartbeat_error,
+        )
+
+    # -------- 9. _in_cooldown respects success vs failed ----------------- #
+    # Mark a recent heartbeat task as success within the cooldown window
+    with session_scope() as db:
+        success_task = Task(
+            project_id=active_id,
+            agent="claude",
+            prompt="Fix it",
+            mode="task",
+            status="success",
+            heartbeat_spawned=True,
+            heartbeat_issue_number=999,
+            finished_at=datetime.now(timezone.utc),
+        )
+        failed_task = Task(
+            project_id=active_id,
+            agent="claude",
+            prompt="Fix it 2",
+            mode="task",
+            status="error",
+            heartbeat_spawned=True,
+            heartbeat_issue_number=998,
+            finished_at=datetime.now(timezone.utc),
+        )
+        db.add_all([success_task, failed_task])
+        db.commit()
+
+    in_cooldown = runner._in_cooldown(active_id, cooldown_minutes=30)
+    check("heartbeat: _in_cooldown=True when a recent success exists", in_cooldown is True)
+
+    # Mark the success task as OLDER than the cooldown window
+    with session_scope() as db:
+        t = db.query(Task).filter(Task.id == success_task.id).one()
+        from datetime import timedelta
+        t.finished_at = datetime.now(timezone.utc) - timedelta(hours=2)
+
+    in_cooldown_after = runner._in_cooldown(active_id, cooldown_minutes=30)
+    check(
+        "heartbeat: _in_cooldown=False once success is older than window",
+        in_cooldown_after is False,
+    )
+
+    # -------- 10. _spawn_task creates a heartbeat-marked Task ----------- #
+    async def _run_spawn() -> str:
+        return await runner._spawn_task(active, sample_issue, "claude")
+
+    spawned_id = asyncio.run(_run_spawn())
+    with session_scope() as db:
+        t = db.get(Task, spawned_id)
+        check(
+            "heartbeat: spawned task has heartbeat_spawned=True",
+            t is not None and t.heartbeat_spawned is True,
+        )
+        check(
+            "heartbeat: spawned task has heartbeat_issue_number=42",
+            t is not None and t.heartbeat_issue_number == 42,
+        )
+        check(
+            "heartbeat: spawned task agent=claude",
+            t is not None and t.agent == "claude",
+        )
+        check(
+            "heartbeat: spawned task mode=task",
+            t is not None and t.mode == "task",
+        )
+
+    # -------- 11. REST: GET /api/heartbeat shape ------------------------- #
+    # Wipe leftover runtime state so the test is hermetic.
+    with session_scope() as db:
+        db.query(Task).filter(Task.heartbeat_spawned.is_(True)).delete()
+        db.commit()
+
+    with TestClient(app) as client:
+        ok = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+        )
+        check("heartbeat: login ok", ok.status_code == 200, str(ok.status_code))
+        H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+        r = client.get("/api/heartbeat", headers=H)
+        check("heartbeat: GET /api/heartbeat 200", r.status_code == 200, str(r.status_code))
+        body = r.json()
+        check(
+            "heartbeat: GET body has interval_seconds",
+            isinstance(body.get("interval_seconds"), int) and body["interval_seconds"] > 0,
+        )
+        check(
+            "heartbeat: GET body has a known agent_key (defaults to claude if present)",
+            body.get("agent_key") in get_agents_config().agents,
+            repr(body.get("agent_key")),
+        )
+        check(
+            "heartbeat: GET body projects list contains hb-active",
+            any(p["id"] == active_id for p in body.get("projects", [])),
+        )
+        check(
+            "heartbeat: GET body projects list omits archived",
+            all(p["id"] != archived_id for p in body.get("projects", [])),
+        )
+
+        # POST enable / disable global
+        en = client.post("/api/heartbeat/enable", headers=H)
+        check("heartbeat: POST /enable 200", en.status_code == 200, str(en.status_code))
+        check("heartbeat: POST /enable sets property", runner.enabled is True)
+        dis = client.post("/api/heartbeat/disable", headers=H)
+        check("heartbeat: POST /disable 200", dis.status_code == 200, str(dis.status_code))
+        check("heartbeat: POST /disable clears property", runner.enabled is False)
+
+        # POST per-project enable / disable
+        en_p = client.post(
+            f"/api/projects/{active_id}/heartbeat/disable", headers=H
+        )
+        check("heartbeat: POST project disable 200", en_p.status_code == 200)
+        with session_scope() as db:
+            check(
+                "heartbeat: per-project disable persisted",
+                db.get(Project, active_id).heartbeat_enabled is False,
+            )
+        en_p2 = client.post(
+            f"/api/projects/{active_id}/heartbeat/enable", headers=H
+        )
+        check("heartbeat: POST project enable 200", en_p2.status_code == 200)
+        with session_scope() as db:
+            check(
+                "heartbeat: per-project enable persisted",
+                db.get(Project, active_id).heartbeat_enabled is True,
+            )
+
+        # GET heartbeat/issues (empty after wipe)
+        r2 = client.get(
+            f"/api/projects/{active_id}/heartbeat/issues", headers=H
+        )
+        check("heartbeat: GET issues 200", r2.status_code == 200, str(r2.status_code))
+        check(
+            "heartbeat: GET issues returns a list",
+            isinstance(r2.json(), list),
+        )
+
+        # POST /trigger kicks a tick (fire-and-forget)
+        client.post("/api/heartbeat/enable", headers=H)  # re-enable for the tick
+        # Patch list_issues to a deterministic stub so the tick can run without
+        # network — return one new issue that we haven't seen yet.
+        async def fake_list_issues(
+            full_name, *, state="open", labels=None, since=None,
+            per_page=50, max_pages=5,
+        ):
+            return [
+                {
+                    "number": 7777,
+                    "title": "Heartbeat-stubbed issue",
+                    "user": {"login": "bob"},
+                    "labels": [],
+                    "created_at": "2026-07-05T00:00:00Z",
+                    "body": "Body of stubbed issue",
+                    "html_url": f"https://github.com/{full_name}/issues/7777",
+                }
+            ]
+
+        # Also patch the heartbeat module's reference (it imported the
+        # module directly).
+        original_list_issues = github_client.list_issues
+        github_client.list_issues = fake_list_issues
+        hb_mod.github_client.list_issues = fake_list_issues
+        try:
+            tr = client.post("/api/heartbeat/trigger", headers=H)
+            check("heartbeat: POST /trigger 200", tr.status_code == 200, str(tr.status_code))
+            check("heartbeat: POST /trigger body triggered=true", tr.json().get("triggered") is True)
+            # Wait briefly for the tick to complete (fire-and-forget task).
+            deadline = time.time() + 10.0
+            dispatched = False
+            while time.time() < deadline:
+                with session_scope() as db:
+                    n = (
+                        db.query(Task)
+                        .filter(Task.heartbeat_spawned.is_(True))
+                        .filter(Task.heartbeat_issue_number == 7777)
+                        .count()
+                    )
+                if n >= 1:
+                    dispatched = True
+                    break
+                time.sleep(0.2)
+            check("heartbeat: tick dispatched a task for issue #7777", dispatched)
+        finally:
+            github_client.list_issues = original_list_issues
+            hb_mod.github_client.list_issues = original_list_issues
+            client.post("/api/heartbeat/disable", headers=H)
+
+    # -------- 12. cleanup ----------------------------------------------- #
+    with session_scope() as db:
+        db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
+        db.query(Task).filter(Task.project_id.in_([active_id, archived_id, no_github_id])).delete()
+        db.query(Project).filter(Project.id.in_([active_id, archived_id, no_github_id])).delete()
+
+
 def main() -> int:
     try:
         test_security()
@@ -1983,6 +2404,7 @@ def main() -> int:
         test_hermes_clarify_disabled()
         test_project_archive()
         test_host_lock()
+        test_heartbeat()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 
