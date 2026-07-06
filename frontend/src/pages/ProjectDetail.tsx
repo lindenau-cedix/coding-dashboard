@@ -266,6 +266,8 @@ export default function ProjectDetail() {
         pushed: false,
         heartbeat_spawned: false,
         heartbeat_issue_number: null,
+        heartbeat_commented_at: null,
+        heartbeat_closed_at: null,
         created_at: new Date().toISOString(),
         started_at: null,
         finished_at: null,
@@ -729,6 +731,22 @@ export default function ProjectDetail() {
                       title={`Automatisch vom Heartbeat für GitHub-Issue #${t.heartbeat_issue_number ?? "?"} gestartet`}
                     >
                       🤖 Auto-Fix #{t.heartbeat_issue_number ?? "?"}
+                    </span>
+                  )}
+                  {t.heartbeat_commented_at && (
+                    <span
+                      className="shrink-0 rounded bg-cyan-500/15 px-1.5 py-0.5 text-xs text-cyan-300"
+                      title={`Dashboard hat auf GitHub-Issue #${t.heartbeat_issue_number ?? "?"} kommentiert`}
+                    >
+                      💬 kommentiert
+                    </span>
+                  )}
+                  {t.heartbeat_closed_at && (
+                    <span
+                      className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs text-emerald-300"
+                      title={`Dashboard hat GitHub-Issue #${t.heartbeat_issue_number ?? "?"} geschlossen`}
+                    >
+                      ✓ geschlossen
                     </span>
                   )}
                   {(t.images?.length ?? 0) > 0 && (

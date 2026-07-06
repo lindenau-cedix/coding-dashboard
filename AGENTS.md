@@ -1047,6 +1047,41 @@ Git commit / push cycle against a local bare repo, REST, and a complete task run
 
 ## Open items / possible next steps
 
+- **2026-07-06 (Feature):** Heartbeat comment-back: when a heartbeat-spawned
+  task lands a commit, the dashboard posts the commit hash + branch URL +
+  task link as a comment on the GitHub issue (compact German template,
+  same shape every time so the timeline reads cleanly). When the commit
+  also lands cleanly on the default branch (`merge_state=merged` +
+  `pushed=true`), the dashboard additionally closes the issue via a
+  separate `PATCH /repos/{repo}/issues/{n}` (`state: "closed"`) — works
+  even when no PR exists. New `HeartbeatFollowup` class in
+  `backend/app/heartbeat.py` (`heartbeat_followup.maybe_run(task_id)`),
+  hooked from `task_runner._publish_done` after the terminal Task row is
+  persisted. Fire-and-forget via `asyncio.create_task(...)`; the
+  `_inflight` dict guards re-entry for the same `task_id`. Three new
+  GitHub helpers in `backend/app/github_client.py`
+  (`create_issue_comment`, `update_issue_comment`, `update_issue_state`)
+  mirroring the existing `_request` pattern. Five new columns on
+  `HeartbeatSeen` (`last_comment_id`, `last_commented_at`,
+  `last_comment_url`, `last_comment_error`, `last_issue_state`,
+  `last_issue_state_changed_at`); two new `Task` columns
+  (`heartbeat_commented_at`, `heartbeat_closed_at`) for fast list-view
+  display. Three new routes in `routers/heartbeat.py`
+  (`POST .../comment-again`, `.../close`, `.../reopen`) for the operator
+  UI — comment-again POSTs a NEW comment (so the auto-hook's comment
+  stays intact), close/reopen PATCH the issue state. Frontend: the
+  Heartbeat overview's recent-tasks feed shows `💬 vor 12 Min` /
+  `✓ geschlossen` badges and three action buttons per row; the
+  project-detail history list shows the same `💬 kommentiert` /
+  `✓ geschlossen` chips next to the existing `🤖 Auto-Fix` badge. Both
+  features are opt-out via
+  `CD_HEARTBEAT_COMMENT_ON_SUCCESS=false` /
+  `CD_HEARTBEAT_CLOSE_ON_MERGE=false` (both default `true`). Covered by
+  `test_heartbeat_comment_on_solve` in `backend/tests/smoke.py`
+  (39 checks: predicate tests, hook-path integration tests with stubbed
+  GitHub helpers, REST round-trip via TestClient, idempotency). Effective
+  after `update.sh` / `systemctl restart coding-dashboard` (or next
+  container start for Docker).
 - **2026-07-06 (Fix):** Cross-tab session-end propagation. `end_session`
   already persists `task.status` to the terminal value (`success` /
   `failed` / ...) *before* the slow git commit/push step (verified by

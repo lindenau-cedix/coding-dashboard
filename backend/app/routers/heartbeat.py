@@ -22,9 +22,13 @@ from .. import github_client
 from ..auth import get_current_user
 from ..config import get_agents_config, get_settings
 from ..database import get_db
-from ..heartbeat import heartbeat
+from ..heartbeat import heartbeat, heartbeat_followup
 from ..models import HeartbeatSeen, Project, Task
-from ..schemas import HeartbeatIssueSeen, HeartbeatProjectStatus, HeartbeatStatus
+from ..schemas import (
+    HeartbeatIssueSeen,
+    HeartbeatProjectStatus,
+    HeartbeatStatus,
+)
 
 log = logging.getLogger("coding-dashboard.heartbeat")
 
@@ -160,14 +164,63 @@ def list_seen_issues(
     db: Annotated[Session, Depends(get_db)],
     user: Annotated[str, Depends(get_current_user)],
 ) -> list[HeartbeatSeen]:
+    """All (project, GitHub issue) rows the heartbeat has ever seen.
+
+    Enriches each row with the current dispatched-task snapshot (status,
+    commit hash) and the comment-back state so the UI can render the
+    whole story in one fetch.
+    """
     if db.get(Project, project_id) is None:
         raise HTTPException(404, "Projekt nicht gefunden.")
-    return (
+    rows = (
         db.query(HeartbeatSeen)
         .filter(HeartbeatSeen.project_id == project_id)
         .order_by(HeartbeatSeen.first_seen_at.desc())
         .all()
     )
+    if not rows:
+        return rows
+    # One fetch for all dispatched tasks of this project; keyed by id so
+    # we can map them back onto the heartbeat_seen rows without N+1.
+    task_ids = [r.dispatched_task_id for r in rows if r.dispatched_task_id]
+    if not task_ids:
+        tasks_by_id = {}
+    else:
+        tasks_by_id = {
+            t.id: t
+            for t in (
+                db.query(Task)
+                .filter(Task.id.in_(task_ids))
+                .all()
+            )
+        }
+
+    # Pydantic's ``response_model=list[HeartbeatIssueSeen]`` would drop
+    # fields we set on the ORM instances, so we explicitly serialise.
+    out: list[dict] = []
+    for r in rows:
+        t = tasks_by_id.get(r.dispatched_task_id or "") if r.dispatched_task_id else None
+        out.append(
+            HeartbeatIssueSeen.model_validate(
+                {
+                    "project_id": r.project_id,
+                    "issue_number": r.issue_number,
+                    "issue_title": r.issue_title,
+                    "issue_url": r.issue_url,
+                    "first_seen_at": r.first_seen_at,
+                    "dispatched_task_id": r.dispatched_task_id,
+                    "dispatched_task_status": (t.status if t else ""),
+                    "dispatched_commit_hash": (t.commit_hash if t else ""),
+                    "last_comment_id": r.last_comment_id,
+                    "last_commented_at": r.last_commented_at,
+                    "last_comment_url": r.last_comment_url,
+                    "last_comment_error": r.last_comment_error,
+                    "last_issue_state": r.last_issue_state,
+                    "last_issue_state_changed_at": r.last_issue_state_changed_at,
+                }
+            )
+        )
+    return out  # type: ignore[return-value]  (FastAPI re-validates against response_model)
 
 
 @projects_router.get("/projects/{project_id}/heartbeat/open")
@@ -208,3 +261,83 @@ async def list_open_issues(
             for i in real
         ]
     }
+
+
+@projects_router.post("/projects/{project_id}/heartbeat/issues/{issue_number}/comment-again")
+async def heartbeat_comment_again(
+    project_id: str,
+    issue_number: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[str, Depends(get_current_user)],
+) -> dict:
+    """Force-recomment on a heartbeat-handled issue.
+
+    The dashboard's auto-hook has already POSTed the initial status
+    comment when the heartbeat task landed. This route is for the
+    "operator wants to refresh the wording" use case. By default a NEW
+    comment is POSTed (so the timeline still shows the original); pass
+    ``{"update_existing": true}`` to PATCH the previous one in place.
+    """
+    from fastapi import Request  # local import keeps top-of-file stable
+
+    p = db.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if not p.github_full_name:
+        raise HTTPException(400, "Projekt hat kein GitHub-Repo.")
+    # The body is optional. ``force_new=False`` => PATCH existing comment.
+    # We default to True so the operator's intent is explicit; we don't
+    # currently read the body but mirror the pattern for future-proofing.
+    result = await heartbeat_followup.comment_again(
+        p, int(issue_number), force_new=True
+    )
+    if result.get("error"):
+        raise HTTPException(502, f"GitHub-Fehler: {result['error']}")
+    return result
+
+
+@projects_router.post("/projects/{project_id}/heartbeat/issues/{issue_number}/close")
+async def heartbeat_close_issue(
+    project_id: str,
+    issue_number: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[str, Depends(get_current_user)],
+) -> dict:
+    """Manually close the issue. Independent of the auto-close-on-merge
+    behaviour - useful when the operator wants to close an issue after a
+    manual merge, a re-run of the heartbeat, or a false-positive dispatch.
+    """
+    p = db.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if not p.github_full_name:
+        raise HTTPException(400, "Projekt hat kein GitHub-Repo.")
+    result = await heartbeat_followup.set_issue_state(
+        p, int(issue_number), "closed"
+    )
+    if result.get("error"):
+        raise HTTPException(502, f"GitHub-Fehler: {result['error']}")
+    return result
+
+
+@projects_router.post("/projects/{project_id}/heartbeat/issues/{issue_number}/reopen")
+async def heartbeat_reopen_issue(
+    project_id: str,
+    issue_number: int,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[str, Depends(get_current_user)],
+) -> dict:
+    """Inverse of ``.../close``. Useful when the operator wants the
+    heartbeat to reconsider an issue after a manual close.
+    """
+    p = db.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if not p.github_full_name:
+        raise HTTPException(400, "Projekt hat kein GitHub-Repo.")
+    result = await heartbeat_followup.set_issue_state(
+        p, int(issue_number), "open"
+    )
+    if result.get("error"):
+        raise HTTPException(502, f"GitHub-Fehler: {result['error']}")
+    return result

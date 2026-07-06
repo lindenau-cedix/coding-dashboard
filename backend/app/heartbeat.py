@@ -47,7 +47,7 @@ log = logging.getLogger("coding-dashboard.heartbeat")
 
 
 # --------------------------------------------------------------------------- #
-# Helpers
+# Issue-comment follow-up: post the commit number back onto the GitHub issue
 # --------------------------------------------------------------------------- #
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -58,6 +58,88 @@ def _slugify(text: str, max_len: int = 40) -> str:
     human-readable; not a full slug library."""
     s = re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()
     return s[:max_len] or "issue"
+
+
+# Local helper: cap & normalize the dashboard base URL embedded in the
+# comment so the operator gets a working link to the task that ran. Falls
+# back to the public ``settings.frontend_dist``-relative root (a hash
+# router, so the path is enough on its own).
+def _dashboard_base_url() -> str:
+    """Best-effort absolute base URL the comment can link to.
+
+    Reads ``CD_PUBLIC_URL`` if set (``https://dashboard.example.com``),
+    otherwise returns an empty string and the caller uses a
+    dashboard-relative path like ``#/projects/<id>/tasks/<id>``. We avoid
+    guessing a hostname because getting it wrong is worse than no link.
+    """
+    s = get_settings()
+    url = getattr(s, "public_url", "") or ""
+    return url.rstrip("/")
+
+
+def _short(text: str, limit: int = 280) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def format_comment_body(
+    task: Task, project: Project, issue_url: str
+) -> str:
+    """Markdown body of the auto-posted issue comment. Single source of
+    truth — used by the post-finish hook AND by the "Re-comment" route so
+    the same wording lands on both paths (and unit tests can assert it).
+
+    ``issue_url`` is the HTML URL of the issue (``html_url`` from the
+    ``heartbeat_seen`` row). It is not yet used in the body itself but is
+    stamped on the comment JSON later (for cross-referencing in
+    ``last_comment_url``).
+    """
+    number = task.heartbeat_issue_number
+    summary = _short(task.result_summary or "")
+    commit = (task.commit_hash or "").strip()
+    branch = (task.branch or "").strip() or "?"
+    repo = project.github_full_name or project.slug or "?"
+    merged = (
+        f"merged in `{task.merge_state or 'merged'}` branch `{branch}`"
+    )
+    if task.merge_state == "conflict":
+        merged = f"Konflikt — Branch `{branch}` bleibt für manuellen Merge"
+    push_label = "✓ gepusht" if task.pushed else "⚠ nicht gepusht"
+
+    base = _dashboard_base_url()
+    task_url = (
+        f"{base}/#/projects/{project.id}/tasks/{task.id}"
+        if base
+        else f"#/projects/{project.id}/tasks/{task.id}"
+    )
+    commit_url = (
+        f"https://github.com/{repo}/commit/{commit}" if commit else ""
+    )
+
+    lines = [
+        f"🤖 [coding-dashboard] Heartbeat-Fix für Issue #{number} im Repo `{repo}`:",
+        "",
+        f"**Task:** <{task_url}>",
+        f"**Ergebnis:** {_short(task.result_summary, 600) or '–'}",
+        f"**Branch:** `{branch}` ({push_label}, {merged})",
+    ]
+    if commit_url:
+        lines.append(f"**Commit:** <{commit_url}>")
+    lines += [
+        "",
+        "Bitte den Branch / PR reviewen und das Issue manuell schließen,"
+        " falls die Untersuchung nicht passt. Der Dashboard-Heartbeat"
+        " meldet sich nicht nochmal zu diesem Issue.",
+    ]
+    return "\n".join(lines)
+
+
+def should_close_on_merge(task: Task) -> bool:
+    """Close-on-merge predicate: True only when the commit actually landed
+    on the default branch (no point closing on a conflict)."""
+    return bool(task.pushed) and (task.merge_state or "") == "merged"
 
 
 # --------------------------------------------------------------------------- #
@@ -499,6 +581,406 @@ class HeartbeatRunner:
 
 
 # --------------------------------------------------------------------------- #
-# Module singleton
+# Post-finish follow-up: post the commit number back onto the GitHub issue
+# --------------------------------------------------------------------------- #
+class HeartbeatFollowup:
+    """Post-finish hook: when a heartbeat-spawned task lands a commit,
+    comment on the corresponding GitHub issue with the commit hash +
+    short summary, and (if the commit actually merged into the default
+    branch) close the issue. Best-effort: failures to comment / close do
+    NOT roll back the task or the push, they only land in
+    ``heartbeat_seen.last_comment_error``.
+
+    The hook fires from ``TaskManager._publish_done`` so the terminal
+    ``Task`` row is already committed to the DB (including
+    ``commit_hash`` + ``pushed`` + ``merge_state``) when we read it.
+
+    Idempotency: ``Task.heartbeat_commented_at`` is the source of truth
+    for "we already commented for this task." ``HeartbeatSeen`` tracks
+    the GitHub-side comment id so the operator-triggered
+    "Re-comment" route can PATCH the existing comment in-place
+    instead of stacking a second one. ``HeartbeatSeen.last_issue_state``
+    prevents double-close races.
+    """
+
+    def __init__(self) -> None:
+        # task_id -> asyncio.Task so re-entry into maybe_run for the same
+        # task (shouldn't happen but defensive) doesn't double-post.
+        self._inflight: dict[str, asyncio.Task] = {}
+
+    def maybe_run(self, task_id: str) -> None:
+        """Fire-and-forget entry point called from ``_publish_done``.
+
+        Idempotent at the call site: if a task is already in flight for
+        the same ``task_id``, nothing happens (the original still owns the
+        followup). Short-circuits immediately when the task is not
+        heartbeat-spawned, has no commit, or the comment-back feature is
+        disabled in settings. Failure to post is recorded in
+        ``heartbeat_seen.last_comment_error``; the asyncio task itself
+        never raises (it logs and returns).
+        """
+        if task_id in self._inflight:
+            return
+        try:
+            task = asyncio.get_running_loop()
+        except RuntimeError:
+            # No event loop running (e.g. sync smoke-test setup). Defer
+            # to the runner's own coroutine via ensure_future once a loop
+            # is alive; in practice every real caller is inside FastAPI
+            # under ``uvicorn``, so this branch is rare but defensive.
+            return
+        self._inflight[task_id] = task.create_task(
+            self._maybe_run(task_id), name=f"cd-hb-followup-{task_id[:8]}"
+        )
+        self._inflight[task_id].add_done_callback(
+            lambda t, tid=task_id: self._inflight.pop(tid, None)
+        )
+
+    async def _maybe_run(self, task_id: str) -> None:
+        settings = get_settings()
+        try:
+            await self._post_comment_and_maybe_close(task_id, settings)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("heartbeat followup crashed for %s: %s", task_id, exc)
+
+    async def _post_comment_and_maybe_close(
+        self, task_id: str, settings
+    ) -> None:
+        # Load the task + project from the DB. Sync via to_thread.
+        snapshot = await asyncio.to_thread(self._load_snapshot, task_id)
+        if snapshot is None:
+            return
+        task, project, seen = snapshot
+
+        # Only heartbeat-spawned tasks with a real commit get a comment.
+        if not task.heartbeat_spawned or task.heartbeat_issue_number is None:
+            return
+        if not (task.commit_hash or "").strip():
+            return
+        if not settings.heartbeat_comment_on_success:
+            return
+        if not project.github_full_name:
+            return
+
+        # Already commented? Idempotency guard.
+        if task.heartbeat_commented_at is not None:
+            return
+
+        # If last_comment_error is from a previous run we don't want to
+        # spam; the operator can clear it via "Re-comment". Skip silently.
+        if seen is not None and seen.last_comment_error and not seen.last_comment_id:
+            return
+
+        body = format_comment_body(task, project, seen.issue_url if seen else "")
+        try:
+            comment = await github_client.create_issue_comment(
+                project.github_full_name,
+                int(task.heartbeat_issue_number),
+                body,
+            )
+        except github_client.GitHubError as exc:
+            log.warning(
+                "heartbeat comment failed for %s#%s: %s",
+                project.github_full_name,
+                task.heartbeat_issue_number,
+                exc,
+            )
+            await asyncio.to_thread(
+                self._record_comment_error,
+                project.id,
+                int(task.heartbeat_issue_number),
+                str(exc)[:500],
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "heartbeat comment crashed for %s#%s: %s",
+                project.github_full_name,
+                task.heartbeat_issue_number,
+                exc,
+            )
+            await asyncio.to_thread(
+                self._record_comment_error,
+                project.id,
+                int(task.heartbeat_issue_number),
+                str(exc)[:500],
+            )
+            return
+
+        comment_id = int(comment.get("id") or 0) or None
+        comment_url = (comment.get("html_url") or "")[:512]
+
+        # Now: optionally close the issue if it actually merged.
+        closed = False
+        if settings.heartbeat_close_on_merge and should_close_on_merge(task):
+            try:
+                await github_client.update_issue_state(
+                    project.github_full_name,
+                    int(task.heartbeat_issue_number),
+                    "closed",
+                )
+                closed = True
+            except github_client.GitHubError as exc:
+                log.warning(
+                    "heartbeat close failed for %s#%s: %s",
+                    project.github_full_name,
+                    task.heartbeat_issue_number,
+                    exc,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "heartbeat close crashed for %s#%s: %s",
+                    project.github_full_name,
+                    task.heartbeat_issue_number,
+                    exc,
+                )
+
+        await asyncio.to_thread(
+            self._stamp_success,
+            task.id,
+            project.id,
+            int(task.heartbeat_issue_number),
+            comment_id,
+            comment_url,
+            closed,
+        )
+
+    # ---- DB helpers ----------------------------------------------------- #
+    def _load_snapshot(
+        self, task_id: str
+    ) -> tuple[Task, Project, HeartbeatSeen | None] | None:
+        with session_scope() as db:
+            task = db.get(Task, task_id)
+            if task is None:
+                return None
+            project = db.get(Project, task.project_id)
+            if project is None:
+                return None
+            seen = (
+                db.query(HeartbeatSeen)
+                .filter(
+                    HeartbeatSeen.project_id == project.id,
+                    HeartbeatSeen.issue_number == int(task.heartbeat_issue_number or 0),
+                )
+                .first()
+            )
+            db.expunge(task)
+            db.expunge(project)
+            if seen is not None:
+                db.expunge(seen)
+            return task, project, seen
+
+    def _stamp_success(
+        self,
+        task_id: str,
+        project_id: str,
+        issue_number: int,
+        comment_id: int | None,
+        comment_url: str,
+        closed: bool,
+    ) -> None:
+        with session_scope() as db:
+            t = db.get(Task, task_id)
+            if t is not None:
+                t.heartbeat_commented_at = _now()
+                if closed:
+                    t.heartbeat_closed_at = _now()
+            seen = (
+                db.query(HeartbeatSeen)
+                .filter(HeartbeatSeen.project_id == project_id)
+                .filter(HeartbeatSeen.issue_number == issue_number)
+                .first()
+            )
+            if seen is not None:
+                seen.last_comment_id = comment_id
+                seen.last_commented_at = _now()
+                seen.last_comment_url = (comment_url or "")[:512]
+                seen.last_comment_error = ""
+                if closed:
+                    seen.last_issue_state = "closed"
+                    seen.last_issue_state_changed_at = _now()
+
+    def _record_comment_error(
+        self, project_id: str, issue_number: int, error: str
+    ) -> None:
+        with session_scope() as db:
+            seen = (
+                db.query(HeartbeatSeen)
+                .filter(HeartbeatSeen.project_id == project_id)
+                .filter(HeartbeatSeen.issue_number == issue_number)
+                .first()
+            )
+            if seen is not None:
+                seen.last_comment_error = error[:1000]
+
+    # ---- Manual-call helpers (used by the router) ---------------------- #
+    async def comment_again(
+        self,
+        project: Project,
+        issue_number: int,
+        *,
+        force_new: bool = True,
+    ) -> dict:
+        """Operator-triggered "Re-comment". If ``force_new`` is True a NEW
+        comment is POSTed; otherwise we PATCH the existing one (handy
+        after the operator updates the task's result_summary manually).
+        Returns a small dict for the API: ``{comment_id, comment_url,
+        error}`` (error = "" on success).
+        """
+        settings = get_settings()
+        # Find the latest heartbeat-spawned task for this issue.
+        snapshot = await asyncio.to_thread(
+            self._latest_task_snapshot, project.id, issue_number
+        )
+        if snapshot is None:
+            return {"error": "Kein passender Task gefunden."}
+        task, _, seen = snapshot
+        body = format_comment_body(task, project, seen.issue_url if seen else "")
+        try:
+            existing_id = int(seen.last_comment_id) if seen and seen.last_comment_id else 0
+            if existing_id and not force_new:
+                comment = await github_client.update_issue_comment(
+                    project.github_full_name, existing_id, body
+                )
+            elif existing_id and force_new:
+                # ``force_new=True`` means the operator wants a SECOND
+                # comment on top of the existing one (so the timeline
+                # stays clean — the auto-hook's post stays intact and the
+                # re-comment lands as a fresh follow-up).
+                comment = await github_client.create_issue_comment(
+                    project.github_full_name, issue_number, body
+                )
+            else:
+                comment = await github_client.create_issue_comment(
+                    project.github_full_name, issue_number, body
+                )
+        except github_client.GitHubError as exc:
+            log.warning(
+                "heartbeat comment_again failed for %s#%s: %s",
+                project.github_full_name,
+                issue_number,
+                exc,
+            )
+            await asyncio.to_thread(
+                self._record_comment_error,
+                project.id,
+                issue_number,
+                str(exc)[:500],
+            )
+            return {"error": str(exc)[:500]}
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)[:500]}
+
+        comment_id = int(comment.get("id") or 0) or None
+        comment_url = (comment.get("html_url") or "")[:512]
+        await asyncio.to_thread(
+            self._stamp_manual_comment,
+            project.id,
+            issue_number,
+            task.id,
+            comment_id,
+            comment_url,
+        )
+        return {
+            "comment_id": comment_id,
+            "comment_url": comment_url,
+            "error": "",
+        }
+
+    async def set_issue_state(
+        self,
+        project: Project,
+        issue_number: int,
+        state: str,
+    ) -> dict:
+        """Operator-triggered "Close" or "Re-open". Returns ``{state,
+        error}``. Stamps the heartbeat_seen bookkeeping row so the UI
+        reflects the new state immediately."""
+        if state not in ("open", "closed"):
+            return {"state": "", "error": "invalid_state"}
+        try:
+            res = await github_client.update_issue_state(
+                project.github_full_name, issue_number, state
+            )
+        except github_client.GitHubError as exc:
+            return {"state": "", "error": str(exc)[:500]}
+        except Exception as exc:  # noqa: BLE001
+            return {"state": "", "error": str(exc)[:500]}
+        actual = (res.get("state") or state)[:16]
+        await asyncio.to_thread(
+            self._stamp_issue_state, project.id, issue_number, actual
+        )
+        return {"state": actual, "error": ""}
+
+    def _latest_task_snapshot(
+        self, project_id: str, issue_number: int
+    ) -> tuple[Task, Project, HeartbeatSeen | None] | None:
+        with session_scope() as db:
+            t = (
+                db.query(Task)
+                .filter(Task.project_id == project_id)
+                .filter(Task.heartbeat_spawned.is_(True))
+                .filter(Task.heartbeat_issue_number == issue_number)
+                .order_by(Task.created_at.desc())
+                .first()
+            )
+            if t is None:
+                return None
+            p = db.get(Project, project_id)
+            seen = (
+                db.query(HeartbeatSeen)
+                .filter(HeartbeatSeen.project_id == project_id)
+                .filter(HeartbeatSeen.issue_number == issue_number)
+                .first()
+            )
+            db.expunge(t)
+            if p is not None:
+                db.expunge(p)
+            if seen is not None:
+                db.expunge(seen)
+            return t, p, seen
+
+    def _stamp_manual_comment(
+        self,
+        project_id: str,
+        issue_number: int,
+        task_id: str,
+        comment_id: int | None,
+        comment_url: str,
+    ) -> None:
+        with session_scope() as db:
+            t = db.get(Task, task_id)
+            if t is not None:
+                t.heartbeat_commented_at = _now()
+            seen = (
+                db.query(HeartbeatSeen)
+                .filter(HeartbeatSeen.project_id == project_id)
+                .filter(HeartbeatSeen.issue_number == issue_number)
+                .first()
+            )
+            if seen is not None:
+                seen.last_comment_id = comment_id
+                seen.last_commented_at = _now()
+                seen.last_comment_url = (comment_url or "")[:512]
+                seen.last_comment_error = ""
+
+    def _stamp_issue_state(
+        self, project_id: str, issue_number: int, state: str
+    ) -> None:
+        with session_scope() as db:
+            seen = (
+                db.query(HeartbeatSeen)
+                .filter(HeartbeatSeen.project_id == project_id)
+                .filter(HeartbeatSeen.issue_number == issue_number)
+                .first()
+            )
+            if seen is not None:
+                seen.last_issue_state = (state or "")[:16]
+                seen.last_issue_state_changed_at = _now()
+
+
+# --------------------------------------------------------------------------- #
+# Module singletons
 # --------------------------------------------------------------------------- #
 heartbeat = HeartbeatRunner()
+heartbeat_followup = HeartbeatFollowup()

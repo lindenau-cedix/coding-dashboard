@@ -783,6 +783,18 @@ class TaskManager:
             task = db.get(Task, task_id)
             data = task_to_dict(task) if task else {"id": task_id, "status": "error"}
         ch.publish({"type": "done", "task": data})
+        # Fire-and-forget heartbeat follow-up: if this task was
+        # auto-spawned by the heartbeat and the commit landed, post the
+        # commit number back onto the GitHub issue (and close the issue
+        # on a clean merge). Lazy import to keep ``task_runner`` free of
+        # a circular dep on ``heartbeat``.
+        try:
+            from .heartbeat import heartbeat_followup
+
+            heartbeat_followup.maybe_run(task_id)
+        except Exception as exc:  # noqa: BLE001
+            log = __import__("logging").getLogger("coding-dashboard.heartbeat")
+            log.warning("heartbeat_followup.maybe_run raised: %s", exc)
 
 
 # --------------------------------------------------------------------------- #

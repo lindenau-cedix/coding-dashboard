@@ -268,6 +268,13 @@ CD_HEARTBEAT_COOLDOWN_MINUTES=30
 CD_HEARTBEAT_AGENT_KEY=claude
 CD_HEARTBEAT_LOOKBACK_HOURS=24
 CD_HEARTBEAT_LABELS=
+# Soll das Dashboard nach einem erfolgreichen Heartbeat-Fix einen Kommentar
+# mit Commit-Nr. + Branch-URL auf das GitHub-Issue posten? Default: true.
+CD_HEARTBEAT_COMMENT_ON_SUCCESS=true
+# Soll das Dashboard das Issue automatisch schliessen, wenn der Fix sauber
+# auf dem Default-Branch gelandet ist (merge_state=merged + pushed=true)?
+# Default: true. Bei Merge-Konflikt bleibt das Issue offen.
+CD_HEARTBEAT_CLOSE_ON_MERGE=true
 ENV
   chown root:"$SERVICE_USER" "$ENV_FILE"; chmod 640 "$ENV_FILE"
   ok "Env geschrieben: $ENV_FILE"
