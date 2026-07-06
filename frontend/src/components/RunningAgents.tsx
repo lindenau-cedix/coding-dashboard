@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { subscribe as subscribeCrossTab } from "../crossTab";
 import type { RunningTask } from "../types";
 import { Spinner, StatusBadge } from "./ui";
 import { openAgentWindow } from "./WindowManager";
@@ -48,9 +49,21 @@ export default function RunningAgents() {
     }
     void poll();
     timer = setInterval(() => void poll(), 3000);
+
+    // Cross-tab fix: when a sibling tab ends a task / session, the polling
+    // cycle above would still show it for up to 3 s. Listen on the
+    // BroadcastChannel and re-poll immediately so the "Laufende Agenten"
+    // panel updates the moment the popup / console reports done (issue #5).
+    const unsubscribe = subscribeCrossTab((event) => {
+      if (event.type === "task-done" || event.type === "session-done") {
+        void poll();
+      }
+    });
+
     return () => {
       active = false;
       if (timer) clearInterval(timer);
+      unsubscribe();
     };
   }, []);
 

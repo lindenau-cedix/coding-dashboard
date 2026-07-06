@@ -1024,6 +1024,18 @@ def test_session_end_flow() -> None:
             return
         check("task marked finished after end_session", t.finished_at is not None, str(t.finished_at))
         check("task terminal output preserved", "hello from terminal" in (t.output or ""), t.output or "")
+        # Issue #5: when a session is ended (whether via the popup's
+        # "Session beenden" button, by the agent self-quitting, or by the
+        # server noticing the pump loop exited), the dashboard's /running
+        # view MUST drop the entry on the next poll.  end_session_locked
+        # persists ``task.status`` to the terminal status *before* the git
+        # commit/push step, so /running drops it as soon as the HTTP
+        # response is in flight, not after a multi-second push.
+        check(
+            "session end persists terminal task status (not running/queued)",
+            t.status not in ("running", "queued"),
+            str(t.status),
+        )
 
 
 def test_worktrees() -> None:
