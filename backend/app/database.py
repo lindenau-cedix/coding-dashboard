@@ -38,6 +38,11 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "workdir": "VARCHAR(1024) NOT NULL DEFAULT ''",
         "heartbeat_spawned": "BOOLEAN NOT NULL DEFAULT 0",
         "heartbeat_issue_number": "INTEGER NULL",
+        # Stamps set by ``HeartbeatFollowup.maybe_run`` after it
+        # successfully posts the dashboard's status comment on the
+        # issue / closes the issue on a clean merge. NULL until then.
+        "heartbeat_commented_at": "TIMESTAMP NULL",
+        "heartbeat_closed_at": "TIMESTAMP NULL",
     },
     "projects": {
         "archived": "BOOLEAN NOT NULL DEFAULT 0",
@@ -47,6 +52,19 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "last_issue_poll_at": "TIMESTAMP NULL",
         "last_heartbeat_status": "VARCHAR(32) NOT NULL DEFAULT ''",
         "last_heartbeat_error": "TEXT NOT NULL DEFAULT ''",
+    },
+    "heartbeat_seen": {
+        # Comment-back state: ``last_comment_id`` is the GitHub-side
+        # comment id (overwrite via PATCH from the "Re-comment" route);
+        # ``last_comment_error`` is set when a comment attempt FAILED
+        # so the UI can surface "github error" without losing the
+        # successful later attempt (which overwrites the row).
+        "last_comment_id": "INTEGER NULL",
+        "last_commented_at": "TIMESTAMP NULL",
+        "last_comment_error": "TEXT NOT NULL DEFAULT ''",
+        "last_comment_url": "VARCHAR(512) NOT NULL DEFAULT ''",
+        "last_issue_state": "VARCHAR(16) NOT NULL DEFAULT ''",
+        "last_issue_state_changed_at": "TIMESTAMP NULL",
     },
 }
 

@@ -78,6 +78,12 @@ export interface Task {
   heartbeat_spawned: boolean;
   /** GitHub issue number that triggered this heartbeat-spawned task, or null. */
   heartbeat_issue_number: number | null;
+  /** Set once the dashboard successfully POSTed its status comment onto
+   *  the GitHub issue. Null until then. */
+  heartbeat_commented_at: string | null;
+  /** Set once the dashboard successfully PATCHed the GitHub issue to
+   *  state=closed (either via close-on-merge or the manual close route). */
+  heartbeat_closed_at: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -204,6 +210,22 @@ export interface HeartbeatIssueSeen {
   issue_url: string;
   first_seen_at: string;
   dispatched_task_id: string | null;
+  /** Live status of the dispatched task — "success" / "failed" / "running" / ... */
+  dispatched_task_status: string;
+  /** Commit hash of the dispatched task's branch, or "" when none. */
+  dispatched_commit_hash: string;
+  /** GitHub-side comment id once the dashboard POSTed its status comment. */
+  last_comment_id: number | null;
+  /** ISO-8601 timestamp of the last successful comment POST. */
+  last_commented_at: string | null;
+  /** GitHub-side URL of the last dashboard comment. */
+  last_comment_url: string;
+  /** Set when a comment attempt FAILED — UI surfaces this as an error chip. */
+  last_comment_error: string;
+  /** Last known GitHub issue state touched by the dashboard: "" | "open" | "closed". */
+  last_issue_state: string;
+  /** ISO-8601 timestamp of the last state change, or null. */
+  last_issue_state_changed_at: string | null;
 }
 
 /** One open GitHub issue as returned by GET /api/projects/{id}/heartbeat/open. */

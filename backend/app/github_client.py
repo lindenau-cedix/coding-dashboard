@@ -154,3 +154,46 @@ async def list_issues(
         if len(chunk) < per_page:
             break
     return out
+
+
+async def create_issue_comment(full_name: str, issue_number: int, body: str) -> dict:
+    """POST a comment on an issue (or pull request). Returns the raw comment
+    object (``{"id": ..., "html_url": ..., ...}``). Caller MUST be
+    authenticated with an issue-write-scoped token (the same `CD_GITHUB_TOKEN`
+    that drives repo creation is fine)."""
+    return await _request(
+        "POST",
+        f"/repos/{full_name}/issues/{issue_number}/comments",
+        json={"body": body},
+    )
+
+
+async def update_issue_comment(
+    full_name: str, comment_id: int, body: str
+) -> dict:
+    """PATCH an existing comment. Used by the "Re-comment" UI affordance so
+    the operator can rewrite the dashboard's auto-posted status message
+    in-place instead of stacking a second comment."""
+    return await _request(
+        "PATCH",
+        f"/repos/{full_name}/issues/comments/{comment_id}",
+        json={"body": body},
+    )
+
+
+async def update_issue_state(full_name: str, issue_number: int, state: str) -> dict:
+    """PATCH an issue's ``state``. ``state`` is ``"open"`` or ``"closed"``.
+    Used by the heartbeat's "close on merge" behavior and the dashboard's
+    manual close/reopen buttons.
+
+    Unlike ``create_issue_comment`` this DOES NOT require a write token —
+    any token can close or reopen any issue it can see. Most operator
+    tokens already have the scope.
+    """
+    if state not in ("open", "closed"):
+        raise GitHubError(400, f"Invalid issue state: {state!r}")
+    return await _request(
+        "PATCH",
+        f"/repos/{full_name}/issues/{issue_number}",
+        json={"state": state},
+    )
