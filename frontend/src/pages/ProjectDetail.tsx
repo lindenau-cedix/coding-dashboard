@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
+import { subscribe as subscribeCrossTab } from "../crossTab";
 import FileBrowser from "../components/FileBrowser";
 import TaskConsole from "../components/TaskConsole";
 import TaskImages from "../components/TaskImages";
@@ -189,6 +190,22 @@ export default function ProjectDetail() {
     return () => {
       active = false;
     };
+  }, [id]);
+
+  // Cross-tab fix: the popup SessionTerminalModal calls
+  // ``broadcast({type:"session-done", taskId, status})`` when the user ends
+  // the session from there. If the user opened the popup from here, this
+  // tab's cached ``tasks`` list still shows the session with ``status=
+  // "running"`` — refresh the list immediately so the history row + the
+  // git footer update without a manual reload (issue #5).
+  useEffect(() => {
+    const unsubscribe = subscribeCrossTab((event) => {
+      if (event.type === "session-done" || event.type === "task-done") {
+        void reloadAgentsMd();
+        void refreshTasks();
+      }
+    });
+    return unsubscribe;
   }, [id]);
 
   async function submit(e: React.FormEvent) {
