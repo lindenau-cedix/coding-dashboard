@@ -116,6 +116,13 @@ class TaskOut(BaseModel):
     # badge in the task history and the heartbeat overview.
     heartbeat_spawned: bool = False
     heartbeat_issue_number: Optional[int] = None
+    # Set by ``HeartbeatFollowup`` once the dashboard successfully POSTs
+    # the status comment on the GitHub issue. NULL until then.
+    heartbeat_commented_at: Optional[datetime] = None
+    # Set by ``HeartbeatFollowup`` after the close-on-merge PATCH
+    # succeeds. NULL when the issue is left open (e.g. branch kept
+    # for a manual merge).
+    heartbeat_closed_at: Optional[datetime] = None
     created_at: datetime
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
@@ -253,3 +260,20 @@ class HeartbeatIssueSeen(BaseModel):
     issue_url: str
     first_seen_at: datetime
     dispatched_task_id: Optional[str] = None
+    # Live status of the dispatched task so the UI can render
+    # "✅ merged in abc12345" without a second fetch.
+    dispatched_task_status: str = ""
+    dispatched_commit_hash: str = ""
+    # Comment-back state: set when the dashboard has successfully POSTed
+    # a status comment onto the GitHub issue. ``last_comment_id`` is the
+    # GitHub-side comment id (used by the "Re-comment" route to PATCH
+    # the existing comment in-place instead of stacking a second one).
+    last_comment_id: Optional[int] = None
+    last_commented_at: Optional[datetime] = None
+    last_comment_url: str = ""
+    last_comment_error: str = ""
+    # Last known GitHub issue state ("open"/"closed") the dashboard has
+    # touched. Updated by close-on-merge and the manual close/reopen
+    # routes.
+    last_issue_state: str = ""
+    last_issue_state_changed_at: Optional[datetime] = None

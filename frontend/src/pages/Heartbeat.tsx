@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { Button, ErrorText, Spinner, formatDate } from "../components/ui";
 import type {
+  HeartbeatIssueSeen,
   HeartbeatProjectStatus,
   HeartbeatStatus,
   Task,
@@ -15,8 +16,17 @@ import type {
 export default function Heartbeat() {
   const [status, setStatus] = useState<HeartbeatStatus | null>(null);
   const [recent, setRecent] = useState<Task[]>([]);
+  // Per-(project,issue) dashboard comment + close state, keyed so the
+  // recent-tasks list can show "💬 vor 12 Min" / "✓ geschlossen"
+  // without a second fetch per row.
+  const [issueStatus, setIssueStatus] = useState<
+    Record<string, HeartbeatIssueSeen>
+  >({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Per-issue inline "loading" flag for the action buttons so a slow
+  // GitHub round-trip doesn't lock the whole page.
+  const [issueBusy, setIssueBusy] = useState<Record<string, boolean>>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -27,10 +37,52 @@ export default function Heartbeat() {
       setStatus(s);
       setRecent(r);
       setError(null);
+      // Walk the active projects' heartbeat_seen ledger so the UI can
+      // show comment + close badges next to each recent task without a
+      // second fetch per row.
+      const projects = s.projects.filter((p) => p.enabled && p.github_full_name);
+      const ledgers = await Promise.all(
+        projects.map((p) =>
+          api
+            .listHeartbeatIssues(p.id)
+            .then((rows) => rows.map((row) => ({ projectId: p.id, row })))
+            .catch(() => [] as { projectId: string; row: HeartbeatIssueSeen }[]),
+        ),
+      );
+      const next: Record<string, HeartbeatIssueSeen> = {};
+      for (const entries of ledgers) {
+        for (const { projectId, row } of entries) {
+          next[`${projectId}:${row.issue_number}`] = row;
+        }
+      }
+      setIssueStatus(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, []);
+
+  async function runIssueAction(
+    projectId: string,
+    issueNumber: number,
+    action: "comment-again" | "close" | "reopen",
+  ) {
+    const key = `${projectId}:${issueNumber}`;
+    setIssueBusy((b) => ({ ...b, [key]: true }));
+    try {
+      if (action === "comment-again") {
+        await api.commentAgainOnHeartbeatIssue(projectId, issueNumber);
+      } else if (action === "close") {
+        await api.closeHeartbeatIssue(projectId, issueNumber);
+      } else {
+        await api.reopenHeartbeatIssue(projectId, issueNumber);
+      }
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setIssueBusy((b) => ({ ...b, [key]: false }));
+    }
+  }
 
   useEffect(() => {
     refresh();
@@ -206,27 +258,27 @@ export default function Heartbeat() {
         ) : (
           <ul className="divide-y divide-slate-800 overflow-hidden rounded-2xl border border-slate-800">
             {recent.map((t) => (
-              <li key={t.id} className="bg-slate-900/40 px-4 py-3 text-sm">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <a
-                    href={`#/projects/${t.project_id}`}
-                    className="font-medium text-cyan-300 hover:text-cyan-200"
-                  >
-                    🤖 Fix #{t.heartbeat_issue_number ?? "?"}
-                  </a>
-                  <span className="text-xs text-slate-500">
-                    {formatDate(t.created_at)}
-                  </span>
-                </div>
-                <p className="mt-1 line-clamp-2 text-xs text-slate-400">
-                  {t.result_summary || t.prompt.slice(0, 240)}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Agent: <code className="text-slate-300">{t.agent}</code> ·
-                  Status:{" "}
-                  <code className="text-slate-300">{t.status}</code>
-                </p>
-              </li>
+              <RecentTaskRow
+                key={t.id}
+                t={t}
+                seen={
+                  t.heartbeat_issue_number != null
+                    ? issueStatus[`${t.project_id}:${t.heartbeat_issue_number}`]
+                    : undefined
+                }
+                issueBusy={
+                  issueBusy[`${t.project_id}:${t.heartbeat_issue_number ?? ""}`] ?? false
+                }
+                onCommentAgain={() =>
+                  runIssueAction(t.project_id, t.heartbeat_issue_number!, "comment-again")
+                }
+                onClose={() =>
+                  runIssueAction(t.project_id, t.heartbeat_issue_number!, "close")
+                }
+                onReopen={() =>
+                  runIssueAction(t.project_id, t.heartbeat_issue_number!, "reopen")
+                }
+              />
             ))}
           </ul>
         )}
@@ -336,20 +388,164 @@ function heartbeatStatusColor(status: string): string {
 }
 
 /** Fetch the last 20 heartbeat-spawned tasks across all projects. There
- *  isn't a dedicated endpoint yet — we hit /running and the per-project
- *  /tasks lists. To keep the request count low in v1 we walk the running
- *  list plus a single /tasks call per active project (cheap because the
- *  per-project call returns a flat list ordered by created_at desc).
- *
+ *  isn't a dedicated endpoint yet — we hit /running plus the per-project
+ *  task lists. To keep the request count low in v1 we walk the running
+ *  list once and then drop a single /tasks call per active project for
+ *  the finished heartbeat-spawned tasks (the per-project call returns a
+ *  flat list ordered by created_at desc).
  *  For a future iteration this should become a dedicated
  *  ``GET /api/heartbeat/recent-tasks`` endpoint.
  */
 async function fetchRecentHeartbeatTasks(): Promise<Task[]> {
   try {
     const running = await api.listRunning();
-    const heartbeatRunning = running.filter((t) => t.heartbeat_spawned);
-    return heartbeatRunning.slice(0, 20);
+    const seen = new Set<string>();
+    const out: Task[] = [];
+    for (const t of running) {
+      if (!t.heartbeat_spawned) continue;
+      seen.add(t.id);
+      out.push(t);
+      if (out.length >= 20) return out;
+    }
+    // Pull the rest from each active project's task list. Done serially
+    // to avoid hammering the dashboard on a 5s poll cycle.
+    const projects = await api.listProjects().catch(() => []);
+    for (const p of projects) {
+      if (out.length >= 20) break;
+      try {
+        const list = await api.listTasks(p.id);
+        for (const t of list) {
+          if (!t.heartbeat_spawned || seen.has(t.id)) continue;
+          seen.add(t.id);
+          out.push(t);
+          if (out.length >= 20) break;
+        }
+      } catch {
+        // ignore per-project failures so one bad project doesn't kill
+        // the entire feed
+      }
+    }
+    return out;
   } catch {
     return [];
   }
+}
+
+/** One row in the recent-tasks feed: the title link + result summary +
+ *  the heartbeat comment / close state + three action buttons. Pulled
+ *  out so the parent list stays readable and we can colocate the badge
+ *  colour maps. */
+function RecentTaskRow({
+  t,
+  seen,
+  issueBusy,
+  onCommentAgain,
+  onClose,
+  onReopen,
+}: {
+  t: Task;
+  seen: HeartbeatIssueSeen | undefined;
+  issueBusy: boolean;
+  onCommentAgain: () => void;
+  onClose: () => void;
+  onReopen: () => void;
+}) {
+  const commentedAt = t.heartbeat_commented_at ?? seen?.last_commented_at ?? null;
+  const closedAt = t.heartbeat_closed_at ?? seen?.last_issue_state_changed_at ?? null;
+  const issueState = seen?.last_issue_state ?? "";
+  const commentError = seen?.last_comment_error ?? "";
+  const issueNumber = t.heartbeat_issue_number;
+  return (
+    <li className="bg-slate-900/40 px-4 py-3 text-sm">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <a
+          href={`#/projects/${t.project_id}`}
+          className="font-medium text-cyan-300 hover:text-cyan-200"
+        >
+          🤖 Fix #{issueNumber ?? "?"}
+        </a>
+        <span className="text-xs text-slate-500">
+          {formatDate(t.created_at)}
+        </span>
+      </div>
+      <p className="mt-1 line-clamp-2 text-xs text-slate-400">
+        {t.result_summary || t.prompt.slice(0, 240)}
+      </p>
+      <p className="mt-1 text-xs text-slate-500">
+        Agent: <code className="text-slate-300">{t.agent}</code> · Status:{" "}
+        <code className="text-slate-300">{t.status}</code>
+      </p>
+
+      {(commentedAt || closedAt || commentError || issueState) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+          {commentedAt && (
+            <a
+              href={seen?.last_comment_url || "#"}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 rounded-full bg-cyan-500/20 px-2 py-0.5 text-cyan-200 hover:bg-cyan-500/30"
+              title={seen?.last_comment_url || undefined}
+            >
+              💬 Kommentar · {formatDate(commentedAt)}
+            </a>
+          )}
+          {issueState === "closed" && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-emerald-300">
+              ✓ geschlossen{closedAt ? ` · ${formatDate(closedAt)}` : ""}
+            </span>
+          )}
+          {issueState === "open" && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-300">
+              ↻ wieder geöffnet{closedAt ? ` · ${formatDate(closedAt)}` : ""}
+            </span>
+          )}
+          {!commentedAt && !issueState && seen && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-slate-400">
+              noch kein Kommentar
+            </span>
+          )}
+          {commentError && (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-red-300"
+              title={commentError}
+            >
+              ⚠ GitHub-Fehler
+            </span>
+          )}
+        </div>
+      )}
+
+      {issueNumber != null && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button
+            variant="ghost"
+            disabled={issueBusy}
+            onClick={onCommentAgain}
+            title="Einen weiteren Dashboard-Kommentar unter dem Issue posten"
+          >
+            💬 Neu kommentieren
+          </Button>
+          {issueState === "closed" ? (
+            <Button
+              variant="ghost"
+              disabled={issueBusy}
+              onClick={onReopen}
+              title="Issue wieder öffnen, damit der Heartbeat es erneut bearbeitet"
+            >
+              ↻ Wieder öffnen
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              disabled={issueBusy}
+              onClick={onClose}
+              title="Issue manuell schließen"
+            >
+              ✓ Schließen
+            </Button>
+          )}
+        </div>
+      )}
+    </li>
+  );
 }

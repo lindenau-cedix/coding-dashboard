@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, commitUrl, ensureCloudflareAccess, wsSessionUrl } from "../api";
+import { broadcast } from "../crossTab";
 import type { Agent, Project, SessionWsMessage, TaskStatus } from "../types";
 import { Button, ErrorText, IconButton, Spinner, StatusBadge } from "./ui";
 
@@ -418,6 +419,12 @@ export default function SessionTerminalModal({
           setSummary(done.summary || "");
           setCommitHash(done.commit_hash || "");
           setPushed(Boolean(done.pushed));
+          // Server-driven end (agent self-quit, pump failure, etc.). Tell
+          // sibling tabs to drop the now-finished session from their lists
+          // immediately — without this the dashboard's "Laufende Agenten"
+          // panel keeps showing the session as running until the next
+          // 3-second /running poll or a manual refresh (issue #5).
+          broadcast({ type: "session-done", taskId, status: done.status });
           onEndedRef.current();
         } else if (msg.type === "error") {
           setError((msg as { message: string }).message);
@@ -462,6 +469,12 @@ export default function SessionTerminalModal({
       setSummary(result.summary || "");
       setCommitHash(result.commit_hash || "");
       setPushed(Boolean(result.pushed));
+      // Notify other dashboard tabs (running-agents list, project history,
+      // etc.) that this session just finished. Without this the other tabs
+      // would still display the session as "running" until the next 3s
+      // /running poll cycles — or until the user manually refreshes the
+      // page. See issue #5.
+      broadcast({ type: "session-done", taskId, status: result.status });
       onEndedRef.current();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Session konnte nicht beendet werden");

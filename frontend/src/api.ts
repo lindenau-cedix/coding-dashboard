@@ -308,6 +308,24 @@ export const api = {
       "GET",
       `/projects/${projectId}/heartbeat/open`,
     ),
+  /** Force a fresh dashboard status comment on a heartbeat-handled issue. */
+  commentAgainOnHeartbeatIssue: (projectId: string, issueNumber: number) =>
+    request<{ comment_id: number; comment_url: string; error: string }>(
+      "POST",
+      `/projects/${projectId}/heartbeat/issues/${issueNumber}/comment-again`,
+    ),
+  /** Manually close a heartbeat-handled GitHub issue. */
+  closeHeartbeatIssue: (projectId: string, issueNumber: number) =>
+    request<{ state: string; error: string }>(
+      "POST",
+      `/projects/${projectId}/heartbeat/issues/${issueNumber}/close`,
+    ),
+  /** Inverse of closeHeartbeatIssue — useful for "let the heartbeat retry this". */
+  reopenHeartbeatIssue: (projectId: string, issueNumber: number) =>
+    request<{ state: string; error: string }>(
+      "POST",
+      `/projects/${projectId}/heartbeat/issues/${issueNumber}/reopen`,
+    ),
 };
 
 /**
