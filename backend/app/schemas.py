@@ -53,6 +53,12 @@ class ProjectOut(BaseModel):
     # show an "Archiviert" badge and render the card with reduced opacity.
     archived: bool = False
     archived_at: Optional[datetime] = None
+    # Heartbeat fields: read-only mirror of the dashboard-side auto-poll
+    # state. UI uses these to render the "🤖 Heartbeat" chip on each card.
+    heartbeat_enabled: bool = True
+    last_heartbeat_at: Optional[datetime] = None
+    last_heartbeat_status: str = ""
+    last_heartbeat_error: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -105,6 +111,11 @@ class TaskOut(BaseModel):
     commit_message: str
     commit_created: bool
     pushed: bool
+    # Heartbeat marker: True for tasks auto-spawned by the dashboard
+    # heartbeat (vs hand-created by the user). Drives the "🤖 Auto-Fix"
+    # badge in the task history and the heartbeat overview.
+    heartbeat_spawned: bool = False
+    heartbeat_issue_number: Optional[int] = None
     created_at: datetime
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
@@ -195,3 +206,50 @@ class SessionEndRequest(BaseModel):
     """POST /sessions/{id}/end — user ends the interactive session."""
 
     commit_message: str = ""
+
+
+# --------------------------------------------------------------------------- #
+# Heartbeat
+# --------------------------------------------------------------------------- #
+
+class HeartbeatProjectStatus(BaseModel):
+    """Per-project heartbeat snapshot for the /heartbeat UI."""
+
+    id: str
+    name: str
+    slug: str
+    enabled: bool
+    github_full_name: str
+    last_heartbeat_at: Optional[datetime] = None
+    last_issue_poll_at: Optional[datetime] = None
+    last_heartbeat_status: str = ""
+    last_heartbeat_error: str = ""
+    # Number of open issues GitHub reports for this repo right now. Refreshed
+    # only when the heartbeat polls; not real-time.
+    open_issues_count: int = 0
+    # Tasks (running/queued) currently spawned by the heartbeat for this project.
+    inflight_task_ids: list[str] = []
+
+
+class HeartbeatStatus(BaseModel):
+    """Overall heartbeat state — backs the /heartbeat page header + toggles."""
+
+    enabled: bool
+    interval_seconds: int
+    agent_key: str
+    cooldown_minutes: int
+    last_tick_at: Optional[datetime] = None
+    last_tick_summary: Optional[str] = None
+    projects: list[HeartbeatProjectStatus] = []
+
+
+class HeartbeatIssueSeen(BaseModel):
+    """One row from the heartbeat_seen ledger, used by the per-project
+    drill-down on the /heartbeat page."""
+
+    project_id: str
+    issue_number: int
+    issue_title: str
+    issue_url: str
+    first_seen_at: datetime
+    dispatched_task_id: Optional[str] = None

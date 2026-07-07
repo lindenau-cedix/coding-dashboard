@@ -182,9 +182,24 @@ export function ErrorText({ children }: { children: ReactNode }) {
 
 export function formatDate(iso: string | null): string {
   if (!iso) return "–";
-  const d = new Date(iso);
+  const d = parseApiDate(iso);
   return d.toLocaleString("de-DE", {
     dateStyle: "medium",
     timeStyle: "short",
   });
+}
+
+/** Parse a datetime string returned by the dashboard backend.
+ *
+ * The backend *should* always emit ISO-8601 with a UTC offset (``...Z`` or
+ * ``...+00:00``) but the SQLite round-trip used to strip the offset, and
+ * we want the UI to keep rendering correctly even if that regresses.
+ * Naive ISO strings (no offset) are interpreted as UTC; everything else
+ * falls back to the JS Date parser.
+ */
+export function parseApiDate(iso: string): Date {
+  if (!/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso)) {
+    return new Date(iso + "Z");
+  }
+  return new Date(iso);
 }

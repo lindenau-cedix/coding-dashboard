@@ -34,6 +34,55 @@ HERMES_NON_INTERACTIVE_TOOLSETS = (
 )
 
 
+# Default prompt scaffold used when the heartbeat auto-spawns a Claude Code
+# task for a freshly-seen open GitHub issue. Override via
+# ``CD_HEARTBEAT_PROMPT_TEMPLATE`` to swap languages or tweak the workflow.
+# Placeholders are filled by ``heartbeat._build_prompt``: ``{number}``,
+# ``{repo}``, ``{title}``, ``{user}``, ``{labels}``, ``{created_at}``,
+# ``{body}``, ``{html_url}``.
+DEFAULT_HEARTBEAT_PROMPT_TEMPLATE = """\
+Du arbeitest automatisch im Auftrag des Coding Dashboards. Das Dashboard \
+hat auf GitHub Issue #{number} im Repo {repo} aufmerksam gemacht:
+
+**Titel:** {title}
+**Autor:** {user}
+**Labels:** {labels}
+**Erstellt:** {created_at}
+
+**Beschreibung:**
+{body}
+
+**URL:** {html_url}
+
+So gehst du vor:
+
+1. Lies das Repo, um den Code zu verstehen. clone / pull nur ueber das
+   Dashboard, niemals eigenstaendig.
+2. Reproduziere den Bug (oder implementiere die Anforderung). Wenn
+   moeglich: schreibe zuerst einen Test, der fehlschlaegt.
+3. Implementiere den Fix. Halte dich an die existierenden Patterns und
+   Conventions im Repo.
+4. Committe auf einem Branch `heartbeat/fix-{number}-<slug>`. Schreibe
+   den Commit **nicht** selbst -- das macht das Dashboard automatisch.
+5. Pushe den Branch und oeffne einen PR mit dem Titel
+   `Fix #{number}: {title}`. Beschreibe im PR-Body den Root Cause und
+   wie der Fix ihn adressiert.
+6. Schreibe am Ende einen kurzen Status (max 200 Woerter) mit: was du
+   gefunden hast, was du geaendert hast, ob ein PR geoeffnet wurde, und
+   ob Tests gruen sind.
+
+Wichtig:
+
+- KEINE Rueckfragen an den User -- das Dashboard hat keine UI fuer
+  Rueckfragen.
+- KEINE destruktiven Operationen (force-push, rm -rf, drop tables).
+- KEIN manueller Commit oder Push -- das macht das Dashboard.
+- Wenn der Issue unklar ist oder nicht reproduzierbar: dokumentiere das
+  im Status und oeffne trotzdem einen PR mit einem 'investigation notes'
+  Body.
+"""
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CD_", env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -94,6 +143,42 @@ class Settings(BaseSettings):
     # visibility only — a failure to write never aborts a run.
     host_lock_dir: Path = Path("/var/lock/coding-dashboard")
 
+    # --- Heartbeat (auto-poll GitHub issues, auto-spawn Claude Code tasks) ---
+    # ``CD_HEARTBEAT_ENABLED`` master switch. When False the heartbeat never
+    # ticks; the UI toggle mirrors this in-process (not persisted to disk).
+    heartbeat_enabled: bool = False
+    # ``CD_HEARTBEAT_INTERVAL_SECONDS``: how often the heartbeat wakes up.
+    # Default is 15 minutes; production should be >= 5 min to stay polite to
+    # GitHub's rate limits.
+    heartbeat_interval_seconds: int = 15 * 60
+    # ``CD_HEARTBEAT_MAX_CONCURRENT``: cap on parallel project polls per tick.
+    # A Semaphore gates _process_project coroutines so a tick doesn't fan out
+    # dozens of GitHub requests simultaneously.
+    heartbeat_max_concurrent: int = 2
+    # ``CD_HEARTBEAT_COOLDOWN_MINUTES``: after a heartbeat-spawned task for a
+    # project reaches ``success``, do NOT spawn another one for that project
+    # for this many minutes. Only SUCCESS blocks; failed/error/cancelled runs
+    # do not start the cooldown (so a misfiring agent gets another chance
+    # next tick).
+    heartbeat_cooldown_minutes: int = 30
+    # ``CD_HEARTBEAT_AGENT_KEY``: which AgentSpec key to spawn. Default
+    # "claude" — the goal explicitly says "Claude Code allways for
+    # automatic runs". Operators can override (e.g. to "codex") via env.
+    heartbeat_agent_key: str = "claude"
+    # ``CD_HEARTBEAT_LOOKBACK_HOURS``: on first poll for a project, look at
+    # issues updated within this many hours. Subsequent polls use the
+    # project's last_issue_poll_at.
+    heartbeat_lookback_hours: int = 24
+    # ``CD_HEARTBEAT_PROMPT_TEMPLATE``: the prompt scaffold for auto-spawned
+    # tasks. See DEFAULT_HEARTBEAT_PROMPT_TEMPLATE below for the defaults;
+    # ops can override (e.g. to swap German for English) via env.
+    heartbeat_prompt_template: str = DEFAULT_HEARTBEAT_PROMPT_TEMPLATE
+    # ``CD_HEARTBEAT_LABELS``: comma-separated list of GitHub issue labels.
+    # Empty (default) = poll every open issue. Non-empty = only dispatch on
+    # issues that have AT LEAST ONE of these labels (e.g. "bug,good first
+    # issue"). Wire-through; no UI yet.
+    heartbeat_labels: str = ""
+
     # --- Files / serving ---
     agents_config_path: Path = Path("./config.yaml")
     frontend_dist: Path = Path("../frontend/dist")
@@ -123,6 +208,10 @@ class Settings(BaseSettings):
     @property
     def cors_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+
+    @property
+    def heartbeat_labels_list(self) -> list[str]:
+        return [o.strip() for o in self.heartbeat_labels.split(",") if o.strip()]
 
 
 # --------------------------------------------------------------------------- #
