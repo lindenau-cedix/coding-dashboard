@@ -3,6 +3,9 @@ import type {
   DirListing,
   FileContent,
   GithubRepo,
+  HeartbeatIssueSeen,
+  HeartbeatStatus,
+  OpenGithubIssue,
   Project,
   ProjectCreatePayload,
   RunningTask,
@@ -279,6 +282,31 @@ export const api = {
       "POST",
       `/sessions/${taskId}/end`,
       { commit_message: commitMessage },
+    ),
+
+  // Heartbeat — auto-poll GitHub issues + auto-spawn Claude Code tasks.
+  getHeartbeat: () => request<HeartbeatStatus>("GET", "/heartbeat"),
+  setHeartbeatEnabled: (enabled: boolean) =>
+    request<{ enabled: boolean }>(
+      "POST",
+      enabled ? "/heartbeat/enable" : "/heartbeat/disable",
+    ),
+  triggerHeartbeat: () =>
+    request<{ triggered: boolean }>("POST", "/heartbeat/trigger"),
+  setProjectHeartbeatEnabled: (projectId: string, enabled: boolean) =>
+    request<{ id: string; heartbeat_enabled: boolean }>(
+      "POST",
+      `/projects/${projectId}/heartbeat/${enabled ? "enable" : "disable"}`,
+    ),
+  listHeartbeatIssues: (projectId: string) =>
+    request<HeartbeatIssueSeen[]>(
+      "GET",
+      `/projects/${projectId}/heartbeat/issues`,
+    ),
+  listProjectOpenIssues: (projectId: string) =>
+    request<{ issues: OpenGithubIssue[]; note?: string }>(
+      "GET",
+      `/projects/${projectId}/heartbeat/open`,
     ),
 };
 

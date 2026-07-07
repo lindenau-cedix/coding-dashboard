@@ -23,6 +23,15 @@ export interface Project {
   archived: boolean;
   /** ISO-8601 timestamp when the project was archived, or null. */
   archived_at: string | null;
+  /** Per-project heartbeat opt-out (default true on the server). */
+  heartbeat_enabled: boolean;
+  /** ISO-8601 timestamp of the last heartbeat tick that touched this project. */
+  last_heartbeat_at: string | null;
+  /** Short status string: "" (never ticked) | "success" | "no_issues" |
+   *  "cooldown" | "disabled" | "error" | "skipped". */
+  last_heartbeat_status: string;
+  /** One-line error message when last_heartbeat_status === "error". */
+  last_heartbeat_error: string;
   created_at: string;
   updated_at: string;
   local_path?: string;
@@ -64,6 +73,11 @@ export interface Task {
   commit_message: string;
   commit_created: boolean;
   pushed: boolean;
+  /** True when this task was auto-spawned by the dashboard heartbeat
+   *  (vs hand-created by the user). UI shows a "🤖 Auto-Fix" badge. */
+  heartbeat_spawned: boolean;
+  /** GitHub issue number that triggered this heartbeat-spawned task, or null. */
+  heartbeat_issue_number: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -154,3 +168,52 @@ export type WsMessage =
   | { type: "done"; task: Task }
   | { type: "error"; message: string }
   | { type: string; [k: string]: unknown };
+
+/** One project's heartbeat snapshot, as returned by GET /api/heartbeat. */
+export interface HeartbeatProjectStatus {
+  id: string;
+  name: string;
+  slug: string;
+  enabled: boolean;
+  github_full_name: string;
+  last_heartbeat_at: string | null;
+  last_issue_poll_at: string | null;
+  last_heartbeat_status: string;
+  last_heartbeat_error: string;
+  open_issues_count: number;
+  inflight_task_ids: string[];
+}
+
+/** Overall heartbeat state. */
+export interface HeartbeatStatus {
+  enabled: boolean;
+  interval_seconds: number;
+  agent_key: string;
+  cooldown_minutes: number;
+  last_tick_at: string | null;
+  last_tick_summary: string | null;
+  projects: HeartbeatProjectStatus[];
+}
+
+/** One row from the heartbeat_seen ledger (issue the dashboard has
+ *  already considered dispatching for). */
+export interface HeartbeatIssueSeen {
+  project_id: string;
+  issue_number: number;
+  issue_title: string;
+  issue_url: string;
+  first_seen_at: string;
+  dispatched_task_id: string | null;
+}
+
+/** One open GitHub issue as returned by GET /api/projects/{id}/heartbeat/open. */
+export interface OpenGithubIssue {
+  number: number;
+  title: string;
+  html_url: string;
+  user: string;
+  labels: string[];
+  updated_at: string | null;
+  created_at: string | null;
+  body: string;
+}

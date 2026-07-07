@@ -247,6 +247,8 @@ export default function ProjectDetail() {
         commit_message: "",
         commit_created: false,
         pushed: false,
+        heartbeat_spawned: false,
+        heartbeat_issue_number: null,
         created_at: new Date().toISOString(),
         started_at: null,
         finished_at: null,
@@ -704,6 +706,14 @@ export default function ProjectDetail() {
                         : "ohne Startparameter"
                       : t.prompt}
                   </span>
+                  {t.heartbeat_spawned && (
+                    <span
+                      className="shrink-0 rounded bg-cyan-500/15 px-1.5 py-0.5 text-xs font-medium text-cyan-300"
+                      title={`Automatisch vom Heartbeat für GitHub-Issue #${t.heartbeat_issue_number ?? "?"} gestartet`}
+                    >
+                      🤖 Auto-Fix #{t.heartbeat_issue_number ?? "?"}
+                    </span>
+                  )}
                   {(t.images?.length ?? 0) > 0 && (
                     <span className="text-xs text-slate-500">📎 {t.images.length}</span>
                   )}

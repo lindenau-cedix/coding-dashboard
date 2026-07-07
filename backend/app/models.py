@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -16,6 +17,37 @@ def _uuid() -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class UtcDateTime(TypeDecorator):
+    """``TIMESTAMP`` column that always round-trips through tz-aware UTC.
+
+    SQLite has no native tz support, so SQLAlchemy drops the tzinfo on read
+    by default. That makes naive ``datetime`` values reach the API and get
+    serialised as ISO strings without an offset — the JS frontend then
+    parses them as **local time**, producing exactly the browser-tz offset
+    bug we saw on the Heartbeat page (Europe/Berlin ⇒ −2h displayed).
+
+    This decorator forces every value to come back as a tz-aware UTC
+    datetime, so the API always emits a correct ``...Z`` suffix.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime) and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
+
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class Project(Base):
@@ -38,12 +70,32 @@ class Project(Base):
     # on the user's currently-active work.
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Per-project heartbeat opt-out (default ON). The user can flip this off
+    # on the /heartbeat page or via POST /api/projects/{id}/heartbeat/disable.
+    heartbeat_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Last time the heartbeat even LOOKED at this project (regardless of
+    # whether it dispatched a task). UI shows "vor 12 Min".
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime(), nullable=True
+    )
+    # Last time the heartbeat successfully fetched open issues from GitHub.
+    # Drives the ``since`` parameter on subsequent polls (incremental fetch).
+    last_issue_poll_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime(), nullable=True
+    )
+    # Short status string for the /heartbeat UI:
+    # "" (never ticked) | "success" | "skipped" | "cooldown" |
+    # "error" | "no_github" | "no_issues".
+    last_heartbeat_status: Mapped[str] = mapped_column(String(32), default="")
+    # On error: human-readable one-liner for the UI / logs.
+    last_heartbeat_error: Mapped[str] = mapped_column(Text, default="")
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, onupdate=_now
+        UtcDateTime(), default=_now, onupdate=_now
     )
 
     tasks: Mapped[list["Task"]] = relationship(
@@ -96,10 +148,47 @@ class Task(Base):
     commit_created: Mapped[bool] = mapped_column(Boolean, default=False)
     pushed: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Heartbeat marker: True when the task was auto-spawned by the heartbeat
+    # loop (vs hand-created by the user). Drives the "🤖 Auto-Fix" badge in
+    # the task history and the heartbeat's "recent tasks" overview.
+    heartbeat_spawned: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The GitHub issue number that triggered this task (NULL for hand tasks).
+    heartbeat_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, index=True
+        UtcDateTime(), default=_now, index=True
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
     project: Mapped["Project"] = relationship(back_populates="tasks")
+
+
+class HeartbeatSeen(Base):
+    """Dedup ledger: one row per (project, GitHub issue) the heartbeat has
+    already considered. Insert here first (idempotent INSERT OR IGNORE);
+    the heartbeat only spawns a task when the row was ACTUALLY new. This is
+    a separate table so an issue that's been around for months doesn't get
+    re-dispatched every poll — only newly-opened issues trigger a spawn.
+    """
+
+    __tablename__ = "heartbeat_seen"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    issue_number: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Issue title at first sight (cached for the /heartbeat UI list).
+    issue_title: Mapped[str] = mapped_column(String(512), default="")
+    issue_url: Mapped[str] = mapped_column(String(512), default="")
+    first_seen_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(), default=_now
+    )
+    # Which task was dispatched for this issue, if any. NULL if the issue
+    # was filtered out (e.g. heartbeat was off, or labels didn't match).
+    dispatched_task_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+
+    project: Mapped["Project"] = relationship()

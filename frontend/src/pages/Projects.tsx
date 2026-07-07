@@ -4,7 +4,7 @@ import { api } from "../api";
 import NewProjectModal from "../components/NewProjectModal";
 import RunningAgents from "../components/RunningAgents";
 import SyncFromGithubModal from "../components/SyncFromGithubModal";
-import { Button, ErrorText, Spinner, formatDate } from "../components/ui";
+import { Button, ErrorText, Spinner, formatDate, parseApiDate } from "../components/ui";
 import type { Project } from "../types";
 
 type ArchiveFilter = "active" | "archived";
@@ -176,6 +176,7 @@ export default function Projects() {
                       Archiviert
                     </span>
                   )}
+                  <HeartbeatChip p={p} />
                 </div>
                 <div className="flex items-center gap-1">
                   <button
@@ -248,4 +249,58 @@ export default function Projects() {
       )}
     </div>
   );
+}
+
+/** Compact badge on each project card summarising the heartbeat state.
+ *  Visible only when there is something to say (i.e. enabled and has a
+ *  GitHub repo, or recently errored). Tap = nothing — full controls live
+ *  on the /heartbeat page (linked from the global nav). */
+function HeartbeatChip({ p }: { p: Project }) {
+  if (p.archived) return null;
+  if (!p.heartbeat_enabled) {
+    return (
+      <span
+        className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-xs font-medium text-slate-500"
+        title="Heartbeat für dieses Projekt deaktiviert"
+      >
+        🤖 aus
+      </span>
+    );
+  }
+  if (!p.github_full_name) return null;
+  if (p.last_heartbeat_status === "error") {
+    return (
+      <span
+        className="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-xs font-medium text-red-300"
+        title={p.last_heartbeat_error || "Heartbeat-Fehler"}
+      >
+        🤖 Fehler
+      </span>
+    );
+  }
+  const tone =
+    p.last_heartbeat_status === "cooldown"
+      ? "bg-amber-500/15 text-amber-300"
+      : p.last_heartbeat_status === "success" || p.last_heartbeat_status === "no_issues"
+        ? "bg-emerald-500/15 text-emerald-300"
+        : "bg-cyan-500/15 text-cyan-300";
+  const lastTick = p.last_heartbeat_at
+    ? relativeTime(parseApiDate(p.last_heartbeat_at))
+    : "noch nie";
+  return (
+    <span
+      className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${tone}`}
+      title={`Heartbeat aktiv · letzte Prüfung ${lastTick}`}
+    >
+      🤖 {lastTick}
+    </span>
+  );
+}
+
+function relativeTime(d: Date): string {
+  const diff = Date.now() - d.getTime();
+  if (diff < 60_000) return "gerade eben";
+  if (diff < 3_600_000) return `vor ${Math.round(diff / 60_000)} Min`;
+  if (diff < 86_400_000) return `vor ${Math.round(diff / 3_600_000)} Std`;
+  return formatDate(d.toISOString());
 }
