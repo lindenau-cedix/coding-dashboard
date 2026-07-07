@@ -154,6 +154,19 @@ class Task(Base):
     heartbeat_spawned: Mapped[bool] = mapped_column(Boolean, default=False)
     # The GitHub issue number that triggered this task (NULL for hand tasks).
     heartbeat_issue_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Stamp when the dashboard successfully POSTed a status comment for
+    # this task's commit back on the issue. UI displays the relative age;
+    # ``HeartbeatSeen.last_comment_id`` is the source of truth (a single
+    # heartbeat-spawned task can only comment once unless the operator
+    # hits "Re-comment").
+    heartbeat_commented_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime(), nullable=True
+    )
+    # Stamp when the dashboard successfully closed the GitHub issue
+    # after a clean merge. NULL until the close call succeeds.
+    heartbeat_closed_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime(), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), default=_now, index=True
@@ -189,6 +202,26 @@ class HeartbeatSeen(Base):
     # was filtered out (e.g. heartbeat was off, or labels didn't match).
     dispatched_task_id: Mapped[str | None] = mapped_column(
         String(32), nullable=True
+    )
+
+    # ---- comment-back-on-issue state ----------------------------------- #
+    # One commit-hash worth of "the dashboard already POSTed a comment on
+    # this issue" tracking. Best-effort: any failure to write to the
+    # issue comment endpoint is captured in ``last_comment_error`` and
+    # does NOT roll back the task or the push. ``last_comment_id`` is
+    # the GitHub-side comment id (so the "Re-comment" UI can overwrite
+    # via PATCH instead of stacking a new comment).
+    last_comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_commented_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime(), nullable=True
+    )
+    last_comment_error: Mapped[str] = mapped_column(Text, default="")
+    last_comment_url: Mapped[str] = mapped_column(String(512), default="")
+    # ``"open"`` / ``"closed"``: last known issue state after the
+    # dashboard's close-on-merge behavior or manual close/reopen calls.
+    last_issue_state: Mapped[str] = mapped_column(String(16), default="")
+    last_issue_state_changed_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime(), nullable=True
     )
 
     project: Mapped["Project"] = relationship()

@@ -178,6 +178,19 @@ class Settings(BaseSettings):
     # issues that have AT LEAST ONE of these labels (e.g. "bug,good first
     # issue"). Wire-through; no UI yet.
     heartbeat_labels: str = ""
+    # ``CD_HEARTBEAT_COMMENT_ON_SUCCESS`` (default ``True``): when a
+    # heartbeat-spawned task lands a commit, post a comment on the GitHub
+    # issue with the commit hash + a short summary. Comments are idempotent
+    # (``HeartbeatSeen.last_comment_id``) and best-effort; a failure to
+    # comment does not roll back the task or the push.
+    heartbeat_comment_on_success: bool = True
+    # ``CD_HEARTBEAT_CLOSE_ON_MERGE`` (default ``True``): when a
+    # heartbeat-spawned task LANDS its commit on the default branch
+    # (``merge_state == "merged"`` AND ``pushed=True``), the dashboard
+    # also closes the GitHub issue via ``PATCH /repos/.../issues/{n}``.
+    # When the branch is kept (merge_state=="conflict") the issue is left
+    # OPEN with the comment only — a human decides after the manual merge.
+    heartbeat_close_on_merge: bool = True
 
     # --- Files / serving ---
     agents_config_path: Path = Path("./config.yaml")

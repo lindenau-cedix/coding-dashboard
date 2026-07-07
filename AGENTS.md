@@ -4,6 +4,69 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-07-06 - claude (issue #5: page not updating when session ends)
+
+**Task:** Fix GitHub issue #5 ("Whenever i close a session on the page it
+still calls the agent running until i refresh the page.") — when the
+session popup ends a task or session, other dashboard tabs (the
+cross-project "Laufende Agenten" list, the project detail history)
+should reflect the new terminal status immediately instead of only
+when their next 3-second /running poll lands (or the user hits F5).
+
+**Result:** New `frontend/src/crossTab.ts` (browser-native
+`BroadcastChannel` wrapper, graceful no-op where unavailable).
+`SessionTerminalModal` and `TaskConsole` call
+`broadcast({type:"session-done", ...})` /
+`broadcast({type:"task-done", ...})` after a successful HTTP / WS
+`done` event. `RunningAgents` subscribes and re-polls `/api/running`
+the moment the event lands; `ProjectDetail` re-runs
+`refreshTasks()` + `reloadAgentsMd()` so the history row + git footer
+flip to the terminal status without a manual reload. Backend untouched
+— `_end_session_locked` already persists `task.status` to the
+terminal value BEFORE the slow git commit/push step, so `/api/running`
+drops the entry as soon as the HTTP response is in flight; the
+frontend cross-tab broadcast just makes that visible immediately
+rather than after the next 3 s poll cycle. Smoke-test tightened:
+`test_session_end_flow` now also asserts
+`t.status not in ("running","queued")` after `end_session` (would have
+caught the class of bug if the DB-write were ever reordered behind
+the git step). All 307 smoke checks pass (only the 2 pre-existing
+CORS failures remain, both unrelated and also failing on `main`).
+
+**What changed:**
+
+- `frontend/src/crossTab.ts` (new) — tiny `broadcast()` / `subscribe()`
+  wrapper over `BroadcastChannel("coding-dashboard-status")`. Returns
+  a no-op unsubscribe function when the constructor is unavailable
+  (SSR / very old browsers), so other code paths still load.
+- `frontend/src/components/SessionTerminalModal.tsx` — broadcast after
+  a successful `POST /sessions/{id}/end` and after a server-driven
+  `done` WS event (agent self-quit, pump failure) so both end paths
+  fire the cross-tab notification.
+- `frontend/src/components/TaskConsole.tsx` — same broadcast on the
+  WS `done` event (one-shot tasks / goals; sessions are handled by
+  `SessionTerminalModal`).
+- `frontend/src/components/RunningAgents.tsx` — subscribes to the
+  channel and re-polls `/api/running` immediately on
+  `task-done` / `session-done`. Cleanup function unsubscribes.
+- `frontend/src/pages/ProjectDetail.tsx` — subscribes to the channel
+  and runs `refreshTasks()` + `reloadAgentsMd()` so the open
+  history row + git footer refresh without a manual reload.
+- `backend/tests/smoke.py` — extra assertion in `test_session_end_flow`
+  that `t.status not in ("running", "queued")` after `end_session`
+  (comment points to issue #5). Locks in the invariant that the
+  DB-status write happens before the slow git commit/push step.
+
+**Verified:** `python -m tests.smoke` → 307 PASS, only the 2
+pre-existing CORS failures (also failing on `main`, unrelated). Frontend
+was not type-checked here (`node_modules` not installed in this
+worktree; `npm install` is gated on the deploy step), but the
+changes are mechanical: `crossTab.ts` is self-contained, every
+imported type already exists in the project, and the new
+`broadcast` call sites all sit immediately after the existing
+`setStatus(...)` / `onEndedRef.current?.(task)` lines that are
+already in production.
+
 ### 2026-07-05 - claude (heartbeat: auto-poll GitHub issues + auto-spawn Claude Code tasks)
 
 **Task:** Add a background loop to the dashboard that periodically polls
@@ -984,6 +1047,56 @@ Git commit / push cycle against a local bare repo, REST, and a complete task run
 
 ## Open items / possible next steps
 
+- **2026-07-06 (Feature):** Heartbeat comment-back: when a heartbeat-spawned
+  task lands a commit, the dashboard posts the commit hash + branch URL +
+  task link as a comment on the GitHub issue (compact German template,
+  same shape every time so the timeline reads cleanly). When the commit
+  also lands cleanly on the default branch (`merge_state=merged` +
+  `pushed=true`), the dashboard additionally closes the issue via a
+  separate `PATCH /repos/{repo}/issues/{n}` (`state: "closed"`) — works
+  even when no PR exists. New `HeartbeatFollowup` class in
+  `backend/app/heartbeat.py` (`heartbeat_followup.maybe_run(task_id)`),
+  hooked from `task_runner._publish_done` after the terminal Task row is
+  persisted. Fire-and-forget via `asyncio.create_task(...)`; the
+  `_inflight` dict guards re-entry for the same `task_id`. Three new
+  GitHub helpers in `backend/app/github_client.py`
+  (`create_issue_comment`, `update_issue_comment`, `update_issue_state`)
+  mirroring the existing `_request` pattern. Five new columns on
+  `HeartbeatSeen` (`last_comment_id`, `last_commented_at`,
+  `last_comment_url`, `last_comment_error`, `last_issue_state`,
+  `last_issue_state_changed_at`); two new `Task` columns
+  (`heartbeat_commented_at`, `heartbeat_closed_at`) for fast list-view
+  display. Three new routes in `routers/heartbeat.py`
+  (`POST .../comment-again`, `.../close`, `.../reopen`) for the operator
+  UI — comment-again POSTs a NEW comment (so the auto-hook's comment
+  stays intact), close/reopen PATCH the issue state. Frontend: the
+  Heartbeat overview's recent-tasks feed shows `💬 vor 12 Min` /
+  `✓ geschlossen` badges and three action buttons per row; the
+  project-detail history list shows the same `💬 kommentiert` /
+  `✓ geschlossen` chips next to the existing `🤖 Auto-Fix` badge. Both
+  features are opt-out via
+  `CD_HEARTBEAT_COMMENT_ON_SUCCESS=false` /
+  `CD_HEARTBEAT_CLOSE_ON_MERGE=false` (both default `true`). Covered by
+  `test_heartbeat_comment_on_solve` in `backend/tests/smoke.py`
+  (39 checks: predicate tests, hook-path integration tests with stubbed
+  GitHub helpers, REST round-trip via TestClient, idempotency). Effective
+  after `update.sh` / `systemctl restart coding-dashboard` (or next
+  container start for Docker).
+- **2026-07-06 (Fix):** Cross-tab session-end propagation. `end_session`
+  already persists `task.status` to the terminal value (`success` /
+  `failed` / ...) *before* the slow git commit/push step (verified by
+  the new `test_session_end_flow` assertion), so the dashboard's
+  `/api/running` view drops the session as soon as the HTTP response
+  is in flight. But the popup's `SessionTerminalModal` lives in a
+  separate tab from the main dashboard, so the main tab wouldn't
+  notice without `BroadcastChannel` fan-out. New
+  `frontend/src/crossTab.ts` bridges that — `SessionTerminalModal` and
+  `TaskConsole` emit `{type:"session-done"|"task-done", ...}` after a
+  successful HTTP / WS done event, and `RunningAgents` /
+  `ProjectDetail` subscribe and re-poll / re-fetch on receipt. Closes
+  the "page not updating until I refresh" symptom of issue #5. Pure
+  frontend, no backend change; the existing 3-second polling stays as
+  the fallback.
 - **2026-07-05 (Feature):** Dashboard heartbeat: a single long-lived
   `asyncio.Task` started from `main.lifespan()` polls GitHub for open
   issues on active (non-archived) projects every

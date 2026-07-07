@@ -1025,6 +1025,18 @@ def test_session_end_flow() -> None:
             return
         check("task marked finished after end_session", t.finished_at is not None, str(t.finished_at))
         check("task terminal output preserved", "hello from terminal" in (t.output or ""), t.output or "")
+        # Issue #5: when a session is ended (whether via the popup's
+        # "Session beenden" button, by the agent self-quitting, or by the
+        # server noticing the pump loop exited), the dashboard's /running
+        # view MUST drop the entry on the next poll.  end_session_locked
+        # persists ``task.status`` to the terminal status *before* the git
+        # commit/push step, so /running drops it as soon as the HTTP
+        # response is in flight, not after a multi-second push.
+        check(
+            "session end persists terminal task status (not running/queued)",
+            t.status not in ("running", "queued"),
+            str(t.status),
+        )
 
 
 def test_worktrees() -> None:
@@ -2677,6 +2689,464 @@ def test_heartbeat() -> None:
         db.query(Project).filter(Project.id.in_([active_id, archived_id, no_github_id])).delete()
 
 
+    # -------- 13. comment-back-on-issue flow ----------------------------- #
+def test_heartbeat_comment_on_solve() -> None:
+    """Comment-back-on-solve: when a heartbeat-spawned task lands a commit,
+    post the commit hash onto the GitHub issue, and close the issue when
+    the commit actually merged cleanly into the default branch.
+
+    Verified in three sections:
+      * ``format_comment_body`` substitution + ``should_close_on_merge``
+        predicates.
+      * Direct ``heartbeat_followup.maybe_run`` call paths for the three
+        relevant branches (merged+push -> both comment+close; conflict
+        -> comment only; failed+no commit -> no API calls).
+      * REST surface (``POST .../comment-again``, ``.../close``,
+        ``.../reopen``) round-trip via TestClient + stubbed
+        ``github_client`` helpers.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from app import github_client
+    from app.config import get_settings
+    from app.database import session_scope
+    from app.heartbeat import (
+        format_comment_body,
+        heartbeat_followup,
+        should_close_on_merge,
+    )
+    from app.main import app
+    from app.models import HeartbeatSeen, Project, Task
+
+    # -------- 13.1 pure predicates ------------------------------------- #
+    from types import SimpleNamespace as _Sn
+
+    # should_close_on_merge: True only when push + merge_state=merged.
+    check(
+        "hb-comment: should_close_on_merge True when pushed+merged",
+        should_close_on_merge(_Sn(pushed=True, merge_state="merged")) is True,
+    )
+    check(
+        "hb-comment: should_close_on_merge False on conflict",
+        should_close_on_merge(_Sn(pushed=False, merge_state="conflict")) is False,
+    )
+    check(
+        "hb-comment: should_close_on_merge False when not pushed",
+        should_close_on_merge(_Sn(pushed=False, merge_state="merged")) is False,
+    )
+    check(
+        "hb-comment: should_close_on_merge False on empty merge_state",
+        should_close_on_merge(_Sn(pushed=True, merge_state="")) is False,
+    )
+
+    # format_comment_body substitutes the commit hash and the result
+    # summary. Issue number + repo + commit URL must all show up.
+    fake_task = _Sn(
+        heartbeat_issue_number=42,
+        result_summary="Fixed the startup crash by removing the buggy f-string.",
+        commit_hash="abcdef0123456789abcdef0123456789abcdef01",
+        branch="cd/task/abc12345",
+        merge_state="merged",
+        pushed=True,
+        project_id="proj1",
+        id="tid1",
+    )
+    fake_proj = _Sn(
+        id="proj1",
+        name="hb-comment-proj",
+        slug="hb-comment-proj",
+        github_full_name="owner/hb-comment-proj",
+    )
+    body_merged = format_comment_body(fake_task, fake_proj, "https://x/issues/42")
+    check("hb-comment: body contains issue number", "#42" in body_merged, body_merged)
+    check("hb-comment: body contains commit sha", "abcdef01" in body_merged, body_merged)
+    check(
+        "hb-comment: body contains github commit URL",
+        "https://github.com/owner/hb-comment-proj/commit/abcdef01" in body_merged,
+        body_merged,
+    )
+    check("hb-comment: body contains repo full_name", "owner/hb-comment-proj" in body_merged, body_merged)
+    check("hb-comment: body contains result summary excerpt", "startup crash" in body_merged, body_merged)
+    check("hb-comment: body shows merged branch label", "cd/task/abc12345" in body_merged, body_merged)
+
+    # Conflict branch -> comment body shows the conflict warning instead
+    # of "merged".
+    fake_task2 = _Sn(
+        heartbeat_issue_number=7,
+        result_summary="Investigated.",
+        commit_hash="deadbeef" + "0" * 32,
+        branch="cd/task/ccc12345",
+        merge_state="conflict",
+        pushed=False,
+        project_id="proj1",
+        id="tid2",
+    )
+    body_conflict = format_comment_body(fake_task2, fake_proj, "https://x/issues/7")
+    check("hb-comment: conflict body shows manueller Merge", "manuellen Merge" in body_conflict, body_conflict)
+    check("hb-comment: conflict body marks not gepusht", "nicht gepusht" in body_conflict, body_conflict)
+
+    # -------- 13.2 direct hook path ------------------------------------- #
+    # Set up a Project + heartbeat_seen + heartbeat Task with a "merged
+    # + pushed" final status, then call maybe_run and assert both GitHub
+    # helpers fire with the expected payloads.
+    from datetime import datetime, timezone
+
+    cb_project_id = ""
+    with session_scope() as db:
+        proj_row = Project(
+            name="hb-comment-proj",
+            slug="hb-comment-proj",
+            local_path="/tmp/hb-comment-proj",
+            github_full_name="owner/hb-comment-proj",
+            heartbeat_enabled=True,
+        )
+        db.add(proj_row)
+        db.flush()
+        cb_project_id = proj_row.id
+        # heartbeat_seen ledger entries so the hook can stamp them.
+        for issue_no, title in [
+            (42, "Boom on startup"),
+            (43, "Investigated"),
+            (44, "Failed before commit"),
+        ]:
+            db.add(
+                HeartbeatSeen(
+                    project_id=cb_project_id,
+                    issue_number=issue_no,
+                    issue_title=title,
+                    issue_url=f"https://github.com/owner/hb-comment-proj/issues/{issue_no}",
+                    dispatched_task_id="",  # fill in below
+                )
+            )
+        db.flush()
+
+        # Heartbeat-spawned task: success + merged + pushed.
+        t_merged = Task(
+            id="hbcmt-merged-1",
+            project_id=cb_project_id,
+            agent="fake",
+            prompt="fix it",
+            mode="task",
+            status="success",
+            heartbeat_spawned=True,
+            heartbeat_issue_number=42,
+            commit_hash="abcdef0123456789abcdef0123456789abcdef01",
+            commit_message="Fix the crash",
+            merge_state="merged",
+            pushed=True,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            result_summary="Removed the f-string that crashed on startup.",
+        )
+        db.add(t_merged)
+        # Heartbeat-spawned task: success but merge conflict (branch kept).
+        t_conflict = Task(
+            id="hbcmt-conflict-1",
+            project_id=cb_project_id,
+            agent="fake",
+            prompt="fix another",
+            mode="task",
+            status="success",
+            heartbeat_spawned=True,
+            heartbeat_issue_number=43,
+            commit_hash="deadbeef" + "0" * 32,
+            commit_message="Investigated",
+            merge_state="conflict",
+            pushed=False,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            result_summary="Investigated.",
+        )
+        db.add(t_conflict)
+        # Non-heartbeat task: must be ignored entirely.
+        t_hand = Task(
+            id="hbcmt-hand-1",
+            project_id=cb_project_id,
+            agent="fake",
+            prompt="manual task",
+            mode="task",
+            status="success",
+            commit_hash="feedface" + "0" * 32,
+            pushed=True,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            result_summary="Manual, not heartbeat.",
+        )
+        db.add(t_hand)
+        # Heartbeat-spawned task that has no commit (failed before
+        # committing): must be a no-op even though it's heartbeat.
+        t_no_commit = Task(
+            id="hbcmt-fail-1",
+            project_id=cb_project_id,
+            agent="fake",
+            prompt="fix but failed",
+            mode="task",
+            status="failed",
+            heartbeat_spawned=True,
+            heartbeat_issue_number=44,
+            commit_hash="",
+            pushed=False,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            result_summary="",
+        )
+        db.add(t_no_commit)
+        db.flush()
+        # Wire dispatched_task_id on the two heartbeat_seen rows.
+        db.query(HeartbeatSeen).filter(
+            HeartbeatSeen.project_id == cb_project_id,
+            HeartbeatSeen.issue_number == 42,
+        ).update({"dispatched_task_id": "hbcmt-merged-1"})
+        db.query(HeartbeatSeen).filter(
+            HeartbeatSeen.project_id == cb_project_id,
+            HeartbeatSeen.issue_number == 43,
+        ).update({"dispatched_task_id": "hbcmt-conflict-1"})
+        db.query(HeartbeatSeen).filter(
+            HeartbeatSeen.project_id == cb_project_id,
+            HeartbeatSeen.issue_number == 44,
+        ).update({"dispatched_task_id": "hbcmt-fail-1"})
+
+    # Capture calls to the GitHub helpers.
+    called = {"comment": [], "close": [], "patch": []}
+    originals = {
+        "create": github_client.create_issue_comment,
+        "patch": github_client.update_issue_comment,
+        "close": github_client.update_issue_state,
+    }
+
+    async def fake_create(full_name, issue_number, body):
+        called["comment"].append((full_name, issue_number, body))
+        return {
+            "id": 4242,
+            "html_url": f"https://github.com/{full_name}/issues/{issue_number}#issuecomment-4242",
+        }
+
+    async def fake_patch(full_name, comment_id, body):
+        called["patch"].append((full_name, comment_id, body))
+        return {"id": comment_id, "html_url": "patched"}
+
+    async def fake_state(full_name, issue_number, state):
+        called["close"].append((full_name, issue_number, state))
+        return {"state": state}
+
+    async def run_hook() -> None:
+        # Run all three hooks concurrently. The runner's _inflight dict
+        # makes each idempotent against overlapping calls for the same
+        # task_id.
+        await asyncio.gather(
+            heartbeat_followup._post_comment_and_maybe_close(
+                "hbcmt-merged-1", get_settings()
+            ),
+            heartbeat_followup._post_comment_and_maybe_close(
+                "hbcmt-conflict-1", get_settings()
+            ),
+            heartbeat_followup._post_comment_and_maybe_close(
+                "hbcmt-hand-1", get_settings()
+            ),
+            heartbeat_followup._post_comment_and_maybe_close(
+                "hbcmt-fail-1", get_settings()
+            ),
+        )
+
+    # The patch wraps BOTH the hook calls (13.2) and the REST routes
+    # (13.4) so the TestClient drives our fakes instead of touching the
+    # network. We open the context here (before 13.2) and keep it open
+    # through 13.3 + 13.4 - FastAPI's TestClient runs route handlers in
+    # the same thread / event loop as the test, so a module-level
+    # ``patch.object`` is visible from inside ``await
+    # github_client.create_issue_comment(...)`` calls made by the route.
+    patch_ctx = (
+        patch.object(github_client, "create_issue_comment", side_effect=fake_create),
+        patch.object(github_client, "update_issue_comment", side_effect=fake_patch),
+        patch.object(github_client, "update_issue_state", side_effect=fake_state),
+    )
+    for p in patch_ctx:
+        p.start()
+    try:
+        asyncio.run(run_hook())
+
+        # The merged task must have called both helpers. The conflict task
+        # only the comment helper. The hand task NOTHING. The no-commit
+        # heartbeat task NOTHING.
+        comment_targets = sorted(call[1] for call in called["comment"])
+        check(
+            "hb-comment: create fired only for #42 (merged) + #43 (conflict)",
+            comment_targets == [42, 43],
+            str(called["comment"]),
+        )
+        close_targets = [(call[1], call[2]) for call in called["close"]]
+        check(
+            "hb-comment: close fired only for #42",
+            close_targets == [(42, "closed")],
+            str(called["close"]),
+        )
+        check("hb-comment: patch never fired", called["patch"] == [], str(called["patch"]))
+    
+        # DB state: the merged task should have comment + close stamps; the
+        # conflict task only a comment stamp; the rest unchanged.
+        with session_scope() as db:
+            merged_row = db.query(Task).filter(Task.id == "hbcmt-merged-1").one()
+            conflict_row = db.query(Task).filter(Task.id == "hbcmt-conflict-1").one()
+            hand_row = db.query(Task).filter(Task.id == "hbcmt-hand-1").one()
+            no_commit_row = db.query(Task).filter(Task.id == "hbcmt-fail-1").one()
+            check(
+                "hb-comment: merged task heartbeat_commented_at stamped",
+                merged_row.heartbeat_commented_at is not None,
+                str(merged_row.heartbeat_commented_at),
+            )
+            check(
+                "hb-comment: merged task heartbeat_closed_at stamped",
+                merged_row.heartbeat_closed_at is not None,
+                str(merged_row.heartbeat_closed_at),
+            )
+            check(
+                "hb-comment: conflict task heartbeat_commented_at stamped",
+                conflict_row.heartbeat_commented_at is not None,
+            )
+            check(
+                "hb-comment: conflict task heartbeat_closed_at remains None",
+                conflict_row.heartbeat_closed_at is None,
+            )
+            check(
+                "hb-comment: hand task heartbeat_commented_at never stamped",
+                hand_row.heartbeat_commented_at is None,
+            )
+            check(
+                "hb-comment: no-commit task heartbeat_commented_at never stamped",
+                no_commit_row.heartbeat_commented_at is None,
+            )
+            # HeartbeatSeen rows: comment id + url + state.
+            seen42 = db.query(HeartbeatSeen).filter(
+                HeartbeatSeen.project_id == cb_project_id,
+                HeartbeatSeen.issue_number == 42,
+            ).one()
+            check(
+                "hb-comment: HeartbeatSeen #42 last_comment_id stamped",
+                seen42.last_comment_id == 4242,
+                str(seen42.last_comment_id),
+            )
+            check(
+                "hb-comment: HeartbeatSeen #42 last_issue_state=closed",
+                seen42.last_issue_state == "closed",
+                str(seen42.last_issue_state),
+            )
+            check(
+                "hb-comment: HeartbeatSeen #42 last_commented_at set",
+                seen42.last_commented_at is not None,
+            )
+            seen43 = db.query(HeartbeatSeen).filter(
+                HeartbeatSeen.project_id == cb_project_id,
+                HeartbeatSeen.issue_number == 43,
+            ).one()
+            check(
+                "hb-comment: HeartbeatSeen #43 last_issue_state still empty (no close)",
+                seen43.last_issue_state == "",
+                str(seen43.last_issue_state),
+            )
+            check(
+                "hb-comment: HeartbeatSeen #43 last_comment_id set (comment only)",
+                seen43.last_comment_id == 4242,
+                str(seen43.last_comment_id),
+            )
+    
+            # -------- 13.3 idempotency: re-run doesn't double-comment ---------- #
+            # Clear the in-flight guard so we can re-run; the existence of
+            # heartbeat_commented_at should suppress further calls.
+            called["comment"].clear()
+            called["close"].clear()
+            asyncio.run(
+                heartbeat_followup._post_comment_and_maybe_close(
+                    "hbcmt-merged-1", get_settings()
+                )
+            )
+            check(
+                "hb-comment: re-run is a no-op (create_issue_comment not called)",
+                called["comment"] == [],
+                str(called["comment"]),
+            )
+            check(
+                "hb-comment: re-run is a no-op (update_issue_state not called)",
+                called["close"] == [],
+                str(called["close"]),
+            )
+    
+        # -------- 13.4 REST: comment-again, close, reopen ------------------ #
+        # Stubs still in force; TestClient drives the routes.
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": "secret-pw"},
+            )
+            token = ok.json()["access_token"]
+            H = {"Authorization": f"Bearer {token}"}
+
+            # comment-again: should POST a NEW comment with a fresh id so the
+            # operator's intent is visible in the timeline.
+            called["comment"].clear()
+            called["close"].clear()
+            r = client.post(
+                f"/api/projects/{cb_project_id}/heartbeat/issues/42/comment-again",
+                headers=H,
+            )
+            check("hb-comment: comment-again 200", r.status_code == 200, str(r.status_code))
+            body = r.json()
+            check("hb-comment: comment-again returns comment_id", body.get("comment_id") == 4242, str(body))
+            check(
+                "hb-comment: comment-again fired create_issue_comment",
+                len(called["comment"]) == 1,
+                str(called["comment"]),
+            )
+            check(
+                "hb-comment: comment-again does NOT close when already closed",
+                called["close"] == [],
+                str(called["close"]),
+            )
+
+            # close -> 200, sets state=closed (already closed on GitHub but the
+            # call still fires once and stamps heartbeat_seen).
+            called["close"].clear()
+            r2 = client.post(
+                f"/api/projects/{cb_project_id}/heartbeat/issues/42/close",
+                headers=H,
+            )
+            check("hb-comment: close 200", r2.status_code == 200, str(r2.status_code))
+            check("hb-comment: close returns state=closed", r2.json().get("state") == "closed", str(r2.json()))
+            check("hb-comment: close fired update_issue_state once", len(called["close"]) == 1, str(called["close"]))
+
+            # reopen -> 200, sets state=open.
+            called["close"].clear()
+            r3 = client.post(
+                f"/api/projects/{cb_project_id}/heartbeat/issues/42/reopen",
+                headers=H,
+            )
+            check("hb-comment: reopen 200", r3.status_code == 200, str(r3.status_code))
+            check("hb-comment: reopen returns state=open", r3.json().get("state") == "open", str(r3.json()))
+            check(
+                "hb-comment: reopen fired update_issue_state with state=open",
+                called["close"] == [("owner/hb-comment-proj", 42, "open")],
+                str(called["close"]),
+            )
+
+            # Unknown project -> 404.
+            r404 = client.post(
+                "/api/projects/does-not-exist/heartbeat/issues/42/comment-again",
+                headers=H,
+            )
+            check("hb-comment: comment-again 404 on unknown project", r404.status_code == 404, str(r404.status_code))
+    finally:
+        for p in patch_ctx:
+            p.stop()
+
+    # -------- 13.5 cleanup --------------------------------------------- #
+    with session_scope() as db:
+        db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == cb_project_id).delete()
+        db.query(Task).filter(Task.id.in_(["hbcmt-merged-1", "hbcmt-conflict-1", "hbcmt-hand-1", "hbcmt-fail-1"])).delete()
+        db.query(Project).filter(Project.id == cb_project_id).delete()
+
+
 def main() -> int:
     try:
         test_security()
@@ -2705,6 +3175,7 @@ def main() -> int:
         test_rename_github_owner()
         test_host_lock()
         test_heartbeat()
+        test_heartbeat_comment_on_solve()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ensureCloudflareAccess, getToken, wsUrl } from "../api";
+import { broadcast } from "../crossTab";
 import type { Task, TaskStatus, WsMessage } from "../types";
 import { Button, FullscreenShell, IconButton, StatusBadge } from "./ui";
 
@@ -60,6 +61,10 @@ export default function TaskConsole({
         } else if (msg.type === "done") {
           const task = (msg as { task: Task }).task;
           setStatus(task.status);
+          // Cross-tab notification: a sibling tab's "Laufende Agenten" panel
+          // (or a project-history view) needs to drop this task from its
+          // /running view immediately, not on the next 3s poll. See #5.
+          broadcast({ type: "task-done", taskId, status: task.status });
           onDoneRef.current?.(task);
         } else if (msg.type === "error") {
           const m = (msg as { message: string }).message;
