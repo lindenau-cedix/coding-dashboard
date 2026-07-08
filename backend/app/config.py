@@ -178,6 +178,16 @@ class Settings(BaseSettings):
     # issues that have AT LEAST ONE of these labels (e.g. "bug,good first
     # issue"). Wire-through; no UI yet.
     heartbeat_labels: str = ""
+    # ``CD_HEARTBEAT_ASSIGNEE_LOGINS``: comma-separated list of GitHub
+    # logins. Empty (default) = auto-resolve from the ``CD_GITHUB_TOKEN``
+    # by calling ``/user`` at the start of each tick; the resolved login
+    # becomes the implicit allowlist. Non-empty = explicit allowlist
+    # (overrides auto-resolution). The heartbeat is RESTRICTED to issues
+    # whose ``assignees`` array intersects this allowlist; if the value
+    # remains empty after auto-resolution (no token, ``/user`` failure,
+    # empty ``login``) the tick short-circuits to ``no_assignee`` rather
+    # than falling back to "every open issue".
+    heartbeat_assignee_logins: str = ""
     # ``CD_HEARTBEAT_COMMENT_ON_SUCCESS`` (default ``True``): when a
     # heartbeat-spawned task lands a commit, post a comment on the GitHub
     # issue with the commit hash + a short summary. Comments are idempotent
@@ -225,6 +235,23 @@ class Settings(BaseSettings):
     @property
     def heartbeat_labels_list(self) -> list[str]:
         return [o.strip() for o in self.heartbeat_labels.split(",") if o.strip()]
+
+    @property
+    def heartbeat_assignee_logins_list(self) -> list[str]:
+        """CSV → list, trimmed, lowercased, de-duplicated (order preserved).
+
+        GitHub logins are case-insensitive, so we lowercase for comparison.
+        Mirrors ``heartbeat_labels_list`` semantics with the extra
+        normalization step. Empty string in → empty list out.
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for raw in self.heartbeat_assignee_logins.split(","):
+            s = raw.strip().lower()
+            if s and s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
 
 
 # --------------------------------------------------------------------------- #

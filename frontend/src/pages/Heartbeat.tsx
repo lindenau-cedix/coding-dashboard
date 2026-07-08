@@ -172,6 +172,20 @@ export default function Heartbeat() {
               · Intervall alle {Math.round(status.interval_seconds / 60)} Min
               · Cooldown {status.cooldown_minutes} Min pro Projekt
             </span>
+            {status.assignee_logins.length > 0 && (
+              <span
+                className="text-xs text-slate-400"
+                title="Heartbeat fixiert nur Issues, die einer dieser Logins zugewiesen sind"
+              >
+                · Filtert auf:{" "}
+                {status.assignee_logins.map((a, i) => (
+                  <span key={a}>
+                    <span className="font-mono text-slate-200">@{a}</span>
+                    {i < status.assignee_logins.length - 1 ? ", " : ""}
+                  </span>
+                ))}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <Button

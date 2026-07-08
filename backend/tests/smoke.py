@@ -2336,16 +2336,21 @@ def test_heartbeat() -> None:
         # POST /trigger kicks a tick (fire-and-forget)
         client.post("/api/heartbeat/enable", headers=H)  # re-enable for the tick
         # Patch list_issues to a deterministic stub so the tick can run without
-        # network — return one new issue that we haven't seen yet.
+        # network — return one new issue that we haven't seen yet. The issue
+        # carries an ``assignees`` entry so the assignee-allowlist filter
+        # (added when the heartbeat stopped dispatching every open issue)
+        # doesn't drop it; the resolver stub below pins the allowlist to
+        # that same login.
         async def fake_list_issues(
             full_name, *, state="open", labels=None, since=None,
-            per_page=50, max_pages=5,
+            assignee=None, per_page=50, max_pages=5,
         ):
             return [
                 {
                     "number": 7777,
                     "title": "Heartbeat-stubbed issue",
                     "user": {"login": "bob"},
+                    "assignees": [{"login": "bob"}],
                     "labels": [],
                     "created_at": "2026-07-05T00:00:00Z",
                     "body": "Body of stubbed issue",
@@ -2358,6 +2363,13 @@ def test_heartbeat() -> None:
         original_list_issues = github_client.list_issues
         github_client.list_issues = fake_list_issues
         hb_mod.github_client.list_issues = fake_list_issues
+        # Stub the assignee resolver so this legacy test doesn't need a
+        # real ``/user`` call. The allowlist ``("bob",)`` matches the
+        # ``assignees`` entry above.
+        original_resolve = runner._resolve_assignee_logins
+        async def _fake_resolve_bob():
+            return (("bob",), hb_mod.ASSIGNEE_RESOLVED)
+        runner._resolve_assignee_logins = _fake_resolve_bob
         try:
             tr = client.post("/api/heartbeat/trigger", headers=H)
             check("heartbeat: POST /trigger 200", tr.status_code == 200, str(tr.status_code))
@@ -2381,6 +2393,7 @@ def test_heartbeat() -> None:
         finally:
             github_client.list_issues = original_list_issues
             hb_mod.github_client.list_issues = original_list_issues
+            runner._resolve_assignee_logins = original_resolve
             client.post("/api/heartbeat/disable", headers=H)
 
     # -------- 12. cleanup ----------------------------------------------- #
@@ -2388,6 +2401,451 @@ def test_heartbeat() -> None:
         db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
         db.query(Task).filter(Task.project_id.in_([active_id, archived_id, no_github_id])).delete()
         db.query(Project).filter(Project.id.in_([active_id, archived_id, no_github_id])).delete()
+
+
+    # -------- 12b. assignee-allowlist filter ------------------------------ #
+def test_heartbeat_assignee_filter() -> None:
+    """Heartbeat assignee-allowlist: the heartbeat MUST only auto-fix
+    issues whose ``assignees`` array intersects a configured allowlist of
+    GitHub logins. Three layers of guarantees under test:
+
+    * **Setting layer** — ``CD_HEARTBEAT_ASSIGNEE_LOGINS`` parses to a
+      normalized (lowercased + deduped) list via the
+      ``heartbeat_assignee_logins_list`` property.
+    * **Resolver layer** — when the env var is empty, ``_resolve_assignee_logins``
+      auto-resolves from ``GET /user``; when resolution fails (no token,
+      HTTP error, empty ``login``) it returns a failure status and the
+      tick MUST short-circuit (fail-closed — never process every open issue).
+    * **Filter layer** — at ``list_issues`` time the primary login is
+      threaded into the GitHub ``assignee=`` query param; at
+      ``_process_project`` time the wider allowlist is enforced
+      client-side against ``issue.assignees``.
+
+    Verified through pure-property checks, direct ``_resolve_assignee_logins``
+    calls with stubbed ``/user``, and the end-to-end
+    ``POST /api/heartbeat/trigger`` path with a stubbed
+    ``list_issues``.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from app import config as app_config
+    from app import github_client, heartbeat as hb_mod
+    from app.database import session_scope
+    from app.main import app
+    from app.models import HeartbeatSeen, Project, Task
+
+    # -------- 1. settings field exists + helper -------------------------- #
+    s = app_config.get_settings()
+    check(
+        "hb-assignee: heartbeat_assignee_logins field present on Settings",
+        hasattr(s, "heartbeat_assignee_logins"),
+    )
+    check(
+        "hb-assignee: heartbeat_assignee_logins_list property present",
+        hasattr(type(s), "heartbeat_assignee_logins_list"),
+    )
+    # Default must be empty so existing installs keep their old behavior
+    # (auto-resolve from token) after upgrade.
+    check(
+        "hb-assignee: default heartbeat_assignee_logins empty",
+        s.heartbeat_assignee_logins == "",
+        repr(s.heartbeat_assignee_logins),
+    )
+    check(
+        "hb-assignee: default heartbeat_assignee_logins_list empty",
+        s.heartbeat_assignee_logins_list == [],
+        repr(s.heartbeat_assignee_logins_list),
+    )
+
+    # -------- 2. CSV parser: trim / lowercase / dedupe / order --------- #
+    # Bypass the env-var cache by setting the field directly on the
+    # existing Settings instance (``pydantic-settings`` honors attribute
+    # assignment until a model_validator kicks in; no validator on this
+    # field, so direct write works).
+    with patch.object(s, "heartbeat_assignee_logins", "alice,Bob, foo"):
+        check(
+            "hb-assignee: CSV trims and lowercases",
+            s.heartbeat_assignee_logins_list == ["alice", "bob", "foo"],
+            repr(s.heartbeat_assignee_logins_list),
+        )
+    with patch.object(s, "heartbeat_assignee_logins", "alice,alice,ALICE"):
+        check(
+            "hb-assignee: CSV dedupes (case-insensitive)",
+            s.heartbeat_assignee_logins_list == ["alice"],
+            repr(s.heartbeat_assignee_logins_list),
+        )
+    with patch.object(s, "heartbeat_assignee_logins", ", , "):
+        check(
+            "hb-assignee: CSV of only blanks/empties parses to []",
+            s.heartbeat_assignee_logins_list == [],
+            repr(s.heartbeat_assignee_logins_list),
+        )
+    # Single login, uppercase — must still match the lowercase normalizer.
+    with patch.object(s, "heartbeat_assignee_logins", "Alice"):
+        check(
+            "hb-assignee: single uppercase login lowercased",
+            s.heartbeat_assignee_logins_list == ["alice"],
+            repr(s.heartbeat_assignee_logins_list),
+        )
+
+    # -------- 3. resolver: explicit env beats /user --------------------- #
+    runner = hb_mod.heartbeat
+    with patch.object(s, "heartbeat_assignee_logins", "alice,bob"):
+
+        async def _should_not_call_user():
+            raise AssertionError(
+                "_resolve_assignee_logins must NOT call /user when env var is set"
+            )
+
+        with patch.object(
+            github_client,
+            "get_authenticated_user",
+            side_effect=_should_not_call_user,
+        ):
+            logins, status = asyncio.run(runner._resolve_assignee_logins())
+        check(
+            "hb-assignee: explicit env wins, /user not called",
+            logins == ("alice", "bob") and status == hb_mod.ASSIGNEE_RESOLVED,
+            repr((logins, status)),
+        )
+
+    # -------- 4. resolver: auto-resolve /user happy path ----------------- #
+    with patch.object(s, "heartbeat_assignee_logins", ""), patch.object(
+        s, "github_token", "ghp_test"
+    ):
+
+        async def _fake_user():
+            return {"login": "TestUser", "id": 1}
+
+        with patch.object(
+            github_client, "get_authenticated_user", side_effect=_fake_user
+        ):
+            logins, status = asyncio.run(runner._resolve_assignee_logins())
+    check(
+        "hb-assignee: auto-resolve from /user (lowercased)",
+        logins == ("testuser",) and status == hb_mod.ASSIGNEE_RESOLVED,
+        repr((logins, status)),
+    )
+
+    # -------- 5. resolver: empty login from /user ----------------------- #
+    with patch.object(s, "heartbeat_assignee_logins", ""), patch.object(
+        s, "github_token", "ghp_test"
+    ):
+
+        async def _fake_user_empty():
+            return {"login": "", "id": 1}
+
+        with patch.object(
+            github_client, "get_authenticated_user", side_effect=_fake_user_empty
+        ):
+            logins, status = asyncio.run(runner._resolve_assignee_logins())
+    check(
+        "hb-assignee: empty /user login → ASSIGNEE_EMPTY",
+        logins == () and status == hb_mod.ASSIGNEE_EMPTY,
+        repr((logins, status)),
+    )
+
+    # -------- 6. resolver: no token ------------------------------------- #
+    with patch.object(s, "heartbeat_assignee_logins", ""), patch.object(
+        s, "github_token", ""
+    ):
+        logins, status = asyncio.run(runner._resolve_assignee_logins())
+    check(
+        "hb-assignee: no token → ASSIGNEE_NO_TOKEN",
+        logins == () and status == hb_mod.ASSIGNEE_NO_TOKEN,
+        repr((logins, status)),
+    )
+
+    # -------- 7. resolver: GitHubError → lookup_failed ------------------- #
+    with patch.object(s, "heartbeat_assignee_logins", ""), patch.object(
+        s, "github_token", "ghp_test"
+    ):
+
+        async def _fake_user_401():
+            raise github_client.GitHubError(401, "Bad credentials")
+
+        with patch.object(
+            github_client, "get_authenticated_user", side_effect=_fake_user_401
+        ):
+            logins, status = asyncio.run(runner._resolve_assignee_logins())
+    check(
+        "hb-assignee: GitHubError /user → ASSIGNEE_LOOKUP_FAILED",
+        logins == () and status == hb_mod.ASSIGNEE_LOOKUP_FAILED,
+        repr((logins, status)),
+    )
+
+    # -------- 8. resolver: generic exception → lookup_failed ------------- #
+    with patch.object(s, "heartbeat_assignee_logins", ""), patch.object(
+        s, "github_token", "ghp_test"
+    ):
+
+        async def _fake_user_crash():
+            raise RuntimeError("network blew up")
+
+        with patch.object(
+            github_client, "get_authenticated_user", side_effect=_fake_user_crash
+        ):
+            logins, status = asyncio.run(runner._resolve_assignee_logins())
+    check(
+        "hb-assignee: generic exception /user → ASSIGNEE_LOOKUP_FAILED",
+        logins == () and status == hb_mod.ASSIGNEE_LOOKUP_FAILED,
+        repr((logins, status)),
+    )
+
+    # -------- 9. fail-closed tick --------------------------------------- #
+    # Stub /user to fail (→ resolution returns lookup_failed). Stub a
+    # "rich" issues list (3 unassigned open issues). Drive the tick via
+    # POST /api/heartbeat/trigger. Expect:
+    #   * HTTP 200 with summary.status == "no_assignee"
+    #   * NO new rows in heartbeat_seen (the tick never reached the
+    #     per-project loop)
+    #   * NO tasks dispatched
+    #   * list_issues was NOT called (resolver short-circuits before
+    #     the per-project loop)
+    with session_scope() as db:
+        # Create a fresh project so the tick has something to walk
+        # (even though the resolver will reject before that walks anything).
+        failclosed_proj = Project(
+            name="hb-failclosed",
+            slug="hb-failclosed",
+            local_path="/tmp/hb-failclosed",
+            github_full_name="owner/hb-failclosed",
+            heartbeat_enabled=True,
+        )
+        db.add(failclosed_proj)
+        db.commit()
+        db.refresh(failclosed_proj)
+        fc_id = failclosed_proj.id
+
+    async def _fake_user_error_for_fc():
+        raise github_client.GitHubError(500, "boom")
+
+    list_issues_called: dict[str, int] = {"n": 0}
+
+    async def _fake_list_issues_tracking(*args, **kwargs):
+        list_issues_called["n"] += 1
+        return []
+
+    client = TestClient(app)
+    with client:
+        ok = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+        )
+        check(
+            "hb-assignee: own test client login ok",
+            ok.status_code == 200,
+            str(ok.status_code),
+        )
+        H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+    try:
+        runner.set_enabled(True)
+        with patch.object(s, "heartbeat_assignee_logins", ""), patch.object(
+            s, "github_token", "ghp_test"
+        ), patch.object(
+            github_client,
+            "get_authenticated_user",
+            side_effect=_fake_user_error_for_fc,
+        ), patch.object(
+            github_client, "list_issues", side_effect=_fake_list_issues_tracking
+        ), patch.object(
+            hb_mod.github_client, "list_issues", side_effect=_fake_list_issues_tracking
+        ):
+            tr = client.post("/api/heartbeat/trigger", headers=H)
+        check(
+            "hb-assignee: tick HTTP 200 even when no_assignee",
+            tr.status_code == 200,
+            str(tr.status_code),
+        )
+        summary = tr.json().get("summary") or {}
+        check(
+            "hb-assignee: tick body says no_assignee",
+            summary.get("status") == "no_assignee",
+            repr(summary),
+        )
+        check(
+            "hb-assignee: tick body surfaces reason=lookup_failed",
+            summary.get("reason") == "lookup_failed",
+            repr(summary),
+        )
+        check(
+            "hb-assignee: tick body dispatched=0",
+            summary.get("dispatched") == 0,
+            repr(summary),
+        )
+        check(
+            "hb-assignee: tick short-circuit did NOT call list_issues",
+            list_issues_called["n"] == 0,
+            repr(list_issues_called),
+        )
+        with session_scope() as db:
+            n_seen = (
+                db.query(HeartbeatSeen)
+                .filter(HeartbeatSeen.project_id == fc_id)
+                .count()
+            )
+            n_tasks = (
+                db.query(Task)
+                .filter(Task.project_id == fc_id)
+                .filter(Task.heartbeat_spawned.is_(True))
+                .count()
+            )
+        check(
+            "hb-assignee: no heartbeat_seen rows after fail-closed tick",
+            n_seen == 0,
+            repr(n_seen),
+        )
+        check(
+            "hb-assignee: no heartbeat-spawned tasks after fail-closed tick",
+            n_tasks == 0,
+            repr(n_tasks),
+        )
+    finally:
+        runner.set_enabled(False)
+        with session_scope() as db:
+            db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == fc_id).delete()
+            db.query(Task).filter(Task.project_id == fc_id).delete()
+            db.query(Project).filter(Project.id == fc_id).delete()
+
+    # -------- 10. allowlist filters the per-project dispatch ----------- #
+    # With an explicit ``alice,bob`` allowlist, stub list_issues to return
+    # one issue assigned to alice (dispatched) + one assigned to carol
+    # (NOT dispatched — outside the allowlist). Assert that only the
+    # alice-assigned issue got a Task.
+    with session_scope() as db:
+        assign_proj = Project(
+            name="hb-assign",
+            slug="hb-assign",
+            local_path="/tmp/hb-assign",
+            github_full_name="owner/hb-assign",
+            heartbeat_enabled=True,
+        )
+        db.add(assign_proj)
+        db.commit()
+        db.refresh(assign_proj)
+        a_id = assign_proj.id
+
+    captured_kwargs: dict[str, object] = {}
+
+    async def _fake_list_issues_assignee(
+        full_name, *, state="open", labels=None, since=None,
+        assignee=None, per_page=50, max_pages=5,
+    ):
+        captured_kwargs["assignee"] = assignee
+        # Mirror the real filter: GitHub's single-value ``assignee`` param
+        # would only ever match the primary login in production. We
+        # pretend GitHub returned broader data here so we can exercise
+        # the client-side allowlist widening (alice AND bob both appear).
+        return [
+            {
+                "number": 1,
+                "title": "Alice's issue",
+                "user": {"login": "x"},
+                "assignees": [{"login": "Alice"}],
+                "labels": [],
+                "created_at": "2026-07-08T00:00:00Z",
+                "body": "x",
+                "html_url": f"https://github.com/{full_name}/issues/1",
+            },
+            {
+                "number": 2,
+                "title": "Bob's issue",
+                "user": {"login": "x"},
+                "assignees": [{"login": "bob"}],
+                "labels": [],
+                "created_at": "2026-07-08T00:00:00Z",
+                "body": "x",
+                "html_url": f"https://github.com/{full_name}/issues/2",
+            },
+            {
+                "number": 3,
+                "title": "Carol's issue",
+                "user": {"login": "x"},
+                "assignees": [{"login": "carol"}],
+                "labels": [],
+                "created_at": "2026-07-08T00:00:00Z",
+                "body": "x",
+                "html_url": f"https://github.com/{full_name}/issues/3",
+            },
+            {
+                "number": 4,
+                "title": "Unassigned issue",
+                "user": {"login": "x"},
+                "assignees": [],
+                "labels": [],
+                "created_at": "2026-07-08T00:00:00Z",
+                "body": "x",
+                "html_url": f"https://github.com/{full_name}/issues/4",
+            },
+        ]
+
+    try:
+        runner.set_enabled(True)
+        with patch.object(s, "heartbeat_assignee_logins", "alice,bob"), patch.object(
+            github_client, "list_issues", side_effect=_fake_list_issues_assignee
+        ), patch.object(
+            hb_mod.github_client,
+            "list_issues",
+            side_effect=_fake_list_issues_assignee,
+        ):
+            tr = client.post("/api/heartbeat/trigger", headers=H)
+        check(
+            "hb-assignee: assign-filter tick HTTP 200",
+            tr.status_code == 200,
+            str(tr.status_code),
+        )
+        check(
+            "hb-assignee: assign-filter threaded assignee=alice into list_issues",
+            captured_kwargs.get("assignee") == "alice",
+            repr(captured_kwargs),
+        )
+        # Wait briefly for the tick to settle.
+        deadline = time.time() + 10.0
+        dispatched_numbers: set[int] = set()
+        while time.time() < deadline:
+            with session_scope() as db:
+                rows = (
+                    db.query(Task.heartbeat_issue_number)
+                    .filter(Task.project_id == a_id)
+                    .filter(Task.heartbeat_spawned.is_(True))
+                    .all()
+                )
+                dispatched_numbers = {int(n) for (n,) in rows if n is not None}
+                if {1, 2}.issubset(dispatched_numbers):
+                    break
+            time.sleep(0.2)
+        check(
+            "hb-assignee: alice issue (1) dispatched",
+            1 in dispatched_numbers,
+            repr(dispatched_numbers),
+        )
+        check(
+            "hb-assignee: bob issue (2) dispatched (client-side widening past query param)",
+            2 in dispatched_numbers,
+            repr(dispatched_numbers),
+        )
+        check(
+            "hb-assignee: carol issue (3) NOT dispatched",
+            3 not in dispatched_numbers,
+            repr(dispatched_numbers),
+        )
+        check(
+            "hb-assignee: unassigned issue (4) NOT dispatched",
+            4 not in dispatched_numbers,
+            repr(dispatched_numbers),
+        )
+    finally:
+        runner.set_enabled(False)
+        # Restore the env-var so the rest of the suite isn't affected.
+        with patch.object(s, "heartbeat_assignee_logins", ""):
+            pass
+        with session_scope() as db:
+            db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == a_id).delete()
+            db.query(Task).filter(Task.project_id == a_id).delete()
+            db.query(Project).filter(Project.id == a_id).delete()
 
 
     # -------- 13. comment-back-on-issue flow ----------------------------- #
@@ -2875,6 +3333,7 @@ def main() -> int:
         test_project_archive()
         test_host_lock()
         test_heartbeat()
+        test_heartbeat_assignee_filter()
         test_heartbeat_comment_on_solve()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)

@@ -196,6 +196,11 @@ export interface HeartbeatStatus {
   interval_seconds: number;
   agent_key: string;
   cooldown_minutes: number;
+  /** GitHub logins the heartbeat will dispatch on, sourced from
+   *  ``CD_HEARTBEAT_ASSIGNEE_LOGINS`` or auto-resolved from the token.
+   *  Empty here means the next tick will fail-closed (no_assignee)
+   *  unless the operator sets the env var. */
+  assignee_logins: string[];
   last_tick_at: string | null;
   last_tick_summary: string | null;
   projects: HeartbeatProjectStatus[];

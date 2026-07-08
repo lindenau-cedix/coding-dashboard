@@ -88,6 +88,12 @@ def get_heartbeat_status(
         interval_seconds=settings.heartbeat_interval_seconds,
         agent_key=agent_key,
         cooldown_minutes=settings.heartbeat_cooldown_minutes,
+        # Surface the configured allowlist. The ``/user`` auto-resolve is
+        # NOT run here — this endpoint is synchronous and read-from-settings
+        # only. The live resolved allowlist shows up in the most recent
+        # tick's ``assignee_logins`` log line; operators can verify it
+        # worked by checking the server log instead of blocking the GET.
+        assignee_logins=settings.heartbeat_assignee_logins_list,
         projects=statuses,
     )
 

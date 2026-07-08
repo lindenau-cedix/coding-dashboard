@@ -120,6 +120,7 @@ async def list_issues(
     state: str = "open",
     labels: list[str] | None = None,
     since: str | None = None,
+    assignee: str | None = None,
     per_page: int = 50,
     max_pages: int = 5,
 ) -> list[dict]:
@@ -131,6 +132,11 @@ async def list_issues(
       after this moment. Used by the heartbeat for incremental polling.
     - ``labels``: comma-joined list; GitHub filters to issues that have
       AT LEAST ONE of these labels.
+    - ``assignee``: a single GitHub login; GitHub returns issues assigned
+      to that user. None = no server-side filter (the caller may still
+      filter client-side). Note that GitHub's ``assignee`` query param is
+      single-valued; an allowlist of multiple logins MUST be widened
+      client-side against ``issue.assignees``.
     - Pagination mirrors ``list_user_repos`` (per_page = GitHub cap,
       max_pages caps total pages so a runaway repo can't burn quota).
     """
@@ -147,6 +153,8 @@ async def list_issues(
             params["labels"] = ",".join(labels)
         if since:
             params["since"] = since
+        if assignee:
+            params["assignee"] = assignee
         chunk = await _request("GET", f"/repos/{full_name}/issues", params=params)
         if not isinstance(chunk, list) or not chunk:
             break

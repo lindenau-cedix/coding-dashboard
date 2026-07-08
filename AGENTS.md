@@ -4,6 +4,68 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-07-08 - claude (heartbeat: restrict auto-fixes to assigned issues)
+
+**Task:** The heartbeat auto-dispatched a task for every open issue, even
+when filed by a random contributor or routed through a bot. Restrict it
+to issues whose `assignees` array intersects a configurable allowlist of
+GitHub logins — defaults to the operator's own GitHub login (resolved at
+runtime from `CD_GITHUB_TOKEN`), so dashboards owned by a single
+maintainer "just work" without any extra config.
+
+**Result:** New `CD_HEARTBEAT_ASSIGNEE_LOGINS` CSV env (default empty →
+auto-resolve via `GET /user`); fail-closed short-circuit at the top of
+`HeartbeatRunner._tick` so an unresolved allowlist becomes a
+`status=no_assignee` return (not a fall-through to "process every open
+issue"); both GitHub query-param narrowing (`assignee=<primary>`) and a
+client-side widening pass over the issue's full `assignees` array — so a
+two-or-three-login allowlist still matches. Unassigned issues (empty
+`assignees`) are dropped before dedup, which is the original bug.
+
+**What changed:**
+
+- `backend/app/config.py` — new `heartbeat_assignee_logins: str = ""`
+  field + `heartbeat_assignee_logins_list` property (CSV → lowercased
+  trimmed deduped list), mirrors the `heartbeat_labels_list` pattern.
+- `backend/app/github_client.py` — `list_issues()` gains an
+  `assignee: str | None = None` kwarg that gets threaded into the
+  `params["assignee"]` query.
+- `backend/app/heartbeat.py` — module constants `ASSIGNEE_RESOLVED /
+  NO_TOKEN / LOOKUP_FAILED / EMPTY`; new async
+  `HeartbeatRunner._resolve_assignee_logins()` (env wins, else `/user`,
+  else a typed failure status); `_tick` resolves ONCE then short-circuits
+  on empty; `_process_project` takes the resolved tuple, forwards
+  `assignee_logins[0]` to GitHub, then drops issues whose `assignees`
+  array doesn't intersect the allowlist (incl. the unassigned case); log
+  line at the end of `_tick` now reads
+  `… (projects=N, dispatched=M, assignees=K)`.
+- `backend/app/schemas.py` — `HeartbeatStatus.assignee_logins: list[str]`
+  (so the UI can show what the heartbeat is actually filtering on).
+- `backend/app/routers/heartbeat.py` — `GET /api/heartbeat` reads from
+  settings only (no `/user` call here; that lives in the runner).
+- `backend/tests/smoke.py` — new `test_heartbeat_assignee_filter`
+  (~30 checks): CSV-parsing variants (trim/lowercase/dedupe/empty),
+  explicit-env-beats-/user, /user happy path → 1-element allowlist, /user
+  empty login → EMPTY, no token → NO_TOKEN, `GitHubError` →
+  LOOKUP_FAILED, generic Exception → LOOKUP_FAILED, end-to-end
+  fail-closed tick (HTTP 200 + `status=no_assignee` + `reason=lookup_failed`
+  + dispatched=0 + zero `list_issues` calls + zero `heartbeat_seen` rows
+  + zero spawned tasks), query-arg threading (`assignee="alice"` was
+  the primary passed through), client-side widening (alice AND bob both
+  dispatched when `CD_HEARTBEAT_ASSIGNEE_LOGINS=alice,bob`), carol NOT
+  dispatched, unassigned NOT dispatched.
+- `frontend/src/types.ts` + `frontend/src/pages/Heartbeat.tsx` —
+  `HeartbeatStatus.assignee_logins` + a one-line `· Filtert auf: @a, @b`
+  chip in the page header when the allowlist is non-empty.
+- `deploy/coding-dashboard.env.example` +
+  `deploy/docker/coding-dashboard.docker.env.example` —
+  `CD_HEARTBEAT_ASSIGNEE_LOGINS` documented with auto-resolve vs CSV
+  semantics + fail-closed note.
+
+**Verified:** Smoke runs locally (see "Tests" in the next milestone).
+Effective after `update.sh` / `systemctl restart coding-dashboard` (or
+next container start for Docker). No DB migration; no new pip deps.
+
 ### 2026-07-06 - claude (issue #5: page not updating when session ends)
 
 **Task:** Fix GitHub issue #5 ("Whenever i close a session on the page it

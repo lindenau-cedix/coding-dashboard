@@ -47,6 +47,22 @@ log = logging.getLogger("coding-dashboard.heartbeat")
 
 
 # --------------------------------------------------------------------------- #
+# Assignee-allowlist resolver (fail-closed default)
+# --------------------------------------------------------------------------- #
+# The heartbeat is restricted to issues whose ``assignees`` array intersects
+# an allowlist of GitHub logins. The resolver produces that allowlist on
+# every tick (no cross-tick cache — GitHub tokens rotate, and a transient
+# /user failure should not permanently disable the heartbeat). The status
+# string below drives the ``no_assignee`` short-circuit in ``_tick`` and
+# also shows up in the ``GET /api/heartbeat`` response so operators can
+# diagnose why no issues are being dispatched.
+ASSIGNEE_RESOLVED = "resolved"               # allowlist has >= 1 login
+ASSIGNEE_NO_TOKEN = "no_token"               # CD_GITHUB_TOKEN unset
+ASSIGNEE_LOOKUP_FAILED = "lookup_failed"     # /user returned an error
+ASSIGNEE_EMPTY = "empty_after_resolution"    # /user returned an empty login
+
+
+# --------------------------------------------------------------------------- #
 # Issue-comment follow-up: post the commit number back onto the GitHub issue
 # --------------------------------------------------------------------------- #
 def _now() -> datetime:
@@ -203,6 +219,47 @@ class HeartbeatRunner:
         log.info("heartbeat: stopped")
 
     # ------------------------------------------------------------------ #
+    # Assignee-allowlist resolver (fail-closed)
+    # ------------------------------------------------------------------ #
+    async def _resolve_assignee_logins(self) -> tuple[tuple[str, ...], str]:
+        """Resolve the effective allowlist for THIS tick.
+
+        Order of precedence:
+
+        1. Explicit ``CD_HEARTBEAT_ASSIGNEE_LOGINS`` env var (CSV). If it
+           parses to a non-empty list, that wins and ``/user`` is not
+           called — operators can target logins that don't belong to the
+           token's own user.
+        2. Auto-resolve via ``GET /user`` (one HTTP call per tick when no
+           env var is set). The returned ``login`` becomes a 1-element
+           allowlist.
+        3. ``ASSIGNEE_NO_TOKEN`` / ``ASSIGNEE_LOOKUP_FAILED`` /
+           ``ASSIGNEE_EMPTY`` statuses. The tick short-circuits in all
+           three cases — the heartbeat MUST NOT fall back to
+           "process every open issue" because that would silently
+           re-introduce the assignment bug.
+
+        Returns ``(tuple_of_logins, status_string)``. The tuple is empty
+        whenever status != ``ASSIGNEE_RESOLVED``.
+        """
+        settings = get_settings()
+        explicit = settings.heartbeat_assignee_logins_list
+        if explicit:
+            return (tuple(explicit), ASSIGNEE_RESOLVED)
+        if not settings.github_token:
+            return ((), ASSIGNEE_NO_TOKEN)
+        try:
+            me = await github_client.get_authenticated_user()
+        except github_client.GitHubError:
+            return ((), ASSIGNEE_LOOKUP_FAILED)
+        except Exception:  # noqa: BLE001
+            return ((), ASSIGNEE_LOOKUP_FAILED)
+        login = (me.get("login") or "").strip().lower()
+        if not login:
+            return ((), ASSIGNEE_EMPTY)
+        return ((login,), ASSIGNEE_RESOLVED)
+
+    # ------------------------------------------------------------------ #
     # Tick (synchronous trigger + background loop)
     # ------------------------------------------------------------------ #
     async def tick_now(self) -> dict[str, Any]:
@@ -249,6 +306,26 @@ class HeartbeatRunner:
             )
             return {"status": "no_agent", "agent_key": agent_key}
 
+        # Resolve the assignee allowlist for this tick. FAIL-CLOSED: if
+        # the resolver returns an empty tuple we MUST NOT process every
+        # open issue — the heartbeat's whole point is to only fix issues
+        # the operator (or their team) has actually claimed. The tick
+        # short-circuits with status="no_assignee"; the per-project
+        # ``last_heartbeat_status`` and the ``last_heartbeat_at`` stamp
+        # are intentionally left untouched here so the project's "ran at"
+        # time reflects the last successful poll, not a denied tick.
+        assignee_logins, assignee_status = await self._resolve_assignee_logins()
+        if not assignee_logins:
+            log.warning(
+                "heartbeat: tick skipped — no assignee allowlist (status=%s)",
+                assignee_status,
+            )
+            return {
+                "status": "no_assignee",
+                "reason": assignee_status,
+                "dispatched": 0,
+            }
+
         # List active projects in a thread (sync DB).
         projects = await asyncio.to_thread(self._list_active_projects)
         if not projects:
@@ -261,7 +338,7 @@ class HeartbeatRunner:
         async def _one(p_id: str) -> dict[str, Any]:
             assert self._project_semaphore is not None
             async with self._project_semaphore:
-                return await self._process_project(p_id, agent_key)
+                return await self._process_project(p_id, agent_key, assignee_logins)
 
         results = await asyncio.gather(
             *[_one(p.id) for p in projects], return_exceptions=True
@@ -275,9 +352,10 @@ class HeartbeatRunner:
                 log.warning("heartbeat: project tick raised: %s", r)
 
         log.info(
-            "heartbeat: tick finished (projects=%d, dispatched=%d)",
+            "heartbeat: tick finished (projects=%d, dispatched=%d, assignees=%d)",
             len(projects),
             dispatched,
+            len(assignee_logins),
         )
         return {"status": "ok", "projects": len(projects), "dispatched": dispatched}
 
@@ -418,7 +496,12 @@ class HeartbeatRunner:
     # ------------------------------------------------------------------ #
     # Per-project tick
     # ------------------------------------------------------------------ #
-    async def _process_project(self, project_id: str, agent_key: str) -> dict[str, Any]:
+    async def _process_project(
+        self,
+        project_id: str,
+        agent_key: str,
+        assignee_logins: tuple[str, ...],
+    ) -> dict[str, Any]:
         settings = get_settings()
         result: dict[str, Any] = {"project_id": project_id, "dispatched": 0}
 
@@ -463,13 +546,17 @@ class HeartbeatRunner:
 
         since = await asyncio.to_thread(_since_cutoff)
 
-        # Fetch open issues (network).
+        # Fetch open issues (network). The first allowlist element goes
+        # into GitHub's single-value ``assignee`` query param to narrow the
+        # server-side result set; the wider client-side allowlist below
+        # catches the case where the env var lists more than one login.
         try:
             issues = await github_client.list_issues(
                 project.github_full_name,
                 state="open",
                 labels=settings.heartbeat_labels_list or None,
                 since=since,
+                assignee=assignee_logins[0],
             )
         except github_client.GitHubError as exc:
             log.warning(
@@ -504,6 +591,22 @@ class HeartbeatRunner:
                     if isinstance(lbl, dict)
                 )
             ]
+
+        # Assignee allowlist (client-side widening of the single
+        # ``assignee=`` query param above). GitHub's issue ``assignees``
+        # is an array of user objects; the heartbeat drops anything whose
+        # ``assignees`` doesn't intersect the allowlist — including the
+        # common case of an UNASSIGNED issue (``assignees`` = ``[]`` or
+        # missing), which is the whole point of this filter.
+        wanted_logins = {a.lower() for a in assignee_logins}
+        def _is_assigned(issue: dict) -> bool:
+            for entry in (issue.get("assignees") or []):
+                if isinstance(entry, dict):
+                    login = (entry.get("login") or "").lower()
+                    if login and login in wanted_logins:
+                        return True
+            return False
+        real_issues = [i for i in real_issues if _is_assigned(i)]
 
         # For each unseen issue, claim + spawn.
         for issue in real_issues:
