@@ -8,6 +8,7 @@ TaskManager (agent -> file change -> commit -> push -> history).
 """
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
@@ -1707,6 +1708,304 @@ def test_project_archive() -> None:
             db.query(Project).filter(Project.id == pid).delete()
 
 
+def test_rename_github_owner() -> None:
+    """The `python -m app.cli rename-github-owner OLD NEW [--apply]`
+    admin subcommand: dry-run preview, --apply rewrite of three
+    owner-stamped columns, owner self-match rejected, unknown prefix
+    no-op, idempotent re-run, last_issue_poll_at cleared only on the
+    renamed projects.
+
+    Runs against the smoke test's isolated SQLite DB; every change
+    happens inside a single ``session_scope`` so commit/rollback
+    semantics are visible.
+    """
+    from datetime import datetime, timezone
+
+    from app import cli as cli_mod
+    from app.database import session_scope, init_db
+    from app.models import Project
+
+    init_db()
+
+    stamp = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)
+
+    def _ts_eq(a, b):
+        """SQLite drops tz info on roundtrip; compare the wall-clock."""
+        if a == b:
+            return True
+        if a is None or b is None:
+            return False
+        if a.tzinfo is None and b.tzinfo is not None:
+            return a == b.replace(tzinfo=None)
+        if b.tzinfo is None and a.tzinfo is not None:
+            return a.replace(tzinfo=None) == b
+        return False
+    OTHER_OWNER_PID: str = ""
+    UNRELATED_OWNER_PID: str = ""
+    EMPTY_OWNER_PID: str = ""
+
+    with session_scope() as db:
+        # Project owned by the OLD owner (the rename target).
+        p1 = Project(
+            name="rename-me",
+            slug="rename-me",
+            local_path=str(TMP / "data" / "projects" / "rename-me"),
+            default_branch="main",
+            clone_url="https://github.com/old-owner/rename-me.git",
+            github_url="https://github.com/old-owner/rename-me",
+            github_full_name="old-owner/rename-me",
+            last_issue_poll_at=stamp,
+        )
+        db.add(p1)
+        db.flush()
+        OTHER_OWNER_PID = p1.id
+
+        # Project owned by an UNRELATED owner — must NOT be touched.
+        p2 = Project(
+            name="leave-me-alone",
+            slug="leave-me-alone",
+            local_path=str(TMP / "data" / "projects" / "leave-me-alone"),
+            default_branch="main",
+            clone_url="https://github.com/somebody/leave-me-alone.git",
+            github_url="https://github.com/somebody/leave-me-alone",
+            github_full_name="somebody/leave-me-alone",
+            last_issue_poll_at=stamp,
+        )
+        db.add(p2)
+        db.flush()
+        UNRELATED_OWNER_PID = p2.id
+
+        # Project without a github_full_name — must NOT be touched.
+        p3 = Project(
+            name="no-owner",
+            slug="no-owner",
+            local_path=str(TMP / "data" / "projects" / "no-owner"),
+            default_branch="main",
+            clone_url="",
+            github_url="",
+            github_full_name="",
+            last_issue_poll_at=stamp,
+        )
+        db.add(p3)
+        db.flush()
+        EMPTY_OWNER_PID = p3.id
+
+    # --- validation guards (no DB hit) ---
+    out, err = io.StringIO(), io.StringIO()
+    saved_stdout, saved_stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        rc = cli_mod.main(["rename-github-owner", "old-owner", "old-owner"])
+    finally:
+        sys.stdout, sys.stderr = saved_stdout, saved_stderr
+    check(
+        "rename: OLD==NEW rejected",
+        rc == 1 and "identical" in (out.getvalue() + err.getvalue()),
+        f"rc={rc} stderr={err.getvalue()[:120]!r}",
+    )
+
+    out, err = io.StringIO(), io.StringIO()
+    saved_stdout, saved_stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        rc = cli_mod.main(["rename-github-owner", "old/owner", "new-owner"])
+    finally:
+        sys.stdout, sys.stderr = saved_stdout, saved_stderr
+    check(
+        "rename: OLD with '/' rejected",
+        rc == 1 and "/" in (out.getvalue() + err.getvalue()),
+        f"rc={rc} stderr={err.getvalue()[:120]!r}",
+    )
+
+    out, err = io.StringIO(), io.StringIO()
+    saved_stdout, saved_stderr = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        rc = cli_mod.main(["rename-github-owner", "old owner", "new-owner"])
+    finally:
+        sys.stdout, sys.stderr = saved_stdout, saved_stderr
+    check(
+        "rename: OLD with whitespace rejected",
+        rc == 1 and "whitespace" in (out.getvalue() + err.getvalue()),
+        f"rc={rc} stderr={err.getvalue()[:120]!r}",
+    )
+
+    # --- dry-run does NOT mutate ---
+    out = io.StringIO()
+    saved_stdout = sys.stdout
+    sys.stdout = out
+    try:
+        rc = cli_mod.main(
+            ["rename-github-owner", "old-owner", "new-owner", "--limit", "5"]
+        )
+    finally:
+        sys.stdout = saved_stdout
+    body = out.getvalue()
+    check(
+        "rename: dry-run exits 0",
+        rc == 0,
+        f"rc={rc}",
+    )
+    check(
+        "rename: dry-run says DRY-RUN",
+        "DRY-RUN" in body,
+        body[:120],
+    )
+    check(
+        "rename: dry-run prints old full_name in preview",
+        "old-owner/rename-me" in body and "new-owner/rename-me" in body,
+        body[:240],
+    )
+    check(
+        "rename: dry-run does NOT touch unrelated owner",
+        "somebody/leave-me-alone" not in body,
+        body[:240],
+    )
+
+    with session_scope() as db:
+        p = db.get(Project, OTHER_OWNER_PID)
+        check(
+            "rename: dry-run did not rewrite github_full_name",
+            p.github_full_name == "old-owner/rename-me",
+            f"got {p.github_full_name!r}",
+        )
+        check(
+            "rename: dry-run did not rewrite clone_url",
+            p.clone_url == "https://github.com/old-owner/rename-me.git",
+            f"got {p.clone_url!r}",
+        )
+        check(
+            "rename: dry-run did not clear last_issue_poll_at",
+            _ts_eq(p.last_issue_poll_at, stamp),
+            f"got {p.last_issue_poll_at!r}",
+        )
+
+    # --- --apply commits the rewrite ---
+    out = io.StringIO()
+    saved_stdout = sys.stdout
+    sys.stdout = out
+    try:
+        rc = cli_mod.main(
+            ["rename-github-owner", "old-owner", "new-owner", "--apply"]
+        )
+    finally:
+        sys.stdout = saved_stdout
+    body = out.getvalue()
+    check("rename: --apply exits 0", rc == 0, f"rc={rc}")
+    check(
+        "rename: --apply says Apply with row counts",
+        "Apply" in body and "rewritten" in body,
+        body[:240],
+    )
+
+    with session_scope() as db:
+        p_renamed = db.get(Project, OTHER_OWNER_PID)
+        check(
+            "rename: --apply rewrote github_full_name",
+            p_renamed.github_full_name == "new-owner/rename-me",
+            f"got {p_renamed.github_full_name!r}",
+        )
+        check(
+            "rename: --apply rewrote github_url",
+            p_renamed.github_url == "https://github.com/new-owner/rename-me",
+            f"got {p_renamed.github_url!r}",
+        )
+        check(
+            "rename: --apply rewrote clone_url",
+            p_renamed.clone_url == "https://github.com/new-owner/rename-me.git",
+            f"got {p_renamed.clone_url!r}",
+        )
+        check(
+            "rename: --apply cleared last_issue_poll_at on renamed project",
+            p_renamed.last_issue_poll_at is None,
+            f"got {p_renamed.last_issue_poll_at!r}",
+        )
+
+        p_left = db.get(Project, UNRELATED_OWNER_PID)
+        check(
+            "rename: --apply did NOT touch unrelated github_full_name",
+            p_left.github_full_name == "somebody/leave-me-alone",
+            f"got {p_left.github_full_name!r}",
+        )
+        check(
+            "rename: --apply did NOT touch unrelated clone_url",
+            p_left.clone_url == "https://github.com/somebody/leave-me-alone.git",
+            f"got {p_left.clone_url!r}",
+        )
+        check(
+            "rename: --apply did NOT clear unrelated last_issue_poll_at",
+            _ts_eq(p_left.last_issue_poll_at, stamp),
+            f"got {p_left.last_issue_poll_at!r}",
+        )
+
+        p_empty = db.get(Project, EMPTY_OWNER_PID)
+        check(
+            "rename: --apply did NOT touch empty github_full_name",
+            p_empty.github_full_name == "",
+            f"got {p_empty.github_full_name!r}",
+        )
+        check(
+            "rename: --apply did NOT clear last_issue_poll_at for empty owner",
+            _ts_eq(p_empty.last_issue_poll_at, stamp),
+            f"got {p_empty.last_issue_poll_at!r}",
+        )
+
+    # --- idempotency: re-run finds 0 rows for the same OLD prefix ---
+    out = io.StringIO()
+    saved_stdout = sys.stdout
+    sys.stdout = out
+    try:
+        rc = cli_mod.main(
+            ["rename-github-owner", "old-owner", "new-owner", "--apply"]
+        )
+    finally:
+        sys.stdout = saved_stdout
+    body = out.getvalue()
+    check("rename: idempotent re-run exits 0", rc == 0, f"rc={rc}")
+    check(
+        "rename: idempotent re-run says 0 rows rewritten",
+        "0 row(s) matched (rewritten)" in body,
+        body[:240],
+    )
+
+    with session_scope() as db:
+        p_renamed = db.get(Project, OTHER_OWNER_PID)
+        check(
+            "rename: idempotent re-run did not corrupt the new owner",
+            p_renamed.github_full_name == "new-owner/rename-me",
+            f"got {p_renamed.github_full_name!r}",
+        )
+        check(
+            "rename: idempotent re-run did not touch unrelated owner",
+            db.get(Project, UNRELATED_OWNER_PID).github_full_name
+            == "somebody/leave-me-alone",
+            "unrelated changed",
+        )
+
+    # --- unknown OLD prefix is a no-op ---
+    out = io.StringIO()
+    saved_stdout = sys.stdout
+    sys.stdout = out
+    try:
+        rc = cli_mod.main(
+            ["rename-github-owner", "ghost-owner", "whoever", "--apply"]
+        )
+    finally:
+        sys.stdout = saved_stdout
+    body = out.getvalue()
+    check(
+        "rename: unknown prefix is a no-op",
+        rc == 0 and "0 row(s) matched (rewritten)" in body,
+        f"rc={rc} body={body[:240]!r}",
+    )
+
+    # --- cleanup ---
+    with session_scope() as db:
+        db.query(Project).filter(Project.id == OTHER_OWNER_PID).delete()
+        db.query(Project).filter(Project.id == UNRELATED_OWNER_PID).delete()
+        db.query(Project).filter(Project.id == EMPTY_OWNER_PID).delete()
+
+
 def test_host_lock() -> None:
     """Host-visible lock file lifecycle for one-shot + interactive runs.
 
@@ -3331,6 +3630,7 @@ def main() -> int:
         test_sync_from_github_validation()
         test_hermes_clarify_disabled()
         test_project_archive()
+        test_rename_github_owner()
         test_host_lock()
         test_heartbeat()
         test_heartbeat_assignee_filter()

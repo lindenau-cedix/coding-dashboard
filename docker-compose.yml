@@ -105,7 +105,7 @@ services:
       # Default off; set CD_HEARTBEAT_ENABLED=true to turn it on. The other
       # CD_HEARTBEAT_* knobs (interval, cooldown, agent key, labels, ...) are
       # documented in coding-dashboard.docker.env.example.
-      - CD_HEARTBEAT_ENABLED=${CD_HEARTBEAT_ENABLED:-false}
+      - CD_HEARTBEAT_ENABLED=${CD_HEARTBEAT_ENABLED:-true}
       - CD_HEARTBEAT_INTERVAL_SECONDS=${CD_HEARTBEAT_INTERVAL_SECONDS:-900}
       - CD_HEARTBEAT_MAX_CONCURRENT=${CD_HEARTBEAT_MAX_CONCURRENT:-2}
       - CD_HEARTBEAT_COOLDOWN_MINUTES=${CD_HEARTBEAT_COOLDOWN_MINUTES:-30}

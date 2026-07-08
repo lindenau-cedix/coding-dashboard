@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, TypeDecorator
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -16,6 +17,37 @@ def _uuid() -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+class UtcDateTime(TypeDecorator):
+    """``TIMESTAMP`` column that always round-trips through tz-aware UTC.
+
+    SQLite has no native tz support, so SQLAlchemy drops the tzinfo on read
+    by default. That makes naive ``datetime`` values reach the API and get
+    serialised as ISO strings without an offset — the JS frontend then
+    parses them as **local time**, producing exactly the browser-tz offset
+    bug we saw on the Heartbeat page (Europe/Berlin ⇒ −2h displayed).
+
+    This decorator forces every value to come back as a tz-aware UTC
+    datetime, so the API always emits a correct ``...Z`` suffix.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime) and value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
+
+    def process_result_value(self, value: Any, dialect: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime) and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
 
 
 class Project(Base):
@@ -38,7 +70,7 @@ class Project(Base):
     # on the user's currently-active work.
     archived: Mapped[bool] = mapped_column(Boolean, default=False)
     archived_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
 
     # Per-project heartbeat opt-out (default ON). The user can flip this off
@@ -47,12 +79,12 @@ class Project(Base):
     # Last time the heartbeat even LOOKED at this project (regardless of
     # whether it dispatched a task). UI shows "vor 12 Min".
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     # Last time the heartbeat successfully fetched open issues from GitHub.
     # Drives the ``since`` parameter on subsequent polls (incremental fetch).
     last_issue_poll_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     # Short status string for the /heartbeat UI:
     # "" (never ticked) | "success" | "skipped" | "cooldown" |
@@ -61,9 +93,9 @@ class Project(Base):
     # On error: human-readable one-liner for the UI / logs.
     last_heartbeat_error: Mapped[str] = mapped_column(Text, default="")
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, onupdate=_now
+        UtcDateTime(), default=_now, onupdate=_now
     )
 
     tasks: Mapped[list["Task"]] = relationship(
@@ -128,19 +160,19 @@ class Task(Base):
     # heartbeat-spawned task can only comment once unless the operator
     # hits "Re-comment").
     heartbeat_commented_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     # Stamp when the dashboard successfully closed the GitHub issue
     # after a clean merge. NULL until the close call succeeds.
     heartbeat_closed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, index=True
+        UtcDateTime(), default=_now, index=True
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
 
     project: Mapped["Project"] = relationship(back_populates="tasks")
 
@@ -164,7 +196,7 @@ class HeartbeatSeen(Base):
     issue_title: Mapped[str] = mapped_column(String(512), default="")
     issue_url: Mapped[str] = mapped_column(String(512), default="")
     first_seen_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now
+        UtcDateTime(), default=_now
     )
     # Which task was dispatched for this issue, if any. NULL if the issue
     # was filtered out (e.g. heartbeat was off, or labels didn't match).
@@ -181,7 +213,7 @@ class HeartbeatSeen(Base):
     # via PATCH instead of stacking a new comment).
     last_comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_commented_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
     last_comment_error: Mapped[str] = mapped_column(Text, default="")
     last_comment_url: Mapped[str] = mapped_column(String(512), default="")
@@ -189,7 +221,7 @@ class HeartbeatSeen(Base):
     # dashboard's close-on-merge behavior or manual close/reopen calls.
     last_issue_state: Mapped[str] = mapped_column(String(16), default="")
     last_issue_state_changed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime(), nullable=True
     )
 
     project: Mapped["Project"] = relationship()

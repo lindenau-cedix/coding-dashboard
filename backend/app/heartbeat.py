@@ -63,7 +63,7 @@ ASSIGNEE_EMPTY = "empty_after_resolution"    # /user returned an empty login
 
 
 # --------------------------------------------------------------------------- #
-# Issue-comment follow-up: post the commit number back onto the GitHub issue
+# Helpers
 # --------------------------------------------------------------------------- #
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -74,88 +74,6 @@ def _slugify(text: str, max_len: int = 40) -> str:
     human-readable; not a full slug library."""
     s = re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()
     return s[:max_len] or "issue"
-
-
-# Local helper: cap & normalize the dashboard base URL embedded in the
-# comment so the operator gets a working link to the task that ran. Falls
-# back to the public ``settings.frontend_dist``-relative root (a hash
-# router, so the path is enough on its own).
-def _dashboard_base_url() -> str:
-    """Best-effort absolute base URL the comment can link to.
-
-    Reads ``CD_PUBLIC_URL`` if set (``https://dashboard.example.com``),
-    otherwise returns an empty string and the caller uses a
-    dashboard-relative path like ``#/projects/<id>/tasks/<id>``. We avoid
-    guessing a hostname because getting it wrong is worse than no link.
-    """
-    s = get_settings()
-    url = getattr(s, "public_url", "") or ""
-    return url.rstrip("/")
-
-
-def _short(text: str, limit: int = 280) -> str:
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
-
-
-def format_comment_body(
-    task: Task, project: Project, issue_url: str
-) -> str:
-    """Markdown body of the auto-posted issue comment. Single source of
-    truth — used by the post-finish hook AND by the "Re-comment" route so
-    the same wording lands on both paths (and unit tests can assert it).
-
-    ``issue_url`` is the HTML URL of the issue (``html_url`` from the
-    ``heartbeat_seen`` row). It is not yet used in the body itself but is
-    stamped on the comment JSON later (for cross-referencing in
-    ``last_comment_url``).
-    """
-    number = task.heartbeat_issue_number
-    summary = _short(task.result_summary or "")
-    commit = (task.commit_hash or "").strip()
-    branch = (task.branch or "").strip() or "?"
-    repo = project.github_full_name or project.slug or "?"
-    merged = (
-        f"merged in `{task.merge_state or 'merged'}` branch `{branch}`"
-    )
-    if task.merge_state == "conflict":
-        merged = f"Konflikt — Branch `{branch}` bleibt für manuellen Merge"
-    push_label = "✓ gepusht" if task.pushed else "⚠ nicht gepusht"
-
-    base = _dashboard_base_url()
-    task_url = (
-        f"{base}/#/projects/{project.id}/tasks/{task.id}"
-        if base
-        else f"#/projects/{project.id}/tasks/{task.id}"
-    )
-    commit_url = (
-        f"https://github.com/{repo}/commit/{commit}" if commit else ""
-    )
-
-    lines = [
-        f"🤖 [coding-dashboard] Heartbeat-Fix für Issue #{number} im Repo `{repo}`:",
-        "",
-        f"**Task:** <{task_url}>",
-        f"**Ergebnis:** {_short(task.result_summary, 600) or '–'}",
-        f"**Branch:** `{branch}` ({push_label}, {merged})",
-    ]
-    if commit_url:
-        lines.append(f"**Commit:** <{commit_url}>")
-    lines += [
-        "",
-        "Bitte den Branch / PR reviewen und das Issue manuell schließen,"
-        " falls die Untersuchung nicht passt. Der Dashboard-Heartbeat"
-        " meldet sich nicht nochmal zu diesem Issue.",
-    ]
-    return "\n".join(lines)
-
-
-def should_close_on_merge(task: Task) -> bool:
-    """Close-on-merge predicate: True only when the commit actually landed
-    on the default branch (no point closing on a conflict)."""
-    return bool(task.pushed) and (task.merge_state or "") == "merged"
 
 
 # --------------------------------------------------------------------------- #
@@ -681,6 +599,82 @@ class HeartbeatRunner:
         # Fire-and-forget submit; the task runs in the background.
         manager.submit(task.id, project.id)
         return task.id
+
+
+# --------------------------------------------------------------------------- #
+# Comment helpers (used by HeartbeatFollowup + the /comment-again route)
+# --------------------------------------------------------------------------- #
+def _dashboard_base_url() -> str:
+    """Best-effort absolute base URL the comment can link to.
+
+    Reads ``CD_PUBLIC_URL`` if set (``https://dashboard.example.com``),
+    otherwise returns an empty string and the caller uses a
+    dashboard-relative path like ``#/projects/<id>/tasks/<id>``. We avoid
+    guessing a hostname because getting it wrong is worse than no link.
+    """
+    s = get_settings()
+    url = getattr(s, "public_url", "") or ""
+    return url.rstrip("/")
+
+
+def _short(text: str, limit: int = 280) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def format_comment_body(
+    task: Task, project: Project, issue_url: str
+) -> str:
+    """Markdown body of the auto-posted issue comment. Single source of
+    truth - used by the post-finish hook AND by the "Re-comment" route so
+    the same wording lands on both paths (and unit tests can assert it).
+    """
+    number = task.heartbeat_issue_number
+    summary = _short(task.result_summary or "")
+    commit = (task.commit_hash or "").strip()
+    branch = (task.branch or "").strip() or "?"
+    repo = project.github_full_name or project.slug or "?"
+    merged = (
+        f"merged in `{task.merge_state or 'merged'}` branch `{branch}`"
+    )
+    if task.merge_state == "conflict":
+        merged = f"Konflikt — Branch `{branch}` bleibt für manuellen Merge"
+    push_label = "✓ gepusht" if task.pushed else "⚠ nicht gepusht"
+
+    base = _dashboard_base_url()
+    task_url = (
+        f"{base}/#/projects/{project.id}/tasks/{task.id}"
+        if base
+        else f"#/projects/{project.id}/tasks/{task.id}"
+    )
+    commit_url = (
+        f"https://github.com/{repo}/commit/{commit}" if commit else ""
+    )
+
+    lines = [
+        f"🤖 [coding-dashboard] Heartbeat-Fix für Issue #{number} im Repo `{repo}`:",
+        "",
+        f"**Task:** <{task_url}>",
+        f"**Ergebnis:** {_short(task.result_summary, 600) or '–'}",
+        f"**Branch:** `{branch}` ({push_label}, {merged})",
+    ]
+    if commit_url:
+        lines.append(f"**Commit:** <{commit_url}>")
+    lines += [
+        "",
+        "Bitte den Branch / PR reviewen und das Issue manuell schließen,"
+        " falls die Untersuchung nicht passt. Der Dashboard-Heartbeat"
+        " meldet sich nicht nochmal zu diesem Issue.",
+    ]
+    return "\n".join(lines)
+
+
+def should_close_on_merge(task: Task) -> bool:
+    """Close-on-merge predicate: True only when the commit actually landed
+    on the default branch (no point closing on a conflict)."""
+    return bool(task.pushed) and (task.merge_state or "") == "merged"
 
 
 # --------------------------------------------------------------------------- #
