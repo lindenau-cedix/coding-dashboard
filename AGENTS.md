@@ -4,6 +4,55 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-07-08 - claude (heartbeat prompt: forbid self-commit, leave dirty tree)
+
+**Task:** Heartbeat-spawned Claude Code runs kept landing an empty auto-commit
+and a no-op push because the agent did `git add` + `git commit` itself;
+`_git_step.has_changes()` then returned False, the dashboard printed
+"[git] keine Aenderungen zu committen", and the merge-step + push ran
+against an already-committed branch (resulting in "everything up-to-date"
+and a silently missing PR comment-back).
+
+**Result:** Rewrote `DEFAULT_HEARTBEAT_PROMPT_TEMPLATE` so the agent is
+**strictly forbidden** from running `git add`, `git commit`, `git push`,
+`git checkout -b`/`git switch -c`/`git branch <name>`, `gh pr create`,
+`hub pull-request`, etc. The agent's only job is to edit files and leave
+the working tree DIRTY so `has_changes()` is True when the dashboard's
+auto-commit runs. The prompt also documents the failure mode ("Dashboard
+denkt 'nichts zu committen', ueberspringt den Auto-Commit, pusht leere Diffs")
+so the next agent knows why this rule exists, and instructs the agent to
+`git reset --soft HEAD~1` if it accidentally committed. The dashboard
+still owns the branch name (`heartbeat/fix-{number}-<slug>`), the commit
+message, the push, the PR, the issue comment-back, and the close-on-merge.
+
+**What changed:**
+
+- `backend/app/config.py` — `DEFAULT_HEARTBEAT_PROMPT_TEMPLATE` replaced
+  (override via `CD_HEARTBEAT_PROMPT_TEMPLATE` env if a deployer wants a
+  different workflow). The "So gehst du vor" section is now steps 1-3
+  (read / reproduce / implement) + step 4 (verify locally) + step 5
+  (status report); a new "WICHTIG -- was du NICHT tun darfst" block
+  enumerates every forbidden command with a one-line reason, including
+  the empty-push failure mode. The old step-4 "Committe auf einem
+  Branch" / step-5 "Pushe und oeffne PR" / "KEIN manueller Commit oder
+  Push" triple is gone (the contradiction is what drove the bug).
+- `backend/tests/smoke.py` — `test_heartbeat` extended with 9 new
+  content guards on `DEFAULT_HEARTBEAT_PROMPT_TEMPLATE`: the prompt
+  must NOT contain the old "Committe auf einem Branch" /
+  "Pushe den Branch" / "oeffne einen PR" instructions, and MUST
+  explicitly mention `` `git add` ``, `` `git commit` ``, `` `git push` ``,
+  `` `gh pr create` ``, "UNTER KEINEN UMSTAENDEN", and
+  `` `git status` ``. Locks in the new semantics so a future prompt
+  edit can't silently reintroduce the contradiction.
+
+**Verified:** `python -m tests.smoke` → all heartbeat-related
+checks pass (incl. the 9 new content guards); the only failures are
+the 2 pre-existing CORS tests, also failing on `main`, unrelated.
+Effective after `update.sh` / `systemctl restart coding-dashboard`
+(or next container start for Docker). No backend pipeline changes —
+`_git_step` / `_finalize_isolated` / `_finalize_staging` already did
+the right thing; the prompt was the broken link.
+
 ### 2026-07-08 - claude (heartbeat: restrict auto-fixes to assigned issues)
 
 **Task:** The heartbeat auto-dispatched a task for every open issue, even

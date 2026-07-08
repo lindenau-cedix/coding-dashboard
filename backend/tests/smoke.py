@@ -2404,6 +2404,42 @@ def test_heartbeat() -> None:
         "bug" in prompt and "P1" in prompt,
     )
 
+    # ---- 4b. prompt forbids the agent from self-committing/pushing/PRing -- #
+    # Regression for "the heartbeat-spawned agent commits itself, then the
+    # dashboard's `_git_step` sees a clean working tree, skips auto-commit,
+    # and pushes nothing". The prompt must explicitly forbid `git commit`,
+    # `git push`, `git add` self-initiated by the agent, plus `gh pr create`
+    # / `hub pull-request`, and must instruct the agent to leave the working
+    # tree dirty so the dashboard's auto-commit + push runs.
+    template = DEFAULT_HEARTBEAT_PROMPT_TEMPLATE
+    forbidden_substrings = [
+        # The exact patterns the old prompt asked the agent to do.
+        "Committe auf einem Branch",
+        "Pushe den Branch",
+        "oeffne einen PR",
+    ]
+    for snippet in forbidden_substrings:
+        check(
+            f"heartbeat: prompt no longer instructs agent to '{snippet}'",
+            snippet not in template,
+        )
+
+    # The new prompt MUST explicitly forbid the destructive commands the
+    # agent used to run before the dashboard's auto-commit skipped.
+    must_contain = [
+        "`git add`",
+        "`git commit`",
+        "`git push`",
+        "`gh pr create`",
+        "UNTER KEINEN UMSTAENDEN",
+        "`git status`",  # the dashboard relies on dirty tree
+    ]
+    for snippet in must_contain:
+        check(
+            f"heartbeat: prompt explicitly forbids / requires '{snippet}'",
+            snippet in template,
+        )
+
     # -------- 5. PRs are filtered out (consumer-side check) -------------- #
     real_issues_payload = [
         sample_issue,
