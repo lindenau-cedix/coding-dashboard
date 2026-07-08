@@ -62,24 +62,60 @@ So gehst du vor:
    moeglich: schreibe zuerst einen Test, der fehlschlaegt.
 3. Implementiere den Fix. Halte dich an die existierenden Patterns und
    Conventions im Repo.
-4. Committe auf einem Branch `heartbeat/fix-{number}-<slug>`. Schreibe
-   den Commit **nicht** selbst -- das macht das Dashboard automatisch.
-5. Pushe den Branch und oeffne einen PR mit dem Titel
-   `Fix #{number}: {title}`. Beschreibe im PR-Body den Root Cause und
-   wie der Fix ihn adressiert.
-6. Schreibe am Ende einen kurzen Status (max 200 Woerter) mit: was du
-   gefunden hast, was du geaendert hast, ob ein PR geoeffnet wurde, und
-   ob Tests gruen sind.
 
-Wichtig:
+WICHTIG -- was du NICHT tun darfst:
+
+Du bist NUR fuer den Code zustaendig. Das Dashboard macht am Ende JEDEN
+Commit, Push, PR und Merge SELBST. Fuehre deshalb folgende Befehle
+UNTER KEINEN UMSTAENDEN selbst aus, auch nicht als Teil einer
+"Convenience"-Operation:
+
+- `git add` (egal mit welchen Pfaden / `-A`) -- das Dashboard staeted
+  selbst.
+- `git commit` (egal mit welcher Message / `-m` / `-a`) -- das
+  Dashboard macht den Commit mit einer eigenen Message aus deiner
+  Zusammenfassung.
+- `git push` (egal welcher Branch / Remote) -- das Dashboard pusht auf
+  den richtigen Branch.
+- `git checkout -b`, `git switch -c`, `git branch <name>` -- das
+  Dashboard legt den Branch `heartbeat/fix-{number}-<slug>` fuer dich
+  an. Wechsle NICHT selbst auf einen anderen Branch; das Dashboard
+  startet dich bereits auf einer frischen Worktree.
+- `gh pr create`, `gh repo view`, `gh issue *`, `hub pull-request`
+  oder jeder andere Aufruf von GitHub-CLIs -- das Dashboard oeffnet
+  den PR selbst und postet die Commit-URL als Kommentar auf den Issue.
+- Jedes andere VCS-Tool (`jj`, `svn`, ...) -- nicht verwendet.
+
+Wenn du commit/push selbst machst, sieht das Dashboard hinterher eine
+**saubere** Working Tree, denkt "nichts zu committen", ueberspringt den
+Auto-Commit und pushed dann leere Diffs. Der Fix verschwindet und es
+oeffnet sich kein PR. Das ist der haeufigste Fehler in dieser
+Pipeline -- lass es bleiben.
+
+Konkrekt: AENDERE NUR DATEIEN. Wenn du fertig bist, soll `git status`
+uncommitted Aenderungen zeigen (das ist erwünscht -- das Dashboard
+uebernimmt sie). Wenn du aus Versehen doch einen `git commit` gemacht
+hast, mach `git reset --soft HEAD~1` (oder loesche den letzten Commit
+gleichwertig), damit die Aenderungen wieder uncommitted im Index
+liegen, BEVOR du zurueckmeldest.
+
+4. Verifiziere deine Aenderung lokal (Lint, Tests, was das Repo
+   bietet).
+5. Schreibe am Ende einen kurzen Status (max 200 Woerter) mit: was du
+   gefunden hast, welche Dateien du geaendert hast, ob Tests gruen
+   sind, und ob du den Fix bewusst NICHT committest/pusht/PR-stellst
+   (immer -- das macht das Dashboard).
+
+Sonstiges:
 
 - KEINE Rueckfragen an den User -- das Dashboard hat keine UI fuer
   Rueckfragen.
-- KEINE destruktiven Operationen (force-push, rm -rf, drop tables).
-- KEIN manueller Commit oder Push -- das macht das Dashboard.
+- KEINE destruktiven Operationen (force-push, rm -rf, drop tables,
+  Branch-Loeschungen).
+- KEIN eigenstaendiges Branch- oder Worktree-Management.
 - Wenn der Issue unklar ist oder nicht reproduzierbar: dokumentiere das
-  im Status und oeffne trotzdem einen PR mit einem 'investigation notes'
-  Body.
+  im Status; das Dashboard oeffnet den PR dann mit einem
+  'investigation notes' Body und schliesst den Issue nicht.
 """
 
 
