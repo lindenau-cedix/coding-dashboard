@@ -245,6 +245,12 @@ class HeartbeatStatus(BaseModel):
     interval_seconds: int
     agent_key: str
     cooldown_minutes: int
+    # Resolved GitHub logins the heartbeat will dispatch on, sourced from
+    # ``CD_HEARTBEAT_ASSIGNEE_LOGINS`` (CSV) or auto-resolved from the
+    # ``CD_GITHUB_TOKEN`` at tick time. Surfaced here so the operator can
+    # see the live allowlist — and notice when it's empty (in which case
+    # every tick short-circuits to ``no_assignee``).
+    assignee_logins: list[str] = []
     last_tick_at: Optional[datetime] = None
     last_tick_summary: Optional[str] = None
     projects: list[HeartbeatProjectStatus] = []
