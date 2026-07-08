@@ -407,7 +407,6 @@ function heartbeatStatusColor(status: string): string {
  *  list once and then drop a single /tasks call per active project for
  *  the finished heartbeat-spawned tasks (the per-project call returns a
  *  flat list ordered by created_at desc).
- *
  *  For a future iteration this should become a dedicated
  *  ``GET /api/heartbeat/recent-tasks`` endpoint.
  */

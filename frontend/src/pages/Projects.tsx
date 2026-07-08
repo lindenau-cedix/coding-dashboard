@@ -4,7 +4,7 @@ import { api } from "../api";
 import NewProjectModal from "../components/NewProjectModal";
 import RunningAgents from "../components/RunningAgents";
 import SyncFromGithubModal from "../components/SyncFromGithubModal";
-import { Button, ErrorText, Spinner, formatDate } from "../components/ui";
+import { Button, ErrorText, Spinner, formatDate, parseApiDate } from "../components/ui";
 import type { Project } from "../types";
 
 type ArchiveFilter = "active" | "archived";
@@ -285,7 +285,7 @@ function HeartbeatChip({ p }: { p: Project }) {
         ? "bg-emerald-500/15 text-emerald-300"
         : "bg-cyan-500/15 text-cyan-300";
   const lastTick = p.last_heartbeat_at
-    ? relativeTime(new Date(p.last_heartbeat_at))
+    ? relativeTime(parseApiDate(p.last_heartbeat_at))
     : "noch nie";
   return (
     <span
