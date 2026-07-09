@@ -4,6 +4,56 @@ Shared context for Codex / Claude Code / Hermes and contributors. Keep this file
 
 ## Latest Run
 
+### 2026-07-09 - claude (heartbeat: manual trigger bypasses cooldown)
+
+**Task:** `POST /api/heartbeat/trigger` (the dashboard's "▶ Run now" button)
+was silently no-op'ing after a recent successful heartbeat task: the
+per-project success cooldown kicked in even though the operator had
+explicitly asked for a tick. The cooldown exists to throttle the BACKGROUND
+loop's re-dispatches, not the operator's manual clicks — operators
+expecting "Run now" to actually do work.
+
+**Result:** Threaded a `bypass_cooldown: bool` flag through
+`HeartbeatRunner.tick_now` → `_tick` → `_process_project`. Default is
+`False` so the background `_loop()` keeps the cooldown in effect;
+`routers/heartbeat.trigger_heartbeat` passes `True`. When bypassed,
+`_process_project` skips the cooldown gate and does NOT stamp
+`last_heartbeat_status="cooldown"` (that marker means "skipped", which
+is the wrong story after a forced tick). Both the per-project result
+dict and the tick-level summary gain a `cooldown_bypassed` flag so the
+UI can render "ran despite cooldown" feedback. The log line now reads
+`… assignees=N, bypass_cooldown=True|False)`. Covered by 11 new
+`hb-bypass` smoke checks (default tick still skips when cooldown is
+active; bypass tick dispatches; HTTP `/trigger` surfaces
+`cooldown_bypassed=True`). All 11 pass alongside the existing
+heartbeat / assignee / comment-back / project-archive smoke checks;
+the only failures are the 2 pre-existing CORS failures (also failing
+on `main`, unrelated).
+
+**What changed:**
+
+- `backend/app/heartbeat.py` — `tick_now(*, bypass_cooldown=False)` →
+  `_tick(bypass_cooldown=...)` → `_process_project(..., *, bypass_cooldown=...)`.
+  The cooldown branch (`if not bypass_cooldown and self._in_cooldown(...)`)
+  is gated on the flag; the success-status setter and the per-project
+  result dict both surface the new `cooldown_bypassed` field. The
+  `_loop()` call site is untouched (background loop keeps the cooldown
+  enforced).
+- `backend/app/routers/heartbeat.py` — `POST /api/heartbeat/trigger`
+  now passes `bypass_cooldown=True` so the operator click forces a
+  fresh attempt; the docstring notes the design rationale.
+- `backend/tests/smoke.py` — new "11b" section in `test_heartbeat`:
+  11 checks verifying the default-vs-bypass contract end-to-end through
+  `tick_now(...)` and the HTTP `/trigger` route (stubbed `list_issues`
+  + assignee resolver so the test stays hermetic).
+
+**Verified:** `python tests/smoke.py` → all 11 `hb-bypass` checks PASS;
+all pre-existing heartbeat / assignee / comment-back / project-archive
+checks PASS; only the 2 pre-existing CORS failures remain (also failing
+on `main`, unrelated). Effective after `update.sh` /
+`systemctl restart coding-dashboard` (or next container start for
+Docker). No DB migration; no new pip deps.
+
 ### 2026-07-08 - claude (heartbeat prompt: forbid self-commit, leave dirty tree)
 
 **Task:** Heartbeat-spawned Claude Code runs kept landing an empty auto-commit

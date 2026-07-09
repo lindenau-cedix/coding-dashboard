@@ -180,15 +180,23 @@ class HeartbeatRunner:
     # ------------------------------------------------------------------ #
     # Tick (synchronous trigger + background loop)
     # ------------------------------------------------------------------ #
-    async def tick_now(self) -> dict[str, Any]:
+    async def tick_now(self, *, bypass_cooldown: bool = False) -> dict[str, Any]:
         """Run one heartbeat tick. Returns a small summary dict so the
         HTTP trigger endpoint and the background loop share the same
-        logic and report shape."""
+        logic and report shape.
+
+        ``bypass_cooldown=True`` skips the per-project success cooldown
+        for THIS tick — used by the operator-triggered
+        ``POST /api/heartbeat/trigger`` endpoint so the dashboard's
+        "▶ Run now" button actually does work even after a recent
+        successful auto-fix. The background loop passes the default
+        ``False`` so the cooldown keeps throttling automatic re-runs.
+        """
         if self._tick_lock.locked():
             # Re-entry guard: a tick is already in flight. Return a hint.
             return {"status": "already_running"}
         async with self._tick_lock:
-            return await self._tick()
+            return await self._tick(bypass_cooldown=bypass_cooldown)
 
     async def _loop(self) -> None:
         """The background loop. Sleeps between ticks; honors CancelledError."""
@@ -213,7 +221,7 @@ class HeartbeatRunner:
             log.info("heartbeat: loop cancelled")
             raise
 
-    async def _tick(self) -> dict[str, Any]:
+    async def _tick(self, *, bypass_cooldown: bool = False) -> dict[str, Any]:
         settings = get_settings()
         agents = get_agents_config()
         agent_key = settings.heartbeat_agent_key
@@ -247,7 +255,11 @@ class HeartbeatRunner:
         # List active projects in a thread (sync DB).
         projects = await asyncio.to_thread(self._list_active_projects)
         if not projects:
-            return {"status": "no_projects", "dispatched": 0}
+            return {
+                "status": "no_projects",
+                "dispatched": 0,
+                "cooldown_bypassed": bypass_cooldown,
+            }
 
         # Fan out _process_project with a per-tick semaphore.
         if self._project_semaphore is None:
@@ -256,7 +268,10 @@ class HeartbeatRunner:
         async def _one(p_id: str) -> dict[str, Any]:
             assert self._project_semaphore is not None
             async with self._project_semaphore:
-                return await self._process_project(p_id, agent_key, assignee_logins)
+                return await self._process_project(
+                    p_id, agent_key, assignee_logins,
+                    bypass_cooldown=bypass_cooldown,
+                )
 
         results = await asyncio.gather(
             *[_one(p.id) for p in projects], return_exceptions=True
@@ -270,12 +285,19 @@ class HeartbeatRunner:
                 log.warning("heartbeat: project tick raised: %s", r)
 
         log.info(
-            "heartbeat: tick finished (projects=%d, dispatched=%d, assignees=%d)",
+            "heartbeat: tick finished (projects=%d, dispatched=%d, assignees=%d,"
+            " bypass_cooldown=%s)",
             len(projects),
             dispatched,
             len(assignee_logins),
+            bypass_cooldown,
         )
-        return {"status": "ok", "projects": len(projects), "dispatched": dispatched}
+        return {
+            "status": "ok",
+            "projects": len(projects),
+            "dispatched": dispatched,
+            "cooldown_bypassed": bypass_cooldown,
+        }
 
     # ------------------------------------------------------------------ #
     # DB helpers (sync; called via to_thread)
@@ -419,9 +441,15 @@ class HeartbeatRunner:
         project_id: str,
         agent_key: str,
         assignee_logins: tuple[str, ...],
+        *,
+        bypass_cooldown: bool = False,
     ) -> dict[str, Any]:
         settings = get_settings()
-        result: dict[str, Any] = {"project_id": project_id, "dispatched": 0}
+        result: dict[str, Any] = {
+            "project_id": project_id,
+            "dispatched": 0,
+            "cooldown_bypassed": bool(bypass_cooldown),
+        }
 
         # Re-load the project (cheap, sync via to_thread).
         def _load() -> Project | None:
@@ -443,8 +471,13 @@ class HeartbeatRunner:
             )
             return result
 
-        # Cooldown check (success-only).
-        if await asyncio.to_thread(
+        # Cooldown check (success-only). ``bypass_cooldown`` is set when
+        # the operator hit the dashboard's "▶ Run now" button — they
+        # explicitly want a fresh attempt, so we skip the cooldown gate
+        # but DON'T stamp ``last_heartbeat_status="cooldown"`` on the
+        # project (that's the skip marker; bypassed ticks proceed to the
+        # poll + dispatch path below).
+        if not bypass_cooldown and await asyncio.to_thread(
             self._in_cooldown, project_id, settings.heartbeat_cooldown_minutes
         ):
             await asyncio.to_thread(

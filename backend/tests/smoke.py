@@ -2731,6 +2731,178 @@ def test_heartbeat() -> None:
             runner._resolve_assignee_logins = original_resolve
             client.post("/api/heartbeat/disable", headers=H)
 
+    # -------- 11b. manual trigger bypasses per-project cooldown --------- #
+    # The dashboard's "▶ Run now" button hits POST /api/heartbeat/trigger.
+    # Operators expect a click on it to actually do work, even if a recent
+    # successful heartbeat task is currently in the cooldown window — the
+    # cooldown exists to throttle the BACKGROUND loop's re-dispatches, not
+    # the operator's explicit clicks. This section verifies the bypass:
+    #
+    #   1. Direct ``tick_now(bypass_cooldown=False)`` on a project with a
+    #      fresh success in the window returns ``dispatched=0`` (cooldown
+    #      gate still enforced for automatic ticks).
+    #   2. Direct ``tick_now(bypass_cooldown=True)`` on the same project
+    #      proceeds past the gate and dispatches a heartbeat-spawned task.
+    #   3. The HTTP trigger endpoint reports ``cooldown_bypassed=True`` in
+    #      the summary dict so the UI can render "ran despite cooldown".
+    with TestClient(app) as client:
+        ok = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+        )
+        H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+        # Reset the heartbeat_seen ledger + spawn one "cooldown" success
+        # task so the in-window cooldown is active for ``active_id``.
+        with session_scope() as db:
+            db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
+            db.query(Task).filter(Task.project_id == active_id).delete()
+            db.add(
+                Task(
+                    project_id=active_id,
+                    agent="claude",
+                    prompt="Previous successful auto-fix",
+                    mode="task",
+                    status="success",
+                    heartbeat_spawned=True,
+                    heartbeat_issue_number=9000,
+                    finished_at=datetime.now(timezone.utc),
+                )
+            )
+            db.commit()
+
+        async def fake_list_issues_bypass(
+            full_name, *, state="open", labels=None, since=None,
+            assignee=None, per_page=50, max_pages=5,
+        ):
+            return [
+                {
+                    "number": 8888,
+                    "title": "Bypass-cooldown issue",
+                    "user": {"login": "bob"},
+                    "assignees": [{"login": "bob"}],
+                    "labels": [],
+                    "created_at": "2026-07-05T00:00:00Z",
+                    "body": "Body of bypass-cooldown issue",
+                    "html_url": f"https://github.com/{full_name}/issues/8888",
+                }
+            ]
+
+        original_list_issues = github_client.list_issues
+        original_resolve = runner._resolve_assignee_logins
+        github_client.list_issues = fake_list_issues_bypass
+        hb_mod.github_client.list_issues = fake_list_issues_bypass
+
+        async def _fake_resolve_bob():
+            return (("bob",), hb_mod.ASSIGNEE_RESOLVED)
+        runner._resolve_assignee_logins = _fake_resolve_bob
+        try:
+            # (1) tick_now(bypass_cooldown=False) must still skip the
+            # project — the cooldown is in effect, no new tasks should be
+            # created for issue 8888.
+            with session_scope() as db:
+                db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
+                db.commit()
+            summary_default = asyncio.run(runner.tick_now(bypass_cooldown=False))
+            check(
+                "hb-bypass: tick_now(bypass_cooldown=False) returns ok",
+                summary_default.get("status") == "ok",
+                repr(summary_default),
+            )
+            check(
+                "hb-bypass: tick summary reports cooldown_bypassed=False",
+                summary_default.get("cooldown_bypassed") is False,
+                repr(summary_default),
+            )
+            with session_scope() as db:
+                n_default = (
+                    db.query(Task)
+                    .filter(Task.project_id == active_id)
+                    .filter(Task.heartbeat_spawned.is_(True))
+                    .filter(Task.heartbeat_issue_number == 8888)
+                    .count()
+                )
+                p_after_default = db.get(Project, active_id)
+            check(
+                "hb-bypass: bypass_cooldown=False dispatches 0 tasks (cooldown wins)",
+                n_default == 0,
+                f"got {n_default}",
+            )
+            check(
+                "hb-bypass: project last_heartbeat_status='cooldown' after default tick",
+                p_after_default is not None
+                and p_after_default.last_heartbeat_status == "cooldown",
+                getattr(p_after_default, "last_heartbeat_status", "<missing>"),
+            )
+
+            # (2) tick_now(bypass_cooldown=True) must proceed past the
+            # cooldown gate and dispatch the heartbeat-spawned task.
+            with session_scope() as db:
+                db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
+                db.commit()
+            summary_bypass = asyncio.run(runner.tick_now(bypass_cooldown=True))
+            check(
+                "hb-bypass: tick_now(bypass_cooldown=True) returns ok",
+                summary_bypass.get("status") == "ok",
+                repr(summary_bypass),
+            )
+            check(
+                "hb-bypass: tick summary reports cooldown_bypassed=True",
+                summary_bypass.get("cooldown_bypassed") is True,
+                repr(summary_bypass),
+            )
+            deadline = time.time() + 10.0
+            dispatched = False
+            while time.time() < deadline:
+                with session_scope() as db:
+                    n = (
+                        db.query(Task)
+                        .filter(Task.project_id == active_id)
+                        .filter(Task.heartbeat_spawned.is_(True))
+                        .filter(Task.heartbeat_issue_number == 8888)
+                        .count()
+                    )
+                if n >= 1:
+                    dispatched = True
+                    break
+                time.sleep(0.2)
+            check(
+                "hb-bypass: bypass_cooldown=True dispatches a task for issue #8888",
+                dispatched,
+            )
+            with session_scope() as db:
+                p_after_bypass = db.get(Project, active_id)
+            check(
+                "hb-bypass: project last_heartbeat_status NOT 'cooldown' after bypass",
+                p_after_bypass is not None
+                and p_after_bypass.last_heartbeat_status != "cooldown",
+                getattr(p_after_bypass, "last_heartbeat_status", "<missing>"),
+            )
+
+            # (3) HTTP /trigger endpoint also bypasses cooldown and
+            # surfaces the flag in the summary.
+            with session_scope() as db:
+                db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
+                db.commit()
+            tr = client.post("/api/heartbeat/trigger", headers=H)
+            check(
+                "hb-bypass: POST /trigger 200", tr.status_code == 200, str(tr.status_code)
+            )
+            trigger_summary = (tr.json() or {}).get("summary") or {}
+            check(
+                "hb-bypass: /trigger summary reports cooldown_bypassed=True",
+                trigger_summary.get("cooldown_bypassed") is True,
+                repr(trigger_summary),
+            )
+            check(
+                "hb-bypass: /trigger summary status ok",
+                trigger_summary.get("status") == "ok",
+                repr(trigger_summary),
+            )
+        finally:
+            github_client.list_issues = original_list_issues
+            hb_mod.github_client.list_issues = original_list_issues
+            runner._resolve_assignee_logins = original_resolve
+
     # -------- 12. cleanup ----------------------------------------------- #
     with session_scope() as db:
         db.query(HeartbeatSeen).filter(HeartbeatSeen.project_id == active_id).delete()
