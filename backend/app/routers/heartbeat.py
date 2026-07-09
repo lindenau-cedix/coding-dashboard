@@ -122,8 +122,16 @@ async def trigger_heartbeat(
     a 'done' signal (the tick takes a few seconds at most — projects are
     polled in parallel under a semaphore; an in-flight tick is rejected
     via the in-process ``_tick_lock`` so this endpoint is safe to call
-    repeatedly)."""
-    summary = await heartbeat.tick_now()
+    repeatedly).
+
+    The manual trigger intentionally bypasses the per-project success
+    cooldown (``bypass_cooldown=True``) so the operator's "▶ Run now"
+    button actually does work after a recent successful auto-fix instead
+    of silently no-op'ing on every project. The background loop still
+    passes the default (cooldown enforced), so automatic re-dispatches
+    remain throttled.
+    """
+    summary = await heartbeat.tick_now(bypass_cooldown=True)
     return {"triggered": True, "summary": summary}
 
 
