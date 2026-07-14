@@ -224,6 +224,14 @@ class Settings(BaseSettings):
     # empty ``login``) the tick short-circuits to ``no_assignee`` rather
     # than falling back to "every open issue".
     heartbeat_assignee_logins: str = ""
+    # ``CD_HEARTBEAT_ENV_PROFILE_KEY``: default env-profile for all
+    # auto-spawned tasks. Empty (default) = today's behaviour: no env
+    # injection for heartbeat-spawned runs (standard Anthropic auth +
+    # endpoint the agent CLI defaults to). Settable per-project on the
+    # /heartbeat page; the per-project override beats this global
+    # default. Resolved at dispatch time (NOT persisted on
+    # ``HeartbeatSeen``) so rotating the value applies to the next tick.
+    heartbeat_env_profile_key: str = ""
     # ``CD_HEARTBEAT_COMMENT_ON_SUCCESS`` (default ``True``): when a
     # heartbeat-spawned task lands a commit, post a comment on the GitHub
     # issue with the commit hash + a short summary. Comments are idempotent

@@ -106,6 +106,22 @@ export default function RunningAgents() {
               <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${modeChipClass(t)}`}>
                 {modeLabel(t)}
               </span>
+              {t.runner === "host" && (
+                <span
+                  className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
+                  title="Auf dem Host per SSH ausgefuehrt"
+                >
+                  🖥 host
+                </span>
+              )}
+              {t.env_profile_key && (
+                <span
+                  className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300"
+                  title={`Env-Profil: ${t.env_profile_key}`}
+                >
+                  🔑 {t.env_profile_key}
+                </span>
+              )}
               <span className="text-sm text-cyan-400">{t.project_name || t.project_slug}</span>
               <span className="min-w-0 flex-1 truncate text-sm text-slate-400">
                 {t.prompt || (t.is_session ? "interaktive Session" : "")}

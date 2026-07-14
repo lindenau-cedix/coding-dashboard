@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
 import { Button, ErrorText, Spinner, formatDate } from "../components/ui";
 import type {
+  EnvProfile,
   HeartbeatIssueSeen,
   HeartbeatProjectStatus,
   HeartbeatStatus,
@@ -16,6 +17,12 @@ import type {
 export default function Heartbeat() {
   const [status, setStatus] = useState<HeartbeatStatus | null>(null);
   const [recent, setRecent] = useState<Task[]>([]);
+  // Per-task env-profile options for the heartbeat table's per-project
+  // select (so the operator can pick "zai" for project A and "default"
+  // for project B independently). Defaults to an empty list when the
+  // /api/env-profiles endpoint fails — the per-row select stays disabled
+  // in that case.
+  const [profiles, setProfiles] = useState<EnvProfile[]>([]);
   // Per-(project,issue) dashboard comment + close state, keyed so the
   // recent-tasks list can show "💬 vor 12 Min" / "✓ geschlossen"
   // without a second fetch per row.
@@ -30,12 +37,14 @@ export default function Heartbeat() {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([
+      const [s, r, profs] = await Promise.all([
         api.getHeartbeat(),
         fetchRecentHeartbeatTasks(),
+        api.listEnvProfiles().catch(() => [] as EnvProfile[]),
       ]);
       setStatus(s);
       setRecent(r);
+      setProfiles(profs);
       setError(null);
       // Walk the active projects' heartbeat_seen ledger so the UI can
       // show comment + close badges next to each recent task without a
@@ -114,6 +123,18 @@ export default function Heartbeat() {
     }
   }
 
+  async function setProjectEnvProfile(projectId: string, key: string) {
+    setBusy(true);
+    try {
+      await api.setProjectHeartbeatEnvProfile(projectId, key);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function triggerNow() {
     setBusy(true);
     try {
@@ -157,6 +178,14 @@ export default function Heartbeat() {
       <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
+            {status.env_profile_key && (
+              <span
+                className="rounded bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300"
+                title={`Set via CD_HEARTBEAT_ENV_PROFILE_KEY; per-project override beats this`}
+              >
+                🔑 Globales Profil: {status.env_profile_key}
+              </span>
+            )}
             <span
               className={`inline-flex h-3 w-3 rounded-full ${
                 status.enabled
@@ -242,6 +271,7 @@ export default function Heartbeat() {
                   <th className="px-4 py-2.5">Letzter Tick</th>
                   <th className="px-4 py-2.5">Status</th>
                   <th className="px-4 py-2.5">Offen</th>
+                  <th className="px-4 py-2.5">Env-Profil</th>
                   <th className="px-4 py-2.5 text-right">Aktion</th>
                 </tr>
               </thead>
@@ -251,7 +281,9 @@ export default function Heartbeat() {
                     key={p.id}
                     p={p}
                     busy={busy}
+                    profiles={profiles}
                     onToggle={(enabled) => flipProject(p.id, enabled)}
+                    onSetEnvProfile={(key) => setProjectEnvProfile(p.id, key)}
                   />
                 ))}
               </tbody>
@@ -304,11 +336,15 @@ export default function Heartbeat() {
 function ProjectRow({
   p,
   busy,
+  profiles,
   onToggle,
+  onSetEnvProfile,
 }: {
   p: HeartbeatProjectStatus;
   busy: boolean;
+  profiles: EnvProfile[];
   onToggle: (enabled: boolean) => void;
+  onSetEnvProfile: (key: string) => void;
 }) {
   const statusLabel = heartbeatStatusLabel(p);
   const statusColor = heartbeatStatusColor(p.last_heartbeat_status);
@@ -351,6 +387,26 @@ function ProjectRow({
         ) : (
           <span className="text-slate-600">–</span>
         )}
+      </td>
+      <td className="px-4 py-3 text-xs">
+        <select
+          value={p.heartbeat_env_profile_key}
+          onChange={(e) => onSetEnvProfile(e.target.value)}
+          disabled={busy || profiles.length === 0}
+          className="w-full max-w-[10rem] rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-100 outline-none focus:border-cyan-500 disabled:opacity-60"
+          title={
+            profiles.length === 0
+              ? "Keine Env-Profile angelegt (lege welche unter /settings/env-profiles an)."
+              : "Leer = Standard (CD_HEARTBEAT_ENV_PROFILE_KEY / kein Env-Overlay)"
+          }
+        >
+          <option value="">Standard (global / leer)</option>
+          {profiles.map((pr) => (
+            <option key={pr.key} value={pr.key}>
+              {pr.name}
+            </option>
+          ))}
+        </select>
       </td>
       <td className="px-4 py-3 text-right">
         <button

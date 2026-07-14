@@ -93,6 +93,12 @@ class Project(Base):
     # On error: human-readable one-liner for the UI / logs.
     last_heartbeat_error: Mapped[str] = mapped_column(Text, default="")
 
+    # Per-project override: which env profile (``env_profiles.key``) the
+    # heartbeat should inject into auto-spawned tasks for THIS project.
+    # Empty (default) = fall through to the global
+    # ``settings.heartbeat_env_profile_key`` (env ``CD_HEARTBEAT_ENV_PROFILE_KEY``).
+    heartbeat_env_profile_key: Mapped[str] = mapped_column(String(64), default="")
+
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), default=_now, onupdate=_now
@@ -168,6 +174,20 @@ class Task(Base):
         UtcDateTime(), nullable=True
     )
 
+    # Env-profile the operator picked on the start form. Empty (default)
+    # = no env injection (the agent uses its own baked-in auth / endpoint).
+    # The runner resolves this key against ``env_profiles`` at start time
+    # and overlays ``ANTHROPIC_BASE_URL`` + ``ANTHROPIC_AUTH_TOKEN`` + the
+    # explicit empty-string ``ANTHROPIC_API_KEY`` so the host's shell
+    # cannot leak an inherited upstream token.
+    env_profile_key: Mapped[str] = mapped_column(String(64), default="")
+    # Where the agent ran: "" (default = in-container, today's behaviour)
+    # or "host" (per-task opt-in to SSH-into-host for Claude Code,
+    # mirroring the Hermes-over-SSH model). When "host" the runner picks
+    # the ``<agent>-host`` sibling AgentSpec; if missing it returns a
+    # clear operator-friendly 400.
+    runner: Mapped[str] = mapped_column(String(16), default="")
+
     created_at: Mapped[datetime] = mapped_column(
         UtcDateTime(), default=_now, index=True
     )
@@ -225,3 +245,40 @@ class HeartbeatSeen(Base):
     )
 
     project: Mapped["Project"] = relationship()
+
+
+class EnvProfile(Base):
+    """Named env-var profile that the operator can attach to a task/goal/
+    session or to a project's heartbeat.
+
+    Currently exposes the two variables Claude Code actually understands
+    for endpoint redirection (``ANTHROPIC_BASE_URL`` and
+    ``ANTHROPIC_AUTH_TOKEN``); the schema is trivially extensible to
+    further columns when more variables become necessary.  The
+    ``anthropic_auth_token_encrypted`` column stores a Fernet token
+    derived from ``Settings.secret_key`` — the plaintext never lands on
+    disk, and the GET response never echoes it back (only a hint like
+    ``sk-…12``).
+    """
+
+    __tablename__ = "env_profiles"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    # Stable identifier the API + UI reference (slug, lowercase).
+    # Unique so the runner can resolve ``Task.env_profile_key`` directly.
+    key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Human label for the UI dropdowns. Editable.
+    name: Mapped[str] = mapped_column(String(200))
+    # Empty = "use whatever the agent's baked-in defaults are" (today:
+    # Anthropic's upstream endpoint). Non-empty redirects via
+    # ``ANTHROPIC_BASE_URL`` env on the spawned subprocess.
+    anthropic_base_url: Mapped[str] = mapped_column(String(512), default="")
+    # Fernet ciphertext. Empty = no token injected. Never returned to the
+    # client — the GET response shows ``anthropic_auth_token_set: bool``
+    # + an anonymised hint prefix/suffix instead.
+    anthropic_auth_token_encrypted: Mapped[str] = mapped_column(Text, default="")
+
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime(), default=_now, onupdate=_now
+    )

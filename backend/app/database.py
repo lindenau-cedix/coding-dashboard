@@ -43,6 +43,10 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         # issue / closes the issue on a clean merge. NULL until then.
         "heartbeat_commented_at": "TIMESTAMP NULL",
         "heartbeat_closed_at": "TIMESTAMP NULL",
+        # Per-task env-profile + runner selection. Empty = today's
+        # behaviour (no env injection, in-container agent).
+        "env_profile_key": "VARCHAR(64) NOT NULL DEFAULT ''",
+        "runner": "VARCHAR(16) NOT NULL DEFAULT ''",
     },
     "projects": {
         "archived": "BOOLEAN NOT NULL DEFAULT 0",
@@ -52,6 +56,9 @@ _SQLITE_COLUMN_ADDITIONS: dict[str, dict[str, str]] = {
         "last_issue_poll_at": "TIMESTAMP NULL",
         "last_heartbeat_status": "VARCHAR(32) NOT NULL DEFAULT ''",
         "last_heartbeat_error": "TEXT NOT NULL DEFAULT ''",
+        # Per-project override for the heartbeat's env profile. Empty =
+        # fall through to the global ``CD_HEARTBEAT_ENV_PROFILE_KEY``.
+        "heartbeat_env_profile_key": "VARCHAR(64) NOT NULL DEFAULT ''",
     },
     "heartbeat_seen": {
         # Comment-back state: ``last_comment_id`` is the GitHub-side
@@ -88,6 +95,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_sqlite_columns()
+    _seed_default_env_profile()
 
 
 def get_db() -> Iterator[Session]:
@@ -111,3 +119,26 @@ def session_scope() -> Iterator[Session]:
         raise
     finally:
         db.close()
+
+
+def _seed_default_env_profile() -> None:
+    """Insert a ``default-anthropic`` profile row if the table is empty.
+
+    Just a placeholder so the UI dropdown isn't empty on a fresh install;
+    the operator still has to paste a token (or set a base_url) for it to
+    actually do anything.  Idempotent — every call is a no-op unless the
+    table is freshly empty.
+    """
+    from .models import EnvProfile  # avoid circular import
+
+    with session_scope() as db:
+        if db.query(EnvProfile).count() > 0:
+            return
+        db.add(
+            EnvProfile(
+                key="default-anthropic",
+                name="Standard (Anthropic)",
+                anthropic_base_url="",
+                anthropic_auth_token_encrypted="",
+            )
+        )

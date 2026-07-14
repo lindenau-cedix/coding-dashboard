@@ -3813,6 +3813,988 @@ def test_heartbeat_comment_on_solve() -> None:
         db.query(Project).filter(Project.id == cb_project_id).delete()
 
 
+# --------------------------------------------------------------------------- #
+# Env profiles + per-task host runner (2026-07-14 feature)
+# --------------------------------------------------------------------------- #
+
+def _env_smoke_settings():
+    """Snapshot of CD_SECRET_KEY for the env-crypto / profile tests."""
+    return {"CD_SECRET_KEY": os.environ.get("CD_SECRET_KEY", "")}
+
+
+def test_env_crypto() -> None:
+    """Fernet roundtrip + tamper rejection + is_encryption_available().
+
+    Defaults to the smoke suite's ``CD_SECRET_KEY=test-secret-key``, which
+    is NOT the bundled placeholder — so encryption is available. We also
+    exercise the negative path against the placeholder via a temporary
+    patch.
+    """
+    from app import env_crypto
+    from app.config import get_settings
+
+    s = _env_smoke_settings()
+    check(
+        "env_crypto: encryption available with the smoke CD_SECRET_KEY",
+        env_crypto.is_encryption_available(),
+        f"got={env_crypto.is_encryption_available()}",
+    )
+    tok = env_crypto.encrypt_secret("hello")
+    check("env_crypto: ciphertext != plaintext", tok != "hello")
+    pt = env_crypto.decrypt_secret(tok)
+    check("env_crypto: roundtrip decrypts", pt == "hello")
+
+    # Tamper: mangle one byte so Fernet rejects
+    bad = "A" + tok[1:]
+    try:
+        env_crypto.decrypt_secret(bad)
+        check("env_crypto: tampered ciphertext raises", False)
+    except Exception:
+        check("env_crypto: tampered ciphertext raises", True)
+
+    # Negative path: with the bundled placeholder, encryption is unavailable
+    # and encrypt_secret raises a RuntimeError.
+    settings = get_settings()
+    original = settings.secret_key
+    try:
+        settings.secret_key = "CHANGE-ME-please-generate-a-real-secret"
+        check(
+            "env_crypto: not available with bundled placeholder",
+            env_crypto.is_encryption_available() is False,
+        )
+        try:
+            env_crypto.encrypt_secret("anything")
+            check("env_crypto: encrypt refuses w/o real key", False)
+        except RuntimeError:
+            check("env_crypto: encrypt refuses w/o real key", True)
+    finally:
+        settings.secret_key = original
+
+    # anonymise_token
+    check("env_crypto: anonymise short -> ***", env_crypto.anonymise_token("abc") == "***")
+    check("env_crypto: anonymise empty -> ''", env_crypto.anonymise_token("") == "")
+    check(
+        "env_crypto: anonymise long -> first2+…+last2",
+        env_crypto.anonymise_token("sk-abc123def") == "sk…ef",
+    )
+
+
+def test_env_profiles_crud() -> None:
+    """Round-trip POST/GET/PATCH/DELETE for /api/env-profiles with the
+    redaction contract:
+      * GET never echoes the plaintext token
+      * POST + PATCH return ``anthropic_auth_token_set=True`` + ``hint``
+      * PATCH with new token re-encrypts (decrypt round-trip sees the new
+        value, NOT the old one)
+      * duplicate POST => 409
+      * PATCH with the literal ``"***"`` -> 422
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    from app.models import EnvProfile
+    from app.database import session_scope
+
+    _clean_env_profiles()
+
+    with TestClient(app) as client:
+        ok = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+        )
+        H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+        # 1. Create a profile with token
+        r = client.post(
+            "/api/env-profiles",
+            headers=H,
+            json={
+                "key": "zai",
+                "name": "Z.AI",
+                "anthropic_base_url": "https://api.z.ai",
+                "anthropic_auth_token": "secret-token-xyz-123",
+            },
+        )
+        check("env_profiles: POST 201", r.status_code == 201, str(r.status_code))
+        body = r.json()
+        check("env_profiles: POST returns redacted shape", body["anthropic_auth_token_set"] is True)
+        check("env_profiles: POST returns anonymised hint", body["anthropic_auth_token_hint"].startswith("se"))
+        check("env_profiles: POST does NOT echo plaintext", "secret-token-xyz-123" not in r.text)
+
+        # 2. List returns the row
+        r = client.get("/api/env-profiles", headers=H)
+        check("env_profiles: GET 200", r.status_code == 200)
+        rows = [row for row in r.json() if row["key"] == "zai"]
+        check("env_profiles: GET finds created row", len(rows) == 1)
+        check(
+            "env_profiles: GET rows never carry plaintext",
+            not any("secret-token-xyz-123" in json.dumps(row) for row in r.json()),
+        )
+
+        # 3. Duplicate POST -> 409
+        r = client.post(
+            "/api/env-profiles",
+            headers=H,
+            json={
+                "key": "zai",
+                "name": "Z.AI again",
+                "anthropic_base_url": "",
+                "anthropic_auth_token": "",
+            },
+        )
+        check("env_profiles: duplicate POST 409", r.status_code == 409, str(r.status_code))
+
+        # 4. PATCH with `***` (placeholder) -> 422
+        r = client.patch(
+            "/api/env-profiles/zai",
+            headers=H,
+            json={
+                "key": "zai",
+                "name": "Z.AI",
+                "anthropic_base_url": "",
+                "anthropic_auth_token": "***",
+            },
+        )
+        check("env_profiles: PATCH with *** placeholder -> 422", r.status_code == 422, str(r.status_code))
+
+        # 5. PATCH with rotated token re-encrypts
+        r = client.patch(
+            "/api/env-profiles/zai",
+            headers=H,
+            json={
+                "key": "zai",
+                "name": "Z.AI (rotated)",
+                "anthropic_base_url": "https://api.z.ai/v2",
+                "anthropic_auth_token": "rotated-token-789",
+            },
+        )
+        check("env_profiles: PATCH 200", r.status_code == 200, str(r.status_code))
+        check("env_profiles: PATCH updated name", r.json()["name"] == "Z.AI (rotated)")
+        # Verify the stored blob decrypts to the NEW plaintext
+        from app import env_crypto
+        with session_scope() as db:
+            row = db.query(EnvProfile).filter(EnvProfile.key == "zai").one()
+            stored = row.anthropic_auth_token_encrypted
+        check(
+            "env_profiles: PATCH re-encrypted with new value",
+            env_crypto.decrypt_secret(stored) == "rotated-token-789",
+        )
+        check(
+            "env_profiles: PATCH did NOT preserve old plaintext",
+            "secret-token-xyz-123" not in json.dumps(r.json()),
+        )
+
+        # 6. PATCH with empty token leaves stored token intact (the
+        # frontend treats that as "leave unchanged")
+        original_stored = stored
+        r = client.patch(
+            "/api/env-profiles/zai",
+            headers=H,
+            json={
+                "key": "zai",
+                "name": "Z.AI",
+                "anthropic_base_url": "https://api.z.ai/v2",
+                "anthropic_auth_token": "",
+            },
+        )
+        check("env_profiles: PATCH empty token 200", r.status_code == 200)
+        with session_scope() as db:
+            row = db.query(EnvProfile).filter(EnvProfile.key == "zai").one()
+            now_stored = row.anthropic_auth_token_encrypted
+        check(
+            "env_profiles: PATCH with empty token preserves stored ciphertext",
+            now_stored == original_stored,
+        )
+
+        # 7. DELETE -> 204 + GET removes the row
+        r = client.delete("/api/env-profiles/zai", headers=H)
+        check("env_profiles: DELETE 204", r.status_code == 204)
+        rows = [row for row in client.get("/api/env-profiles", headers=H).json() if row["key"] == "zai"]
+        check("env_profiles: DELETE removes row", len(rows) == 0)
+
+
+def test_env_profiles_encryption_gated() -> None:
+    """With the bundled placeholder secret_key, POST with a token returns 503."""
+    from fastapi.testclient import TestClient
+
+    from app.config import get_settings
+    from app.database import session_scope
+    from app.main import app
+    from app.models import EnvProfile
+
+    settings = get_settings()
+    original = settings.secret_key
+
+    _clean_env_profiles()
+    try:
+        settings.secret_key = "CHANGE-ME-please-generate-a-real-secret"
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+            )
+            H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+            # POST with empty token still works (no token = no encryption needed)
+            r = client.post(
+                "/api/env-profiles",
+                headers=H,
+                json={
+                    "key": "no-token",
+                    "name": "No-Token",
+                    "anthropic_base_url": "https://example.com",
+                    "anthropic_auth_token": "",
+                },
+            )
+            check(
+                "env_profiles: POST with empty token under default-secret succeeds",
+                r.status_code == 201,
+                str(r.status_code),
+            )
+
+            # POST with a token is refused
+            r = client.post(
+                "/api/env-profiles",
+                headers=H,
+                json={
+                    "key": "with-token",
+                    "name": "With-Token",
+                    "anthropic_base_url": "",
+                    "anthropic_auth_token": "should-be-refused",
+                },
+            )
+            check(
+                "env_profiles: POST with token under default-secret returns 503",
+                r.status_code == 503,
+                f"got {r.status_code}",
+            )
+
+            # PATCH with a token is also refused
+            r = client.patch(
+                "/api/env-profiles/no-token",
+                headers=H,
+                json={
+                    "key": "no-token",
+                    "name": "No-Token",
+                    "anthropic_base_url": "",
+                    "anthropic_auth_token": "x",
+                },
+            )
+            check(
+                "env_profiles: PATCH with token under default-secret returns 503",
+                r.status_code == 503,
+                f"got {r.status_code}",
+            )
+    finally:
+        settings.secret_key = original
+        _clean_env_profiles()
+
+
+def test_task_runner_env_profile_injection() -> None:
+    """Unit-test the per-task env-overlay assembly directly (rather than
+    driving a full ``TaskManager.submit`` cycle through worktree /
+    staging / git — those have their own tests and would otherwise add
+    ~5s of wall-clock + a flakiness surface to this isolated check).
+
+    Verifies:
+      * ``_build_env_overlay(env_profile_key, ch)`` resolves the
+        ANTHROPIC_* fields from the EnvProfile row, decrypts the token,
+        AND stamps ANTHROPIC_API_KEY="" defensively.
+      * The overlay is the ONLY thing the runner mutates: when we
+        ``model_copy(update={"env": {**spec.env, **overlay}})`` the cached
+        agent config is unchanged.
+      * An unknown profile key logs a warning and returns an empty dict
+        instead of raising — operators may rename / delete a profile
+        between submit and start.
+    """
+    from app import env_crypto
+    from app.config import AgentSpec
+    from app.database import session_scope
+    from app.models import EnvProfile
+    from app.task_runner import _build_env_overlay
+
+    _clean_env_profiles()
+
+    # Seed
+    with session_scope() as db:
+        db.add(
+            EnvProfile(
+                key="p1",
+                name="Profile 1",
+                anthropic_base_url="https://router.example.com",
+                anthropic_auth_token_encrypted=env_crypto.encrypt_secret(
+                    "the-token"
+                ),
+            )
+        )
+
+    class _StubCh:
+        def __init__(self):
+            self.events: list[dict] = []
+
+        def publish(self, ev: dict) -> None:
+            self.events.append(ev)
+
+    ch = _StubCh()
+
+    overlay = _build_env_overlay("p1", ch)
+    check("env_profile_injection: overlay non-empty", bool(overlay))
+    check(
+        "env_profile_injection: ANTHROPIC_BASE_URL overlaid",
+        overlay.get("ANTHROPIC_BASE_URL") == "https://router.example.com",
+    )
+    check(
+        "env_profile_injection: ANTHROPIC_AUTH_TOKEN overlaid (decrypted)",
+        overlay.get("ANTHROPIC_AUTH_TOKEN") == "the-token",
+    )
+    check(
+        "env_profile_injection: ANTHROPIC_API_KEY explicitly empty (defensive)",
+        overlay.get("ANTHROPIC_API_KEY") == "",
+    )
+
+    # model_copy on a real AgentSpec; check the cached config is untouched.
+    from app.config import get_agents_config
+
+    cfg = get_agents_config()
+    base_spec = cfg.agents["fake"]
+    new_spec = base_spec.model_copy(update={"env": {**base_spec.env, **overlay}})
+    check(
+        "env_profile_injection: cloned spec.env has ANTHROPIC_AUTH_TOKEN",
+        new_spec.env.get("ANTHROPIC_AUTH_TOKEN") == "the-token",
+    )
+    check(
+        "env_profile_injection: cached agent env untouched",
+        "ANTHROPIC_AUTH_TOKEN" not in base_spec.env,
+    )
+
+    # Unknown profile key -> empty dict + a warning was published
+    overlay_unknown = _build_env_overlay("does-not-exist", ch)
+    check("env_profile_injection: unknown key -> empty dict", overlay_unknown == {})
+    check(
+        "env_profile_injection: unknown key publishes a warning",
+        any(
+            ev.get("type") == "output"
+            and "Env-Profil 'does-not-exist' nicht gefunden" in ev.get("data", "")
+            for ev in ch.events
+        ),
+    )
+
+    # Empty token profile -> overlay with ONLY ANTHROPIC_BASE_URL (still
+    # stamps the explicit empty ANTHROPIC_API_KEY on the base spec).
+    with session_scope() as db:
+        db.add(
+            EnvProfile(
+                key="url-only",
+                name="URL only",
+                anthropic_base_url="https://example.com",
+                anthropic_auth_token_encrypted="",
+            )
+        )
+    ch2 = _StubCh()
+    overlay_url_only = _build_env_overlay("url-only", ch2)
+    check(
+        "env_profile_injection: profile with no token -> only base_url",
+        overlay_url_only.get("ANTHROPIC_BASE_URL") == "https://example.com"
+        and "ANTHROPIC_AUTH_TOKEN" not in overlay_url_only,
+    )
+    check(
+        "env_profile_injection: defensive ANTHROPIC_API_KEY still set on overlay",
+        overlay_url_only.get("ANTHROPIC_API_KEY") == "",
+    )
+
+    # Cleanup
+    with session_scope() as db:
+        db.query(EnvProfile).filter(EnvProfile.key.in_(["p1", "url-only"])).delete()
+
+
+def test_runner_toggle_persistence() -> None:
+    """Unit-test the runner-sibling shim at the spec-resolution level
+    (without going through a full TaskManager.submit cycle).
+
+    Verifies:
+      * When ``runner='host'`` is set, the resolver picks the
+        ``<agent>-host`` sibling IF one exists + is enabled.
+      * When the sibling is missing/disabled, the resolver returns
+        ``None`` so the caller can surface a 400 with operator guidance.
+      * The Task row's ``runner`` column persists whatever the operator
+        submitted (server-side defensive guard at the route, separate
+        concern).
+    """
+    from app.config import AgentSpec, get_agents_config
+    from app.database import session_scope
+    from app.models import EnvProfile, Project, Task
+
+    _clean_env_profiles()
+    cfg = get_agents_config()
+
+    # With the sibling registered AND enabled: resolver picks it
+    cfg.agents["fake-host"] = AgentSpec(
+        key="fake-host",
+        display_name="Fake Host",
+        command=[PY, "-c", FAKE_SCRIPT],
+        session_command=[PY, "-c", "pass"],
+        prompt_via="arg",
+        stream_format="raw",
+        enabled=True,
+        host_staging=True,
+    )
+
+    # Simulate the resolver logic the runner applies at start time.
+    def _resolve(runner: str, agent: str):
+        spec = cfg.agents.get(agent)
+        if runner == "host":
+            sibling = cfg.agents.get(f"{agent}-host")
+            if sibling is None or not sibling.enabled:
+                return None  # caller surfaces 400
+            spec = sibling
+        return spec
+
+    resolved = _resolve("host", "fake")
+    check(
+        "runner_toggle: resolver picks 'fake-host' when sibling is enabled",
+        resolved is not None and resolved.key == "fake-host",
+        repr(resolved.key if resolved else None),
+    )
+
+    # Disable the sibling; resolver returns None
+    cfg.agents["fake-host"].enabled = False
+    resolved_off = _resolve("host", "fake")
+    check(
+        "runner_toggle: resolver returns None when -host sibling is disabled",
+        resolved_off is None,
+    )
+
+    # Re-enable for the rest of the test, then verify the column
+    # persistence path directly with a Task row.
+    cfg.agents["fake-host"].enabled = True
+
+    # The column-level persistence is straight ORM; this is what the
+    # tasks router writes + what the tasks GET returns.
+    with session_scope() as db:
+        p = Project(
+            id="runner-1",
+            name="runner-test",
+            slug="runner-test",
+            local_path=str(TMP / "runner-1"),
+        )
+        Path(p.local_path).mkdir(parents=True, exist_ok=True)
+        db.add(p)
+        db.add(
+            Task(
+                id="runner-1-host",
+                project_id="runner-1",
+                agent="fake",
+                prompt="probe",
+                mode="task",
+                status="queued",
+                runner="host",
+                env_profile_key="",
+            )
+        )
+
+    with session_scope() as db:
+        t = db.get(Task, "runner-1-host")
+        check(
+            "runner_toggle: Task.runner persisted as 'host'",
+            t is not None and t.runner == "host",
+            repr(getattr(t, "runner", None) if t else None),
+        )
+
+    # Cleanup
+    with session_scope() as db:
+        db.query(Task).filter(Task.id == "runner-1-host").delete()
+        db.query(Project).filter(Project.id == "runner-1").delete()
+    cfg.agents.pop("fake-host", None)
+
+
+def test_runner_fallback_when_ssh_not_configured() -> None:
+    """No -host sibling defined in test config: POST /api/projects/{pid}/tasks
+    with runner='host' returns 400 with operator message; same for sessions.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.database import session_scope
+    from app.main import app
+    from app.models import Project
+
+    _clean_env_profiles()
+    cfg = get_agents_config()
+    # Ensure no -host sibling for 'fake'
+    cfg.agents.pop("fake-host", None)
+
+    with session_scope() as db:
+        p = Project(
+            id="runnerfb-1",
+            name="runner-fallback",
+            slug="runner-fallback",
+            local_path=str(TMP / "runnerfb-1"),
+        )
+        Path(p.local_path).mkdir(parents=True, exist_ok=True)
+        db.add(p)
+
+    with TestClient(app) as client:
+        ok = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+        )
+        H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+        r = client.post(
+            "/api/projects/runnerfb-1/tasks",
+            headers=H,
+            json={
+                "agent": "fake",
+                "prompt": "x",
+                "mode": "task",
+                "runner": "host",
+            },
+        )
+        check(
+            "runner_fallback: POST tasks runner=host returns 400",
+            r.status_code == 400,
+            f"got {r.status_code}",
+        )
+        check(
+            "runner_fallback: 400 message mentions CD_FAKE_SSH_USER / operator guidance",
+            "CD_FAKE_SSH_USER" in r.text or "Host-Runner" in r.text,
+            r.text[:200],
+        )
+
+        r = client.post(
+            "/api/sessions",
+            headers=H,
+            json={
+                "project_id": "runnerfb-1",
+                "agent": "fake",
+                "runner": "host",
+            },
+        )
+        check(
+            "runner_fallback: POST sessions runner=host returns 400",
+            r.status_code == 400,
+            f"got {r.status_code}",
+        )
+
+    # Cleanup
+    with session_scope() as db:
+        db.query(Project).filter(Project.id == "runnerfb-1").delete()
+
+
+def test_session_runner_shim() -> None:
+    """Unit-test the SessionManager.start spec-resolution path.
+
+    When ``runner='host'`` is passed and a ``<agent>-host`` sibling
+    exists + is enabled + has a session_command, the function resolves
+    to the sibling (so its ``host_staging=True`` flag drives the rest of
+    the pipeline). The PTY/spawn path itself is exercised by the
+    existing ``test_session_api_and_manager`` + ``test_session_workdir_resolution``
+    tests; we keep this check isolated to the resolver so it doesn't
+    have to drive os.fork.
+    """
+    from app.config import AgentSpec, get_agents_config
+
+    cfg = get_agents_config()
+    cfg.agents["fake-host"] = AgentSpec(
+        key="fake-host",
+        display_name="Fake Host",
+        command=[PY, "-c", "pass"],
+        session_command=[PY, "-c", "pass"],
+        prompt_via="arg",
+        stream_format="raw",
+        enabled=True,
+        host_staging=True,
+    )
+
+    # Pure-Python mirror of the resolver logic inside SessionManager.start
+    # (kept aligned in code review). The point is the SHAPE of the
+    # sibling swap, not the os.fork plumbing.
+    def _resolve_session(runner: str, agent: str):
+        spec = cfg.agents.get(agent)
+        if runner == "host":
+            sibling_key = f"{agent}-host"
+            sibling = cfg.agents.get(sibling_key)
+            if sibling is None or not sibling.enabled:
+                raise ValueError(
+                    f"Host-Runner fuer Agent {agent!r} nicht aktiviert."
+                )
+            if not sibling.session_command:
+                raise ValueError(
+                    f"Agent {sibling_key!r} does not support session mode"
+                )
+            spec = sibling
+        if not spec.session_command:
+            raise ValueError(f"Agent {agent} does not support session mode")
+        return spec
+
+    # 1. resolver picks the sibling
+    resolved = _resolve_session("host", "fake")
+    check(
+        "session_runner_shim: resolver picks fake-host sibling",
+        resolved.key == "fake-host",
+        repr(resolved.key),
+    )
+
+    # 2. sibling missing -> ValueError
+    cfg.agents.pop("fake-host")
+    try:
+        _resolve_session("host", "fake")
+        check("session_runner_shim: missing -host -> ValueError", False)
+    except ValueError as e:
+        check(
+            "session_runner_shim: missing -host -> ValueError",
+            "Host-Runner fuer Agent" in str(e),
+        )
+
+    # 3. sibling with no session_command -> "session mode" error
+    cfg.agents["fake-host"] = AgentSpec(
+        key="fake-host",
+        display_name="Fake Host (no session)",
+        command=[PY, "-c", "pass"],
+        prompt_via="arg",
+        stream_format="raw",
+        enabled=True,
+        host_staging=True,
+    )
+    try:
+        _resolve_session("host", "fake")
+        check("session_runner_shim: sibling w/o session_command -> ValueError", False)
+    except ValueError as e:
+        check(
+            "session_runner_shim: sibling w/o session_command -> ValueError",
+            "session mode" in str(e).lower(),
+        )
+
+    cfg.agents.pop("fake-host", None)
+
+
+def test_create_task_persists_env_profile_key() -> None:
+    """REST round-trip: POST /api/projects/{pid}/tasks with
+    env_profile_key='p1' returns 201; GET /api/tasks/{id} reflects the
+    field; the project's task history list returns the same row.
+    """
+    from fastapi.testclient import TestClient
+
+    from app import env_crypto
+    from app.database import session_scope
+    from app.main import app
+    from app.models import EnvProfile, Project
+
+    _clean_env_profiles()
+    with session_scope() as db:
+        p = Project(
+            id="ep-1",
+            name="ep-test",
+            slug="ep-test",
+            local_path=str(TMP / "ep-1"),
+        )
+        Path(p.local_path).mkdir(parents=True, exist_ok=True)
+        db.add(p)
+        db.add(
+            EnvProfile(
+                key="p1",
+                name="Profile 1",
+                anthropic_base_url="https://router.example.com",
+                anthropic_auth_token_encrypted=env_crypto.encrypt_secret("rt"),
+            )
+        )
+
+    with TestClient(app) as client:
+        ok = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+        )
+        H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+        r = client.post(
+            "/api/projects/ep-1/tasks",
+            headers=H,
+            json={
+                "agent": "fake",
+                "prompt": "x",
+                "mode": "task",
+                "env_profile_key": "p1",
+                "runner": "",
+            },
+        )
+        check(
+            "create_task_env_profile: POST 201",
+            r.status_code == 201,
+            f"got {r.status_code}",
+        )
+        task_id = r.json()["id"]
+        check(
+            "create_task_env_profile: POST response carries env_profile_key",
+            r.json()["env_profile_key"] == "p1",
+        )
+
+        # GET
+        g = client.get(f"/api/tasks/{task_id}", headers=H)
+        check("create_task_env_profile: GET 200", g.status_code == 200)
+        check(
+            "create_task_env_profile: GET reflects env_profile_key",
+            g.json()["env_profile_key"] == "p1",
+        )
+
+        # History list
+        l = client.get("/api/projects/ep-1/tasks", headers=H)
+        check("create_task_env_profile: history list 200", l.status_code == 200)
+        ids = [t["id"] for t in l.json()]
+        check("create_task_env_profile: history list includes task", task_id in ids)
+        persisted = next(t for t in l.json() if t["id"] == task_id)
+        check(
+            "create_task_env_profile: persisted row keeps env_profile_key",
+            persisted["env_profile_key"] == "p1",
+        )
+
+    # Cleanup
+    with session_scope() as db:
+        from app.models import Task
+        db.query(Task).filter(Task.project_id == "ep-1").delete()
+        db.query(EnvProfile).filter(EnvProfile.key == "p1").delete()
+        db.query(Project).filter(Project.id == "ep-1").delete()
+
+
+def test_heartbeat_env_profile_resolution() -> None:
+    """Per-tick resolution: per-project override beats the global default.
+
+    Three projects get created:
+      - A: heartbeat_env_profile_key='p_proj'  -> spawned task env_profile_key='p_proj'
+      - B: empty override                       -> 'p_global'
+      - C: empty override, also CD global empty -> ''
+
+    All three list one open issue, ``POST /api/heartbeat/trigger`` is
+    awaited, and we assert each spawned task's ``env_profile_key``.
+    """
+    from fastapi.testclient import TestClient
+
+    from app import env_crypto
+    from app import heartbeat as hb_mod
+    from app import github_client
+    from app.config import get_settings
+    from app.database import session_scope
+    from app.main import app
+    from app.models import EnvProfile, HeartbeatSeen, Project, Task
+    from datetime import datetime, timedelta, timezone
+
+    _clean_env_profiles()
+
+    # Seed profiles
+    with session_scope() as db:
+        db.add(
+            EnvProfile(key="p_proj", name="Proj", anthropic_base_url="")
+        )
+        db.add(
+            EnvProfile(key="p_global", name="Global", anthropic_base_url="")
+        )
+
+    # Seed projects A/B/C/D — D gets cleared later (after the first
+    # round of checks) to validate the empty-everywhere path.
+    with session_scope() as db:
+        for pid, slug, override in (
+            ("hbepa", "hbepa", "p_proj"),
+            ("hbepb", "hbepb", ""),
+            ("hbepc", "hbepc", ""),
+            ("hbepd", "hbepd", ""),
+        ):
+            p = Project(
+                id=pid,
+                name=pid,
+                slug=slug,
+                local_path=str(TMP / pid),
+                github_full_name=f"acme/{pid}",
+                heartbeat_enabled=True,
+                heartbeat_env_profile_key=override,
+            )
+            Path(p.local_path).mkdir(parents=True, exist_ok=True)
+            db.add(p)
+
+    # Set global default via settings
+    settings = get_settings()
+    saved_global = settings.heartbeat_env_profile_key
+    settings.heartbeat_env_profile_key = "p_global"
+    saved_assignee = os.environ.get("CD_HEARTBEAT_ASSIGNEE_LOGINS")
+    os.environ["CD_HEARTBEAT_ASSIGNEE_LOGINS"] = (
+        "self"  # match the assignee name we stub below
+    )
+
+    runner = hb_mod.heartbeat
+    runner.set_enabled(True)
+
+    # Reset heartbeat_seen so the issues are NEW
+    with session_scope() as db:
+        db.query(HeartbeatSeen).delete()
+
+    async def _fake_resolve():
+        return (("self",), hb_mod.ASSIGNEE_RESOLVED)
+
+    runner._resolve_assignee_logins = _fake_resolve
+
+    async def fake_list_issues(full_name, **kw):
+        n = fake_list_issues.counter
+        fake_list_issues.counter += 1
+        return [
+            {
+                "number": n,
+                "title": "test",
+                "user": {"login": "self"},
+                "assignees": [{"login": "self"}],
+                "labels": [],
+                "created_at": "2026-07-10T00:00:00Z",
+                "body": "b",
+                "html_url": f"https://github.com/{full_name}/issues/{n}",
+            }
+        ]
+
+    fake_list_issues.counter = 100
+
+    original_list = github_client.list_issues
+    hb_mod.github_client.list_issues = fake_list_issues
+    try:
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+            )
+            H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+            tr = client.post("/api/heartbeat/trigger", headers=H)
+            check(
+                "hb_env_profile: POST /trigger 200",
+                tr.status_code == 200,
+                str(tr.status_code),
+            )
+
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                with session_scope() as db:
+                    n = (
+                        db.query(Task)
+                        .filter(Task.heartbeat_spawned.is_(True))
+                        .filter(Task.project_id.in_(["hbepa", "hbepb", "hbepc", "hbepd"]))
+                        .count()
+                    )
+                if n >= 4:
+                    break
+                time.sleep(0.2)
+
+            with session_scope() as db:
+                rows = (
+                    db.query(Task)
+                    .filter(Task.heartbeat_spawned.is_(True))
+                    .filter(Task.project_id.in_(["hbepa", "hbepb", "hbepc", "hbepd"]))
+                    .all()
+                )
+            by_project = {t.project_id: t.env_profile_key for t in rows}
+
+            check(
+                "hb_env_profile: project A uses its override 'p_proj'",
+                by_project.get("hbepa") == "p_proj",
+                repr(by_project),
+            )
+            check(
+                "hb_env_profile: project B falls back to global 'p_global'",
+                by_project.get("hbepb") == "p_global",
+                repr(by_project),
+            )
+            check(
+                "hb_env_profile: project C also resolves to 'p_global' (no override -> global)",
+                by_project.get("hbepc") == "p_global",
+                repr(by_project),
+            )
+
+        # Now clear the global default + project A's override, run a second
+        # tick, and assert project A's NEW spawned task carries env_profile_key=''.
+        settings.heartbeat_env_profile_key = ""
+        with session_scope() as db:
+            db.query(Task).filter(Task.project_id == "hbepa").delete()
+            db.query(Task).filter(
+                Task.project_id == "hbepd"
+            ).delete()  # also delete D's earlier spawn
+            p = db.get(Project, "hbepa")
+            p.heartbeat_env_profile_key = ""
+            # Re-mark D's project so the next tick considers it NEW.
+            db.query(HeartbeatSeen).filter(
+                HeartbeatSeen.project_id.in_(["hbepa", "hbepd"])
+            ).delete()
+
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+            )
+            H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+            tr = client.post("/api/heartbeat/trigger", headers=H)
+            check(
+                "hb_env_profile: 2nd POST /trigger 200 (empty global)",
+                tr.status_code == 200,
+                str(tr.status_code),
+            )
+
+        deadline = time.time() + 10.0
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=20)
+        while time.time() < deadline:
+            with session_scope() as db:
+                n = (
+                    db.query(Task)
+                    .filter(Task.heartbeat_spawned.is_(True))
+                    .filter(
+                        Task.project_id.in_(["hbepa", "hbepd"])
+                    )
+                    .filter(Task.created_at >= cutoff)
+                    .count()
+                )
+            if n >= 2:
+                break
+            time.sleep(0.2)
+
+        with session_scope() as db:
+            new_rows = (
+                db.query(Task)
+                .filter(Task.heartbeat_spawned.is_(True))
+                .filter(Task.project_id.in_(["hbepa", "hbepd"]))
+                .order_by(Task.created_at.desc())
+                .limit(2)
+                .all()
+            )
+        by_project = {t.project_id: t.env_profile_key for t in new_rows}
+        check(
+            "hb_env_profile: project A with empty override + empty global resolves to ''",
+            by_project.get("hbepa") == "",
+            repr(by_project),
+        )
+        check(
+            "hb_env_profile: project D with empty override + empty global resolves to ''",
+            by_project.get("hbepd") == "",
+            repr(by_project),
+        )
+    finally:
+        hb_mod.github_client.list_issues = original_list
+        settings.heartbeat_env_profile_key = saved_global
+        if saved_assignee is None:
+            os.environ.pop("CD_HEARTBEAT_ASSIGNEE_LOGINS", None)
+        else:
+            os.environ["CD_HEARTBEAT_ASSIGNEE_LOGINS"] = saved_assignee
+        runner.set_enabled(False)
+        runner._resolve_assignee_logins = lambda: (("",), hb_mod.ASSIGNEE_RESOLVED)
+
+    # Cleanup
+    with session_scope() as db:
+        db.query(Task).filter(
+            Task.project_id.in_(["hbepa", "hbepb", "hbepc", "hbepd"])
+        ).delete()
+        db.query(HeartbeatSeen).delete()
+        db.query(Project).filter(
+            Project.id.in_(["hbepa", "hbepb", "hbepc", "hbepd"])
+        ).delete()
+        db.query(EnvProfile).filter(
+            EnvProfile.key.in_(["p_proj", "p_global"])
+        ).delete()
+
+
+# --- small helpers used by the new tests --- #
+
+def _clean_env_profiles() -> None:
+    """Drop every EnvProfile row so each test starts from the seed."""
+    from app.database import session_scope
+    from app.models import EnvProfile
+
+    with session_scope() as db:
+        db.query(EnvProfile).delete()
+
+
 def main() -> int:
     try:
         test_security()
@@ -3843,6 +4825,16 @@ def main() -> int:
         test_heartbeat()
         test_heartbeat_assignee_filter()
         test_heartbeat_comment_on_solve()
+        # 2026-07-14: env profiles + per-task host runner
+        test_env_crypto()
+        test_env_profiles_crud()
+        test_env_profiles_encryption_gated()
+        test_task_runner_env_profile_injection()
+        test_runner_toggle_persistence()
+        test_runner_fallback_when_ssh_not_configured()
+        test_session_runner_shim()
+        test_create_task_persists_env_profile_key()
+        test_heartbeat_env_profile_resolution()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

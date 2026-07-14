@@ -28,6 +28,11 @@ class AgentInfo(BaseModel):
     # Selectable models/effort levels ([] = no selector in the UI).
     model_choices: list[str] = []
     effort_choices: list[str] = []
+    # Name of the "<base>-host" sibling AgentSpec, if one exists AND is
+    # enabled. Lets the UI hide the Runner dropdown for agents whose
+    # host-over-SSH sibling is not registered (e.g. a clean install with
+    # no `CD_CLAUDE_SSH_USER`).
+    host_agent_key: Optional[str] = None
 
 
 class ProjectCreate(BaseModel):
@@ -59,6 +64,10 @@ class ProjectOut(BaseModel):
     last_heartbeat_at: Optional[datetime] = None
     last_heartbeat_status: str = ""
     last_heartbeat_error: str = ""
+    # Per-project env-profile override for the heartbeat. Empty = the
+    # global ``CD_HEARTBEAT_ENV_PROFILE_KEY`` applies (or no env injection
+    # when both are empty). Settable per project from the /heartbeat page.
+    heartbeat_env_profile_key: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -85,6 +94,16 @@ class TaskCreate(BaseModel):
     # Optional image attachments; stored server-side and handed to the agent
     # as local file paths appended to the prompt.
     images: list[TaskImagePayload] = Field(default_factory=list)
+    # "" = run inside the container (default), "host" = SSH into the host's
+    # agent CLI via the "<agent>-host" sibling AgentSpec. Requires that
+    # sibling to exist and be enabled; the route 400s with an operator
+    # message when it doesn't.
+    runner: Literal["", "host"] = ""
+    # Optional env-profile: resolved against env_profiles at run time and
+    # overlaid onto the spawned subprocess as ANTHROPIC_BASE_URL +
+    # ANTHROPIC_AUTH_TOKEN + explicit ANTHROPIC_API_KEY="" so a host
+    # shell cannot leak an inherited upstream key.
+    env_profile_key: str = ""
 
 
 class TaskOut(BaseModel):
@@ -123,6 +142,15 @@ class TaskOut(BaseModel):
     # succeeds. NULL when the issue is left open (e.g. branch kept
     # for a manual merge).
     heartbeat_closed_at: Optional[datetime] = None
+    # Per-task runner selection: "" (default = in container) or "host"
+    # (per-task opt-in to SSH-into-host for Claude Code, mirroring the
+    # Hermes-over-SSH model). UI shows a 🖥 host chip when set.
+    runner: str = ""
+    # Per-task env-profile key resolved at run time against
+    # ``env_profiles``; ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN are
+    # injected into the spawned subprocess. UI shows a 🔑 profile chip
+    # when set.
+    env_profile_key: str = ""
     created_at: datetime
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
@@ -200,6 +228,11 @@ class SessionCreate(BaseModel):
     # Shell-like argv string. It is parsed with shlex.split and appended to the
     # configured session_command; no shell is invoked.
     start_args: str = Field(default="", max_length=1000)
+    # Same semantics as ``TaskCreate.runner`` / ``TaskCreate.env_profile_key``
+    # — sessions can also be SSH'd into the host and/or run with an
+    # env-profile overlay.
+    runner: Literal["", "host"] = ""
+    env_profile_key: str = ""
 
 
 class SessionStartResponse(BaseModel):
@@ -231,6 +264,10 @@ class HeartbeatProjectStatus(BaseModel):
     last_issue_poll_at: Optional[datetime] = None
     last_heartbeat_status: str = ""
     last_heartbeat_error: str = ""
+    # Per-project override for the heartbeat's env-profile. Empty = the
+    # global ``CD_HEARTBEAT_ENV_PROFILE_KEY`` applies. Settable from the
+    # /heartbeat page; effective at the next dispatch.
+    heartbeat_env_profile_key: str = ""
     # Number of open issues GitHub reports for this repo right now. Refreshed
     # only when the heartbeat polls; not real-time.
     open_issues_count: int = 0
@@ -251,6 +288,11 @@ class HeartbeatStatus(BaseModel):
     # see the live allowlist — and notice when it's empty (in which case
     # every tick short-circuits to ``no_assignee``).
     assignee_logins: list[str] = []
+    # Effective global env-profile for auto-spawned tasks. Mirrors
+    # ``Settings.heartbeat_env_profile_key`` (``CD_HEARTBEAT_ENV_PROFILE_KEY``).
+    # Empty = no env injection (default). Non-empty = every auto-spawned
+    # task runs that profile unless a per-project override is set.
+    env_profile_key: str = ""
     last_tick_at: Optional[datetime] = None
     last_tick_summary: Optional[str] = None
     projects: list[HeartbeatProjectStatus] = []
@@ -283,3 +325,60 @@ class HeartbeatIssueSeen(BaseModel):
     # routes.
     last_issue_state: str = ""
     last_issue_state_changed_at: Optional[datetime] = None
+
+
+# --------------------------------------------------------------------------- #
+# Env profiles (per-task / per-project ANTHROPIC_* env injection)
+# --------------------------------------------------------------------------- #
+
+# Slug rule: lowercase + digits + hyphens. Mirrors the dash-url convention
+# used elsewhere in the project. Reserved ``default`` (case-insensitive).
+_ENV_PROFILE_KEY_RE = r"^[a-z0-9][a-z0-9-]{0,62}$"
+
+
+class EnvProfileIn(BaseModel):
+    """Payload for ``POST /api/env-profiles`` and
+    ``PATCH /api/env-profiles/{key}``.
+
+    The ``anthropic_auth_token`` field is **write-only** at the API
+    surface — the GET response replaces it with a boolean + anonymised
+    hint so operators can rotate (PATCH with a new token) but cannot
+    recover plaintext once submitted.
+    """
+
+    key: str = Field(pattern=_ENV_PROFILE_KEY_RE)
+    name: str = Field(min_length=1, max_length=200)
+    # Optional http(s) URL. Empty string = "use agent's baked-in endpoint".
+    anthropic_base_url: str = ""
+    # Plaintext token the operator just pasted. Stored encrypted on disk;
+    # the response shaper (model_config above) never echoes it.
+    anthropic_auth_token: str = ""
+
+
+class EnvProfileOut(BaseModel):
+    """Response shape for the env-profiles CRUD. Never carries plaintext."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    key: str
+    name: str
+    anthropic_base_url: str = ""
+    # True iff a Fernet-encrypted token is currently stored. Operators can
+    # rotate by PATCH with a new token; deletion of the token itself is
+    # done by PATCH with empty string.
+    anthropic_auth_token_set: bool = False
+    # Anonymised hint of the plaintext (e.g. ``sk-…12``) so the operator
+    # can see "this is the right key" in the UI without leaking it.
+    anthropic_auth_token_hint: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProjectHeartbeatEnvProfileIn(BaseModel):
+    """Body for ``POST /api/projects/{id}/heartbeat/env-profile``.
+
+    Empty string clears the per-project override (falls back to the
+    global ``CD_HEARTBEAT_ENV_PROFILE_KEY`` or to no env injection when
+    that is empty too)."""
+
+    env_profile_key: str = ""

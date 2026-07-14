@@ -20,11 +20,11 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import git_ops, host_lock, host_staging, session_dirs, uploads
+from . import env_crypto, git_ops, host_lock, host_staging, session_dirs, uploads
 from .agents import run_agent
 from .config import get_agents_config, get_settings
 from .database import session_scope
-from .models import Project, Task
+from .models import EnvProfile, Project, Task
 from .schemas import TaskOut
 
 
@@ -34,6 +34,80 @@ def _now() -> datetime:
 
 def task_to_dict(task: Task) -> dict:
     return TaskOut.model_validate(task).model_dump(mode="json")
+
+
+def _build_env_overlay(env_profile_key: str, ch) -> dict[str, str]:
+    """Build the per-task env-overlay for an ``EnvProfile`` row.
+
+    Returns an empty dict when ``env_profile_key`` does not exist (the
+    runner logs a warning and proceeds without env injection rather than
+    failing the run — operators may rename / delete profiles between
+    submit and start).  When the profile is found and has a token, the
+    ciphertext is decrypted here.
+
+    The caller (``TaskManager._run_inner`` + ``SessionManager.start``)
+    merges this overlay onto a ``model_copy`` of the cached ``AgentSpec``;
+    it is never persisted, so the in-memory agent cache stays untouched.
+
+    Always stamps ``ANTHROPIC_API_KEY=""`` when ANY profile field is set
+    so a host-shell ``ANTHROPIC_API_KEY`` cannot leak through to the
+    upstream endpoint.
+    """
+    if not env_profile_key:
+        return {}
+    overlay: dict[str, str] = {}
+    try:
+        with session_scope() as db:
+            profile = (
+                db.query(EnvProfile)
+                .filter(EnvProfile.key == env_profile_key)
+                .one_or_none()
+            )
+    except Exception:
+        profile = None
+
+    if profile is None:
+        try:
+            ch.publish(
+                {
+                    "type": "output",
+                    "data": (
+                        f"[warn] Env-Profil '{env_profile_key}' nicht gefunden – "
+                        f"ueberspringe env-overlay\n"
+                    ),
+                }
+            )
+        except Exception:
+            pass
+        return {}
+
+    if profile.anthropic_base_url:
+        overlay["ANTHROPIC_BASE_URL"] = profile.anthropic_base_url
+    if profile.anthropic_auth_token_encrypted:
+        try:
+            overlay["ANTHROPIC_AUTH_TOKEN"] = env_crypto.decrypt_secret(
+                profile.anthropic_auth_token_encrypted
+            )
+        except Exception:
+            try:
+                ch.publish(
+                    {
+                        "type": "output",
+                        "data": (
+                            f"[warn] Env-Profil '{env_profile_key}': Token konnte "
+                            f"nicht entschluesselt werden (CD_SECRET_KEY rotiert?); "
+                            f"ueberspringe ANTHROPIC_AUTH_TOKEN\n"
+                        ),
+                    }
+                )
+            except Exception:
+                pass
+    if overlay:
+        # Defensive: explicitly empty out any inherited ANTHROPIC_API_KEY so
+        # Claude Code uses ANTHROPIC_AUTH_TOKEN (the one we set) instead of
+        # whatever the host's shell exported.
+        overlay["ANTHROPIC_API_KEY"] = ""
+    return overlay
 
 
 def build_agent_prompt(
@@ -328,6 +402,10 @@ class TaskManager:
             project_dir = project.local_path
             branch = project.default_branch or settings.default_branch
             task.branch = branch
+            # Per-task runner + env-profile selection (post-2026-07 feature).
+            # Resolved here so every downstream branch sees the same spec.
+            runner = task.runner
+            env_profile_key = task.env_profile_key
             db.commit()
 
         spec = agents.agents.get(agent_key)
@@ -342,6 +420,33 @@ class TaskManager:
             ch.publish({"type": "status", "status": "error"})
             self._publish_done(ch, task_id)
             return
+
+        # Per-task "host" runner: swap to the "<agent>-host" sibling so the
+        # agent runs on the host via SSH (mirrors the Hermes-SSH pattern).
+        # The sibling's ``host_staging`` flag flips the rest of the pipeline
+        # (worktree -> staging copy, session workdir -> session staging dir)
+        # automatically — see ``host_staging.integrate`` + the existing
+        # ``_setup_staging`` branch below.
+        if runner == "host":
+            sibling_key = f"{agent_key}-host"
+            sibling = agents.agents.get(sibling_key)
+            if sibling is None or not sibling.enabled:
+                msg = (
+                    f"Host-Runner fuer Agent '{agent_key}' nicht aktiviert. "
+                    f"Setze CD_{agent_key.upper()}_SSH_USER in der Env-Datei "
+                    f"und starte das Backend neu."
+                )
+                self._mark(
+                    task_id,
+                    status="error",
+                    error=msg,
+                    finished=True,
+                )
+                ch.publish({"type": "output", "data": f"[Fehler] {msg}\n"})
+                ch.publish({"type": "status", "status": "error"})
+                self._publish_done(ch, task_id)
+                return
+            spec = sibling
 
         self._mark(task_id, status="running", started=True)
         ch.publish({"type": "status", "status": "running"})
@@ -426,8 +531,23 @@ class TaskManager:
         async def on_output(chunk: str) -> None:
             ch.publish({"type": "output", "data": chunk})
 
+        # Per-task env-profile overlay. Read the EnvProfile row, decrypt the
+        # token (if any), and merge ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+        # onto a ``spec.model_copy`` clone of the cached spec.  The clone is
+        # what we hand to ``run_agent`` so the in-memory cache never mutates.
+        # ``ANTHROPIC_API_KEY=""`` always stamps when ANY profile field is
+        # set, so a host-shell ``ANTHROPIC_API_KEY`` cannot leak through to
+        # the upstream endpoint.
+        spec_for_run = spec
+        if env_profile_key:
+            overlay = _build_env_overlay(env_profile_key, ch)
+            if overlay:
+                spec_for_run = spec.model_copy(
+                    update={"env": {**spec.env, **overlay}}
+                )
+
         result = await run_agent(
-            spec, full_prompt, run_dir, on_output, model=model, effort=effort
+            spec_for_run, full_prompt, run_dir, on_output, model=model, effort=effort
         )
 
         status = "success" if not result.is_error else "failed"
@@ -879,6 +999,9 @@ class SessionManager:
         model: str,
         effort: str,
         start_args: str = "",
+        *,
+        runner: str = "",
+        env_profile_key: str = "",
     ) -> bool:
         """Launch the subprocess for an interactive session using a PTY.
 
@@ -886,6 +1009,14 @@ class SessionManager:
         arrow keys, Ctrl-C, etc.) is forwarded faithfully. No prompt is
         injected; the configured session_command is only extended with the
         user-supplied start_args parsed as argv.
+
+        ``runner`` and ``env_profile_key`` mirror the same fields on
+        ``TaskCreate``: ``runner="host"`` swaps in the ``<agent>-host``
+        sibling spec (its ``host_staging=True`` automatically routes this
+        session through the host-staging session workdir below), and
+        ``env_profile_key`` overlays ANTHROPIC_BASE_URL +
+        ANTHROPIC_AUTH_TOKEN + the explicit empty ANTHROPIC_API_KEY on
+        top of the spawned subprocess env.
         """
         import os
         import signal
@@ -899,6 +1030,25 @@ class SessionManager:
         spec = agents.agents.get(agent_key)
         if spec is None or not spec.enabled:
             raise ValueError(f"Unknown or disabled agent: {agent_key}")
+
+        # Per-task "host" runner shim: swap to the "<agent>-host" sibling
+        # so the session is driven over SSH on the host (mirrors the
+        # Hermes-SSH pattern). The sibling's host_staging=True then flips
+        # the workdir branch below automatically.
+        if runner == "host":
+            sibling_key = f"{agent_key}-host"
+            sibling = agents.agents.get(sibling_key)
+            if sibling is None or not sibling.enabled:
+                raise ValueError(
+                    f"Host-Runner fuer Agent {agent_key!r} nicht aktiviert. "
+                    f"Setze CD_{agent_key.upper()}_SSH_USER in der Env-Datei "
+                    f"und starte das Backend neu."
+                )
+            if not sibling.session_command:
+                raise ValueError(
+                    f"Agent {sibling_key!r} does not support session mode"
+                )
+            spec = sibling
         if not spec.session_command:
             raise ValueError(f"Agent {agent_key} does not support session mode")
 
@@ -983,6 +1133,9 @@ class SessionManager:
         env = _build_env(spec)
         env.setdefault("TERM", "xterm-256color")
         env.setdefault("COLORTERM", "truecolor")
+        if env_profile_key:
+            overlay = _build_env_overlay(env_profile_key, ch)
+            env.update(overlay)
         cwd = (spec.cwd or "{project_dir}").replace("{project_dir}", workdir) or workdir
 
         # Fork a PTY for the subprocess.

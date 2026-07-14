@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from ..auth import get_current_user
 from ..config import get_agents_config
 from ..database import get_db, session_scope
-from ..models import Project, Task
+from ..models import EnvProfile, Project, Task
 from ..schemas import SessionCreate, SessionEndRequest, SessionStartResponse
 from ..task_runner import session_manager
 
@@ -54,6 +54,29 @@ async def create_session(
         raise HTTPException(400, f"Model '{body.model}' not supported by {spec.display_name}.")
     if body.effort and body.effort not in (spec.effort_choices or []):
         raise HTTPException(400, f"Effort '{body.effort}' not supported.")
+    # Per-session "host" runner guard — same semantics as ``create_task``.
+    if body.runner == "host":
+        host_key = f"{body.agent}-host"
+        host_spec = cfg.agents.get(host_key)
+        if host_spec is None or not host_spec.enabled or not host_spec.session_command:
+            raise HTTPException(
+                400,
+                f"Host-Runner fuer Agent '{body.agent}' nicht aktiviert. "
+                f"Setze CD_{body.agent.upper()}_SSH_USER in der Env-Datei "
+                f"und starte das Backend neu.",
+            )
+    # Env-profile must exist when set; same semantics as ``create_task``.
+    if body.env_profile_key:
+        exists = (
+            db.query(EnvProfile.id)
+            .filter(EnvProfile.key == body.env_profile_key)
+            .first()
+        )
+        if exists is None:
+            raise HTTPException(
+                404,
+                f"Env-Profil '{body.env_profile_key}' nicht gefunden.",
+            )
     start_args = body.start_args.strip()
     try:
         shlex.split(start_args)
@@ -67,6 +90,8 @@ async def create_session(
         mode="session",
         model=body.model,
         effort=body.effort,
+        runner=body.runner,
+        env_profile_key=body.env_profile_key,
         is_session=True,
         status="queued",
         chat_history="[]",
@@ -83,6 +108,8 @@ async def create_session(
             body.model,
             body.effort,
             start_args=start_args,
+            runner=body.runner,
+            env_profile_key=body.env_profile_key,
         )
     except ValueError as exc:
         with session_scope() as sdb:

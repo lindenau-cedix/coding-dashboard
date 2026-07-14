@@ -7,9 +7,32 @@ export interface Agent {
   /** Selectable models/effort levels; empty array = no selector. */
   model_choices: string[];
   effort_choices: string[];
+  /** Name of the "<base>-host" sibling AgentSpec, if one exists AND is
+   *  enabled (the Docker entrypoint auto-creates one when
+   *  ``CD_<AGENT>_SSH_USER`` is set; systemd operators hand-write it in
+   *  config.yaml). The "Runner: host" dropdown is shown only when this
+   *  is non-null. */
+  host_agent_key: string | null;
+}
+
+export interface EnvProfile {
+  key: string;
+  name: string;
+  anthropic_base_url: string;
+  /** True iff a Fernet-encrypted token is currently stored (the GET
+   *  response NEVER echoes the plaintext; the operator rotates via
+   *  PATCH with a fresh token). */
+  anthropic_auth_token_set: boolean;
+  /** Anonymised hint of the plaintext (e.g. "sk-…12"). Empty when no
+   *  token is set OR when decryption failed (key rotated). */
+  anthropic_auth_token_hint: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export type TaskMode = "task" | "goal" | "session";
+
+export type Runner = "" | "host";
 
 export interface Project {
   id: string;
@@ -32,6 +55,10 @@ export interface Project {
   last_heartbeat_status: string;
   /** One-line error message when last_heartbeat_status === "error". */
   last_heartbeat_error: string;
+  /** Per-project override for the heartbeat's env-profile. Settable from
+   *  the /heartbeat page; effective at the next dispatch. Empty =
+   *  CD_HEARTBEAT_ENV_PROFILE_KEY applies. */
+  heartbeat_env_profile_key: string;
   created_at: string;
   updated_at: string;
   local_path?: string;
@@ -84,6 +111,15 @@ export interface Task {
   /** Set once the dashboard successfully PATCHed the GitHub issue to
    *  state=closed (either via close-on-merge or the manual close route). */
   heartbeat_closed_at: string | null;
+  /** Where the agent ran: "" (default = in-container) or "host" (per-task
+   *  opt-in to SSH-into-host for Claude Code, mirroring the Hermes-SSH
+   *  model). UI shows a 🖥 host chip when set. */
+  runner: Runner;
+  /** Per-task env-profile key the operator picked on the start form.
+   *  Resolved against ``env_profiles`` at run time; the resulting
+   *  ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN are injected into the
+   *  spawned agent subprocess. UI shows a 🔑 profile chip when set. */
+  env_profile_key: string;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -186,6 +222,10 @@ export interface HeartbeatProjectStatus {
   last_issue_poll_at: string | null;
   last_heartbeat_status: string;
   last_heartbeat_error: string;
+  /** Per-project override for the heartbeat's env-profile. Empty =
+   *  HeartbeatStatus.env_profile_key applies. Settable from the
+   *  /heartbeat page; effective at the next dispatch. */
+  heartbeat_env_profile_key: string;
   open_issues_count: number;
   inflight_task_ids: string[];
 }
@@ -201,6 +241,10 @@ export interface HeartbeatStatus {
    *  Empty here means the next tick will fail-closed (no_assignee)
    *  unless the operator sets the env var. */
   assignee_logins: string[];
+  /** Global default env-profile key for heartbeat-spawned tasks. Empty =
+   *  no env injection (standard Anthropic auth / endpoint). Settable per
+   *  project on the /heartbeat page; per-project override beats this. */
+  env_profile_key: string;
   last_tick_at: string | null;
   last_tick_summary: string | null;
   projects: HeartbeatProjectStatus[];

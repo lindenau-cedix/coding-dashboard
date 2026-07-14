@@ -25,6 +25,12 @@ export default function Layout() {
               >
                 🤖 Heartbeat
               </Link>
+              <Link
+                to="/settings/env-profiles"
+                className="rounded-lg px-3 py-1.5 text-slate-300 hover:bg-slate-800 hover:text-slate-100"
+              >
+                Settings
+              </Link>
             </nav>
           </div>
           <div className="flex items-center gap-3 text-sm text-slate-400">
