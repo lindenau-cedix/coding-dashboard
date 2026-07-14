@@ -33,15 +33,20 @@ HERMES_SSH_USER="${CD_HERMES_SSH_USER:-}"
 HERMES_SSH_HOST="${CD_HERMES_SSH_HOST:-host.docker.internal}"
 HERMES_SSH_PORT="${CD_HERMES_SSH_PORT:-22}"
 HERMES_SSH_KEY="/home/app/.ssh/id_hermes"
-# The host's Hermes cannot see the data volume, so the dashboard runs it inside a
-# COPY of the project here — a dir bind-mounted from the host at the SAME path so
-# `cd {project_dir}` resolves identically on both sides. Ensure it exists/writable.
+# The host's Hermes (and Claude Code, when the claude-host sibling is also
+# SSH-driven) cannot see the data volume, so the dashboard runs them inside
+# a COPY of the project here — a dir bind-mounted from the host at the SAME
+# path so `cd {project_dir}` resolves identically on both sides. Ensure it
+# exists/writable whenever EITHER SSH route is active (since the operator
+# may configure only one of the two CD_*_SSH_USER vars — see
+# deploy/docker/coding-dashboard.docker.env.example for the shared-wiring
+# rules). Both agent CLIs share this single staging dir.
 HERMES_STAGING_DIR="${CD_HERMES_STAGING_DIR:-/tmp/coding-dashboard-hermes}"
-[[ -n "$HERMES_SSH_USER" ]] && mkdir -p "$HERMES_STAGING_DIR" 2>/dev/null || true
+[[ -n "$HERMES_SSH_USER" || -n "$CLAUDE_SSH_USER" ]] && mkdir -p "$HERMES_STAGING_DIR" 2>/dev/null || true
 # known_hosts must live somewhere the app user can write (the single-file key
 # bind mount leaves ~/.ssh root-owned), so keep it in the home volume root.
 HERMES_KNOWN_HOSTS="$HOME/.ssh_known_hosts"
-[[ -n "$HERMES_SSH_USER" ]] && { : > "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; touch "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; }
+[[ -n "$HERMES_SSH_USER" || -n "$CLAUDE_SSH_USER" ]] && { : > "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; touch "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; }
 
 # --- Claude Code runs on the HOST over SSH (mirrors the Hermes-SSH block) --
 # When CD_CLAUDE_SSH_USER is set, the generated config.yaml gets a SECOND
@@ -54,9 +59,9 @@ CLAUDE_SSH_USER="${CD_CLAUDE_SSH_USER:-}"
 CLAUDE_SSH_HOST="${CD_CLAUDE_SSH_HOST:-host.docker.internal}"
 CLAUDE_SSH_PORT="${CD_CLAUDE_SSH_PORT:-22}"
 CLAUDE_SSH_KEY="/home/app/.ssh/id_claude"
-# Reuse the Hermes staging dir: both agents' host-side copies live there with
-# per-project / per-task namespacing (no collision).
-[[ -n "$CLAUDE_SSH_USER" ]] && mkdir -p "$HERMES_STAGING_DIR" 2>/dev/null || true
+# The shared staging dir was already created above when either SSH user
+# was set; nothing to do here. (Both agents' host-side copies live in
+# that dir with per-project / per-task namespacing — no collision.)
 
 # --- Host-visible lock dir (one lock file per active task/goal/session) ---
 # Bind-mounted from the host by docker-compose so operators can see at a glance
@@ -80,185 +85,9 @@ hermes_venv_bin="$HOME/.hermes/hermes-agent/venv/bin"
 if [[ ! -f "$CONFIG_YAML" ]]; then
   echo "==> First boot: generating $CONFIG_YAML"
   if python - "$CONFIG_YAML.tmp" <<'PY'
-import copy as _copy
-import os, shutil, sys, yaml
-from app.config import default_agents, DEFAULT_CONTEXT_INSTRUCTION
-
-# --- Hermes-over-SSH wiring (default Docker mode) ---------------------------
-# When CD_HERMES_SSH_USER is set, Hermes is NOT run in this container; instead we
-# rewrite its command/session_command to drive the HOST's `hermes` over SSH, and
-# flag host_staging so the dashboard runs it inside a COPY of the project placed in
-# CD_HERMES_STAGING_DIR — a dir bind-mounted at an identical path on the host — so
-# the remote `cd {project_dir}` lands on the same files; the result is merged back.
-ssh_user = os.environ.get("CD_HERMES_SSH_USER", "").strip()
-ssh_host = (os.environ.get("CD_HERMES_SSH_HOST") or "host.docker.internal").strip()
-ssh_port = (os.environ.get("CD_HERMES_SSH_PORT") or "22").strip()
-ssh_key = "/home/app/.ssh/id_hermes"
-known_hosts = os.path.expanduser("~/.ssh_known_hosts")
-hermes_ssh = bool(ssh_user)
-codex_sandbox = (os.environ.get("CD_CODEX_SANDBOX") or "").strip()
-hermes_remote_path = (
-    'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:'
-    '$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
-)
-
-def _ssh_opts():
-    return [
-        "-i", ssh_key,
-        "-p", ssh_port,
-        "-o", "StrictHostKeyChecking=accept-new",
-        "-o", f"UserKnownHostsFile={known_hosts}",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
-    ]
-
-def _set_cli_option(command, option, value):
-    if not value:
-        return command
-    out = list(command)
-    for idx, tok in enumerate(out):
-        if tok == option:
-            if idx + 1 < len(out):
-                out[idx + 1] = value
-            else:
-                out.append(value)
-            return out
-        if tok.startswith(f"{option}="):
-            out[idx] = f"{option}={value}"
-            return out
-    insert_at = len(out) - 1 if out and out[-1] == "-" else len(out)
-    out[insert_at:insert_at] = [option, value]
-    return out
-
-# Task mode: the prompt is fed to ssh's stdin (prompt_via=stdin) and read on the
-# host with "$(cat)", so arbitrary multi-line prompts pass safely without argv
-# quoting games. HERMES_ACCEPT_HOOKS/NO_COLOR are set on the REMOTE side.
-# `-t <csv>` (mirroring HERMES_NON_INTERACTIVE_TOOLSETS from the Python side)
-# restricts the host's Hermes toolset to non-interactive ones (excludes
-# `clarify`, which would call into a None platform callback in this one-shot
-# mode and stall the run or bounce back with "Clarify tool is not available
-# in this execution context."). The dashboard's backfill splices this in
-# automatically for existing configs (see _backfill_hermes_flags), so legacy
-# SSH-driven installs get the flag too.
-HERMES_NON_INTERACTIVE_TOOLSETS_CSV = (
-    "web,browser,terminal,file_search,read_file,write_file,"
-    "edit_file,multi_edit,plan,session_search,kanban,image_gen,"
-    "computer_use,video_gen,tts,spotify,delegate_task,todo,cronjob"
-)
-HERMES_SSH_TASK_REMOTE = (
-    f'cd "{{project_dir}}" && {hermes_remote_path} && '
-    'exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 '
-    f'hermes chat -q "$(cat)" --yolo --accept-hooks -t {HERMES_NON_INTERACTIVE_TOOLSETS_CSV}'
-)
-# Session mode: -tt forces a remote PTY (the container side is already a PTY), so
-# the interactive TUI works through the double PTY. Start params are appended by
-# the runner as extra remote args after `hermes chat`. NO `-t` here: the user is
-# at a real terminal and needs the full toolset (including `clarify`).
-HERMES_SSH_SESSION_REMOTE = (
-    f'cd "{{project_dir}}" && {hermes_remote_path} && exec hermes chat'
-)
-
-agents = {}
-for key, spec in default_agents().items():
-    d = spec.model_dump()
-    d.pop("key", None)  # the loader re-derives the key from the mapping
-    if key == "hermes" and hermes_ssh:
-        d["prompt_via"] = "stdin"
-        d["stream_format"] = "raw"
-        d["env"] = {}        # set on the remote side instead
-        d["unset_env"] = []  # ssh client, not a python venv to sanitise
-        d["command"] = ["ssh"] + _ssh_opts() + [f"{ssh_user}@{ssh_host}", HERMES_SSH_TASK_REMOTE]
-        d["session_command"] = ["ssh", "-tt"] + _ssh_opts() + [f"{ssh_user}@{ssh_host}", HERMES_SSH_SESSION_REMOTE]
-        # Hermes runs on the HOST, which cannot see the dashboard's data volume.
-        # host_staging makes the dashboard run it inside a COPY of the project under
-        # CD_HERMES_STAGING_DIR (bind-mounted at the same path host<->container):
-        # the project is copied in, the host edits it, and the dashboard merges the
-        # result back + pushes (a merge conflict is left on a branch for the user).
-        d["host_staging"] = True
-        d["enabled"] = True
-    elif key == "codex" and codex_sandbox:
-        d["command"] = _set_cli_option(d["command"], "--sandbox", codex_sandbox)
-        d["enabled"] = shutil.which(spec.command[0]) is not None
-    elif key == "claude" and bool(os.environ.get("CD_CLAUDE_SSH_USER", "").strip()):
-        # Mirror the Hermes-SSH pattern but for Claude Code. The dashboard
-        # registers a NEW AgentSpec under key ``claude-host`` so its
-        # per-task "Runner: host" toggle can pick it via f"{base}-host".
-        # Prompt is fed via stdin (``prompt_via="stdin"``) because SSH
-        # argv passing for arbitrary multi-line text is unreliable.
-        # ``exec env -u ANTHROPIC_API_KEY`` strips any inherited key on
-        # the host so it cannot reach the host's `claude` CLI; the
-        # container path's env-profile overlay sets it back to "" so
-        # both paths agree.
-        claude_ssh_user = os.environ["CD_CLAUDE_SSH_USER"].strip()
-        claude_ssh_host = (
-            os.environ.get("CD_CLAUDE_SSH_HOST", "").strip()
-            or "host.docker.internal"
-        )
-        claude_ssh_port = (
-            os.environ.get("CD_CLAUDE_SSH_PORT", "").strip() or "22"
-        )
-        claude_ssh_key = "/home/app/.ssh/id_claude"
-        d["prompt_via"] = "stdin"
-        d["stream_format"] = "raw"
-        d["env"] = {}        # set on the remote side instead
-        d["unset_env"] = []  # ssh client, not a python venv to sanitise
-        d["command"] = [
-            "ssh",
-            "-i", claude_ssh_key,
-            "-p", claude_ssh_port,
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", f"UserKnownHostsFile={HERMES_KNOWN_HOSTS}",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10",
-            f"{claude_ssh_user}@{claude_ssh_host}",
-            'cd "{project_dir}" && exec env -u ANTHROPIC_API_KEY claude '
-            '-p "$(cat)" --output-format stream-json --verbose '
-            '--dangerously-skip-permissions',
-        ]
-        d["session_command"] = [
-            "ssh", "-tt",
-            "-i", claude_ssh_key,
-            "-p", claude_ssh_port,
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", f"UserKnownHostsFile={HERMES_KNOWN_HOSTS}",
-            "-o", "BatchMode=yes",
-            "-o", "ConnectTimeout=10",
-            f"{claude_ssh_user}@{claude_ssh_host}",
-            'cd "{project_dir}" && exec env -u ANTHROPIC_API_KEY claude',
-        ]
-        # Claude runs on the HOST, which cannot see the dashboard's data
-        # volume. Same host_staging pattern as Hermes-SSH: the dashboard
-        # copies the project to CD_HERMES_STAGING_DIR, the host edits it
-        # via the remote shell, and the result is merged back + pushed.
-        d["host_staging"] = True
-        d["enabled"] = True
-        # Re-add the model / effort flags so the per-task selectors still
-        # work (the remote shell above does NOT inline them — keeping the
-        # argv intact lets ``_set_cli_option`` mirror what the local claude
-        # spec does).
-        d["command"] = _set_cli_option(d["command"], "--model", "{model}")
-        d["command"] = _set_cli_option(d["command"], "--effort", "{effort}")
-        # Register as a SIBLING agent under the key "claude-host". The
-        # container `claude` entry below also stays enabled (we do NOT
-        # overwrite ``agents["claude"]`` — the dashboard uses it for the
-        # default in-container runner; the per-task "Runner: host" toggle
-        # routes tasks to ``claude-host``).
-        host_d = _copy.deepcopy(d)
-        host_d["key"] = "claude-host"
-        host_d["display_name"] = "Claude Code (Host)"
-        agents["claude-host"] = host_d
-        # Fall through: keep the container `claude` enabled like normal.
-        # ``d`` here is still the in-container spec (we mutated ``command``
-        # for the SSH variant, but operators are choosing the host-sibling
-        # when they tick the toggle — the container path uses the
-        # pre-rebuilt spec from ``default_agents()`` instead).
-    else:
-        # Enable an agent only if its CLI is actually installed in this image
-        # (claude/codex baked in; Hermes only when self-contained / no SSH user).
-        d["enabled"] = shutil.which(spec.command[0]) is not None
-    agents[key] = d
-
-doc = {"context_instruction": DEFAULT_CONTEXT_INSTRUCTION, "agents": agents}
+import sys, yaml
+from app.config_bootstrap import generate_initial_agents_config
+doc = generate_initial_agents_config()
 with open(sys.argv[1], "w", encoding="utf-8") as f:
     f.write("# Auto-generated on first container boot (deploy/docker/entrypoint.sh).\n")
     f.write("# 'enabled' reflects which agent CLIs were on PATH at first boot.\n")
@@ -289,28 +118,51 @@ if have hermes; then
   printf '    %-7s %s (self-contained in-image)\n' "hermes" "$(command -v hermes)"
   any_agent=1
 fi
-if [[ $any_agent -eq 0 && -z "$HERMES_SSH_USER" ]]; then
+if [[ $any_agent -eq 0 && -z "$HERMES_SSH_USER" && -z "$CLAUDE_SSH_USER" ]]; then
   echo "WARN: no agent CLI found in the image — rebuild with the *_NPM_PKG build args." >&2
 fi
 echo "==> Claude + Codex authenticate via interactive login (credentials persist in the cd-home volume):"
 echo "      docker compose exec dashboard claude        # then log in in the TUI"
 echo "      docker compose exec dashboard codex login"
-if [[ -n "$HERMES_SSH_USER" ]]; then
-  echo "==> Hermes runs on the HOST over SSH as ${HERMES_SSH_USER}@${HERMES_SSH_HOST}:${HERMES_SSH_PORT} (key: $HERMES_SSH_KEY)."
+
+# --- Shared host-over-SSH summary ------------------------------------------
+# Effective values mirror the resolver in backend/app/config_bootstrap.py:
+# each sibling prefers its own env vars and falls back to the other agent's.
+# We resolve them here so the boot log shows operators where tasks will go.
+EFFECTIVE_HERMES_SSH_USER="${HERMES_SSH_USER:-$CLAUDE_SSH_USER}"
+EFFECTIVE_HERMES_SSH_HOST="${HERMES_SSH_HOST:-$CLAUDE_SSH_HOST}"
+EFFECTIVE_HERMES_SSH_HOST="${EFFECTIVE_HERMES_SSH_HOST:-host.docker.internal}"
+EFFECTIVE_HERMES_SSH_PORT="${HERMES_SSH_PORT:-$CLAUDE_SSH_PORT}"
+EFFECTIVE_HERMES_SSH_PORT="${EFFECTIVE_HERMES_SSH_PORT:-22}"
+EFFECTIVE_CLAUDE_SSH_USER="${CLAUDE_SSH_USER:-$HERMES_SSH_USER}"
+EFFECTIVE_CLAUDE_SSH_HOST="${CLAUDE_SSH_HOST:-$HERMES_SSH_HOST}"
+EFFECTIVE_CLAUDE_SSH_HOST="${EFFECTIVE_CLAUDE_SSH_HOST:-host.docker.internal}"
+EFFECTIVE_CLAUDE_SSH_PORT="${CLAUDE_SSH_PORT:-$HERMES_SSH_PORT}"
+EFFECTIVE_CLAUDE_SSH_PORT="${EFFECTIVE_CLAUDE_SSH_PORT:-22}"
+
+if [[ -n "$EFFECTIVE_HERMES_SSH_USER" ]]; then
+  echo "==> Hermes runs on the HOST over SSH as ${EFFECTIVE_HERMES_SSH_USER}@${EFFECTIVE_HERMES_SSH_HOST}:${EFFECTIVE_HERMES_SSH_PORT} (key: $HERMES_SSH_KEY)."
   echo "    Project files are staged in $HERMES_STAGING_DIR (shared with the host at the same path);"
   echo "    the dashboard copies the project there, Hermes edits it, and the result is merged back + pushed."
+  echo "    The dashboard agent dropdown exposes 'Hermes' (container) and 'Hermes (Host)' side-by-side;"
+  echo "    per-task 'Runner: host' toggles route into the host-staging copy + host's \`hermes\` CLI."
+  if [[ -z "$HERMES_SSH_USER" && -n "$CLAUDE_SSH_USER" ]]; then
+    echo "    (effective values inherited from CD_CLAUDE_SSH_* since CD_HERMES_SSH_USER is unset)"
+  fi
   echo "    Verify connectivity (host must allow this key + have hermes installed):"
-  echo "      docker compose exec dashboard ssh -i $HERMES_SSH_KEY -p $HERMES_SSH_PORT -o UserKnownHostsFile=$HERMES_KNOWN_HOSTS -o StrictHostKeyChecking=accept-new ${HERMES_SSH_USER}@${HERMES_SSH_HOST} 'export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && hermes --version'"
+  echo "      docker compose exec dashboard ssh -i $HERMES_SSH_KEY -p $EFFECTIVE_HERMES_SSH_PORT -o UserKnownHostsFile=$HERMES_KNOWN_HOSTS -o StrictHostKeyChecking=accept-new ${EFFECTIVE_HERMES_SSH_USER}@${EFFECTIVE_HERMES_SSH_HOST} 'export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && hermes --version'"
 elif have hermes; then
   echo "==> Hermes is self-contained in this image (CD_HERMES_SSH_USER unset)."
 else
-  echo "==> Hermes is DISABLED: set CD_HERMES_SSH_USER to run the host's Hermes over SSH (delete config.yaml in cd-config to regenerate)."
+  echo "==> Hermes is DISABLED: set CD_HERMES_SSH_USER (or CD_CLAUDE_SSH_USER — shared wiring) to run the host's Hermes over SSH (delete config.yaml in cd-config to regenerate)."
 fi
-if [[ -n "$CLAUDE_SSH_USER" ]]; then
-  echo "==> Claude Code runs on the HOST over SSH as ${CLAUDE_SSH_USER}@${CLAUDE_SSH_HOST}:${CLAUDE_SSH_PORT} (key: $CLAUDE_SSH_KEY)."
-  echo "    The dashboard agent dropdown now exposes 'Claude Code (Host)' alongside"
-  echo "    the in-container 'Claude Code'; per-task 'Runner: host' toggles route"
-  echo "    into the host-staging copy + host's `claude` CLI just like Hermes-SSH."
+if [[ -n "$EFFECTIVE_CLAUDE_SSH_USER" ]]; then
+  echo "==> Claude Code runs on the HOST over SSH as ${EFFECTIVE_CLAUDE_SSH_USER}@${EFFECTIVE_CLAUDE_SSH_HOST}:${EFFECTIVE_CLAUDE_SSH_PORT} (key: $CLAUDE_SSH_KEY)."
+  echo "    The dashboard agent dropdown exposes 'Claude Code' (container) and 'Claude Code (Host)' side-by-side;"
+  echo "    per-task 'Runner: host' toggles route into the host-staging copy + host's \`claude\` CLI just like Hermes-SSH."
+  if [[ -z "$CLAUDE_SSH_USER" && -n "$HERMES_SSH_USER" ]]; then
+    echo "    (effective values inherited from CD_HERMES_SSH_* since CD_CLAUDE_SSH_USER is unset)"
+  fi
 fi
 
 

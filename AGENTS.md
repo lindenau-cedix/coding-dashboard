@@ -16,6 +16,80 @@ output → auto-commit & push → keep history. Web + Android.
 
 ## Letzter Durchlauf
 
+### 2026-07-14 — claude (Shared Hermes/Claude SSH wiring + `hermes-host` sibling)
+
+**Aufgabe:** Zwei Dockerfile-/Entrypoint-Verbesserungen — (1) wenn der
+Operator heute `CD_HERMES_SSH_USER` setzt, läuft `claude` weiter im
+Container (erst `CD_CLAUDE_SSH_USER` aktiviert die Host-Variante). Beide
+Agents zeigen in 99% der Setups auf denselben Host, also soll ab jetzt
+**eine** SSH-Env-Var-Paarung beide `-host`-Siblings aktivieren. Nur wenn
+beide gesetzt sind, sollen sie unabhängig sein; keiner → keiner.
+(2) Bisher mutierte der Entrypoint die `hermes` AgentSpec zu einer
+SSH-Variante (Container-Hermes nicht mehr erreichbar). Neu: Container-`hermes`
+bleibt, `hermes-host` wird als Sibling registriert — exakt wie das
+bestehende `claude`/`claude-host`-Paar. Kein literaler `hermes-container`
+Sibling nötig (würde drei Hermes-Zeilen für eine CLI-Familie ergeben).
+
+**Was geändert wurde:**
+- `backend/app/config_bootstrap.py` (NEU) — der komplette first-boot
+  Generator aus dem Entrypoint als importierbare Funktion
+  `generate_initial_agents_config(env=None, *, home=None)`. Testbar
+  in-process ohne Bash-Spawn. Resolver-Semantik: jede `-host`-Sibling
+  bevorzugt die eigenen `CD_<AGENT>_SSH_{USER,HOST,PORT}`; fällt auf die
+  des anderen zurück, wenn die eigenen leer sind. Leerer User → kein
+  Sibling. Fix: `shutil.which(cmd, path=effective_path)` (ohne expliziten
+  `path=` fiel `which` auf `os.defpath` zurück und ignorierte den
+  per-Test gesetzten PATH — ein latenter Bug, der sowohl den Eintrag
+  selbst als auch realistische Deployment-Szenarien mit reduziertem
+  PATH erwischt hätte).
+- `deploy/docker/entrypoint.sh` — Python-Heredoc (vorher ~190 Zeilen
+  Inline-Logik) schrumpft auf 6 Zeilen, die `config_bootstrap` aufrufen.
+  Bash-Prelude: `mkdir -p "$HERMES_STAGING_DIR"` und das
+  `~/.ssh_known_hosts`-Touch werden jetzt von
+  `[[ -n "$HERMES_SSH_USER" || -n "$CLAUDE_SSH_USER" ]]` getrieben (nicht
+  mehr nur vom Hermes-User); redundanter zweiter `mkdir` entfernt.
+  Boot-Echo-Block löst die effektiven SSH-Werte genauso auf wie der
+  Generator und zeigt sie dem Operator; wenn nur eine Seite gesetzt
+  ist, wird das im Log explizit vermerkt.
+- `deploy/docker/coding-dashboard.docker.env.example` — neuer
+  `Host-over-SSH wiring (shared by Hermes AND Claude Code)`-Absatz
+  erklärt die Prioritätsregel; bestehende Hermes/Claude-Blöcke
+  verweisen darauf und sind entschlackt.
+- `backend/tests/smoke.py` — drei neue Tests:
+  `test_hermes_host_sibling_registers` (Sibling + Container-Eintrag
+  koexistieren; ohne SSH beides deaktiviert/abwesend),
+  `test_claude_host_reuses_hermes_ssh` (4-Fälle-Matrix: nur-Hermes,
+  nur-Claude, beide unabhängig, keiner),
+  `test_hermes_container_in_image_only` (Container-`hermes` aktiv
+  gdw. `command -v hermes` erfolgreich).
+- **Keine** Änderungen in `app/task_runner.py`,
+  `app/routers/{tasks,sessions,heartbeat}.py`, `app/config.py`,
+  `frontend/**` — die `<key>-host`-Sibling-Swap-Mechanik und die
+  `available_agent_keys`-Ableitung greifen `hermes-host` automatisch
+  auf (generische Lookups).
+
+**Verhalten danach:**
+- Operator setzt NUR `CD_HERMES_SSH_USER=foo` → `hermes-host` UND
+  `claude-host` registriert, beide zeigen auf
+  `foo@host.docker.internal:22`. Per-Task-Runner-Dropdown schaltet
+  für beide Agents zwischen Container und Host.
+- Operator setzt NUR `CD_CLAUDE_SSH_USER=bar` → beide Siblings
+  registriert auf `bar@host.docker.internal:22`.
+- Operator setzt BEIDE unabhängig → jeder Sibling nutzt seine eigenen
+  Werte (wie bisher).
+- Operator setzt KEINEN → kein `-host`-Sibling, Runner-Toggle
+  versteckt für beide Agents, Container-CLIs laufen wie bisher.
+- Container-`hermes` bleibt IMMER als eigener Eintrag stehen (heilt
+  den bisherigen Verlust der Container-Variante in SSH-Mode). Per-Task
+  kann zwischen `hermes` (Container, nur wenn `hermes` CLI installiert)
+  und `hermes-host` (SSH) gewählt werden — exakt wie es bereits für
+  `claude`/`claude-host` funktioniert.
+
+**Verifikation:** `cd backend && .venv/bin/python tests/smoke.py` →
+**528 PASS / 2 FAIL**. Alle 25 neuen Assertions PASS. Die 2
+Failures (`cors preflight -> 200`, `cors reflects android origin`) sind
+die pre-existing CORS-Tests auf `main` und unverändert.
+
 ### 2026-07-14 — claude (Sessions: Env-Profil + Runner; Heartbeat: Global Env-Profil + Agent-Auswahl)
 
 **Aufgabe:** Zwei fehlende UI-Bedienelemente nachgerüstet — (1) auf der
@@ -116,6 +190,9 @@ repos) under `/var/lib/coding-dashboard/`.
 ```
 backend/app/
   config.py        Settings (env CD_*) + agent config (YAML) + context_instruction
+  config_bootstrap.py First-boot config.yaml generator (extracted from entrypoint.sh,
+                   unit-testable; emits `hermes`/`hermes-host`/`claude`/`claude-host`
+                   siblings with shared SSH-wiring resolver)
   database.py      Engine / session (SQLite), init_db, session_scope
   models.py        Project, Task, HeartbeatSeen, EnvProfile
   schemas.py       Pydantic I/O
@@ -129,9 +206,11 @@ backend/app/
   env_crypto.py    Fernet wrapper bound to CD_SECRET_KEY (encrypts env-profile tokens)
   uploads.py       Image attachments: Base64 / data-URL decode + validation
   task_runner.py   TaskManager: per-project lock, WS pub/sub, AGENTS.md maintenance,
-                   auto-commit + push; SessionManager for PTY TUI sessions
+                   auto-commit + push; SessionManager for PTY TUI sessions;
+                   <base>-host sibling swap shim for runner="host"
   heartbeat.py     HeartbeatRunner: background loop, auto-poll GitHub issues,
-                   auto-spawn Claude Code tasks; singleton at `heartbeat`
+                   auto-spawn Claude Code tasks; singleton at `heartbeat`;
+                   agent-key + env-profile runtime overrides
   host_lock.py     One <kind>-<id>.lock file per active run (best-effort visibility)
   host_staging.py  Shared staging dir for agents running on the host (Hermes-SSH)
   routers/         auth, projects, tasks, sessions, heartbeat, env_profiles, ws
@@ -233,6 +312,21 @@ when the live channel is gone, so reconnects don't lose output.
 - Agents run autonomously (`--dangerously-skip-permissions` / `--yolo` /
   Codex non-interactive) and push without confirmation — intended for
   private repos with a dedicated token; the service runs as non-root user.
+- **Shared Hermes/Claude SSH wiring (Docker entrypoint).** Setting EITHER
+  `CD_HERMES_SSH_USER` OR `CD_CLAUDE_SSH_USER` lights up BOTH the
+  `hermes-host` and `claude-host` siblings at the resolved user/host/port
+  (each sibling prefers its own env, falls back to the other agent's).
+  Setting BOTH only matters when they point at different hosts. Setting
+  NEITHER disables both. Container `hermes` (and `claude`) stay as their
+  own entries — only the SSH form moves to the sibling, mirroring the
+  existing `claude`/`claude-host` pair. Operator-facing wording lives in
+  `deploy/docker/coding-dashboard.docker.env.example`.
+- **`<base>-host` is the universal sibling-swap pattern.** Adding a new
+  on-host agent = register a sibling under `<base>-host` with
+  `host_staging=True`; the per-task Runner dropdown, the heartbeat
+  `available_agent_keys` selector, the SessionManager / TaskManager
+  `<base>-host` swap shims and the front-end `host_agent_key` resolver
+  all pick it up with no code change.
 
 ## Gotchas
 

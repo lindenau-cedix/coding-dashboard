@@ -4464,6 +4464,233 @@ def test_session_runner_shim() -> None:
     cfg.agents.pop("fake-host", None)
 
 
+def test_hermes_host_sibling_registers() -> None:
+    """With CD_HERMES_SSH_USER set, the entrypoint generator must emit BOTH
+    ``hermes`` (container-side, enabled iff the CLI is on PATH) AND
+    ``hermes-host`` (the SSH-driven sibling with host_staging=True and ssh
+    argv pointing at the resolved user@host). Without CD_HERMES_SSH_USER
+    AND with no in-image CLI, neither is enabled (no ``hermes-host``
+    registered; container ``hermes`` is disabled but present so operators
+    can flip it on by hand later).
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    # ---- case A: Hermes SSH user set, no in-image hermes on PATH ----
+    env_a = {
+        "CD_HERMES_SSH_USER": "huser",
+        "CD_HERMES_SSH_HOST": "host.docker.internal",
+        "CD_HERMES_SSH_PORT": "22",
+        # No hermes binary on PATH -> container entry is disabled.
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+    }
+    doc_a = generate_initial_agents_config(env_a)
+    agents_a = doc_a["agents"]
+
+    check(
+        "hermes_host: container hermes entry stays (CLI absent -> enabled=False)",
+        "hermes" in agents_a and agents_a["hermes"].get("enabled") is False,
+        list(agents_a),
+    )
+    check(
+        "hermes_host: hermes-host sibling is registered",
+        "hermes-host" in agents_a,
+        list(agents_a),
+    )
+    host_a = agents_a["hermes-host"]
+    check(
+        "hermes_host: host_staging=True",
+        host_a.get("host_staging") is True,
+        str(host_a.get("host_staging")),
+    )
+    check(
+        "hermes_host: command starts with ssh",
+        bool(host_a.get("command")) and host_a["command"][0] == "ssh",
+        str(host_a["command"][:3]) if host_a.get("command") else None,
+    )
+    check(
+        "hermes_host: command targets huser@host.docker.internal",
+        any(t == "huser@host.docker.internal" for t in host_a["command"]),
+        str(host_a["command"]),
+    )
+    check(
+        "hermes_host: display_name='Hermes (Host)'",
+        host_a.get("display_name") == "Hermes (Host)",
+        str(host_a.get("display_name")),
+    )
+    check(
+        "hermes_host: prompt_via=stdin (multi-line safe via ssh)",
+        host_a.get("prompt_via") == "stdin",
+        str(host_a.get("prompt_via")),
+    )
+    check(
+        "hermes_host: enabled=True",
+        host_a.get("enabled") is True,
+        str(host_a.get("enabled")),
+    )
+
+    # ---- case B: no SSH user, no CLI on PATH ----
+    env_b = {"PATH": "/var/empty/bin"}
+    doc_b = generate_initial_agents_config(env_b)
+    agents_b = doc_b["agents"]
+
+    check(
+        "hermes_host: hermes-host absent when no SSH user",
+        "hermes-host" not in agents_b,
+        list(agents_b),
+    )
+    check(
+        "hermes_host: container hermes disabled when CLI absent (no SSH)",
+        "hermes" in agents_b and agents_b["hermes"].get("enabled") is False,
+    )
+
+
+def test_claude_host_reuses_hermes_ssh() -> None:
+    """4-case matrix proving the shared-SSH-wiring rule from
+    deploy/docker/entrypoint.sh (mirrored in config_bootstrap.py):
+
+      Hermes only set -> claude-host registered with Hermes values.
+      Claude only set -> hermes-host registered with Claude values.
+      Both set       -> each sibling uses its own values.
+      Neither set    -> neither -host sibling present.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    # case A: Hermes-only -> claude-host reuses Hermes ssh values
+    doc_a = generate_initial_agents_config(
+        {
+            "CD_HERMES_SSH_USER": "huser",
+            "CD_HERMES_SSH_HOST": "hermes.host",
+            "CD_HERMES_SSH_PORT": "2222",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "claude_reuse: claude-host registered when only Hermes SSH user set",
+        "claude-host" in doc_a,
+        list(doc_a),
+    )
+    cmd_a = doc_a["claude-host"]["command"]
+    check(
+        "claude_reuse: claude-host command uses huser@hermes.host",
+        any(t == "huser@hermes.host" for t in cmd_a),
+        str(cmd_a),
+    )
+    check(
+        "claude_reuse: claude-host command uses port 2222 (inherited)",
+        "2222" in cmd_a,
+        str(cmd_a),
+    )
+
+    # case B: Claude-only -> hermes-host reuses Claude ssh values
+    doc_b = generate_initial_agents_config(
+        {
+            "CD_CLAUDE_SSH_USER": "cuser",
+            "CD_CLAUDE_SSH_HOST": "claude.host",
+            "CD_CLAUDE_SSH_PORT": "2200",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "claude_reuse: hermes-host registered when only Claude SSH user set",
+        "hermes-host" in doc_b,
+        list(doc_b),
+    )
+    cmd_b = doc_b["hermes-host"]["command"]
+    check(
+        "claude_reuse: hermes-host command uses cuser@claude.host",
+        any(t == "cuser@claude.host" for t in cmd_b),
+        str(cmd_b),
+    )
+    check(
+        "claude_reuse: hermes-host command uses port 2200 (inherited)",
+        "2200" in cmd_b,
+        str(cmd_b),
+    )
+
+    # case C: Both set independently -> each sibling uses its own values
+    doc_c = generate_initial_agents_config(
+        {
+            "CD_HERMES_SSH_USER": "huser",
+            "CD_HERMES_SSH_HOST": "hermes.host",
+            "CD_HERMES_SSH_PORT": "2222",
+            "CD_CLAUDE_SSH_USER": "cuser",
+            "CD_CLAUDE_SSH_HOST": "claude.host",
+            "CD_CLAUDE_SSH_PORT": "2200",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "both_set: hermes-host uses huser@hermes.host (own values)",
+        any(t == "huser@hermes.host" for t in doc_c["hermes-host"]["command"]),
+        str(doc_c["hermes-host"]["command"]),
+    )
+    check(
+        "both_set: claude-host uses cuser@claude.host (own values)",
+        any(t == "cuser@claude.host" for t in doc_c["claude-host"]["command"]),
+        str(doc_c["claude-host"]["command"]),
+    )
+
+    # case D: Neither set -> no -host siblings
+    doc_d = generate_initial_agents_config(
+        {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+    )["agents"]
+    check("neither_set: hermes-host absent", "hermes-host" not in doc_d, list(doc_d))
+    check("neither_set: claude-host absent", "claude-host" not in doc_d, list(doc_d))
+
+
+def test_hermes_container_in_image_only() -> None:
+    """The container ``hermes`` entry is enabled iff ``command -v hermes``
+    succeeds (PATH-search via shutil.which in the generator). When hermes
+    is on PATH, enabled=True; when not, enabled=False. The entry is kept
+    in both cases so operators can flip ``enabled: true`` by hand later
+    if they install the CLI into the cd-home volume post-boot.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    # ---- hermes NOT on PATH -> disabled ----
+    doc_no = generate_initial_agents_config({"PATH": "/var/empty/bin"})["agents"]
+    check(
+        "hermes_container: disabled when CLI absent",
+        doc_no["hermes"].get("enabled") is False,
+        str(doc_no["hermes"].get("enabled")),
+    )
+    check(
+        "hermes_container: entry still present (operators can flip by hand)",
+        "hermes" in doc_no,
+    )
+
+    # ---- hermes on PATH (fake shim in a temp dir) -> enabled ----
+    fake_bin = TMP / "fakebin-hermes"
+    fake_bin.mkdir(parents=True, exist_ok=True)
+    shim = fake_bin / "hermes"
+    shim.write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    shim.chmod(0o755)
+    doc_yes = generate_initial_agents_config(
+        {"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin"}
+    )["agents"]
+    check(
+        "hermes_container: enabled when CLI on PATH",
+        doc_yes["hermes"].get("enabled") is True,
+        str(doc_yes["hermes"].get("enabled")),
+    )
+
+    # ---- also: a self-contained hermes stays enabled regardless of SSH ----
+    # (with hermes on PATH AND no SSH user -> no hermes-host; container
+    # entry enabled)
+    doc_ssh_off = generate_initial_agents_config(
+        {"PATH": f"{fake_bin}:/usr/local/bin:/usr/bin:/bin"}
+    )["agents"]
+    check(
+        "hermes_container: hermes-host absent (no SSH user, even with CLI)",
+        "hermes-host" not in doc_ssh_off,
+        list(doc_ssh_off),
+    )
+    check(
+        "hermes_container: container hermes enabled in self-contained mode",
+        doc_ssh_off["hermes"].get("enabled") is True,
+    )
+
+
 def test_create_task_persists_env_profile_key() -> None:
     """REST round-trip: POST /api/projects/{pid}/tasks with
     env_profile_key='p1' returns 201; GET /api/tasks/{id} reflects the
@@ -5265,6 +5492,9 @@ def main() -> int:
         test_runner_toggle_persistence()
         test_runner_fallback_when_ssh_not_configured()
         test_session_runner_shim()
+        test_hermes_host_sibling_registers()
+        test_claude_host_reuses_hermes_ssh()
+        test_hermes_container_in_image_only()
         test_create_task_persists_env_profile_key()
         test_heartbeat_env_profile_resolution()
         # 2026-07-14: global heartbeat env-profile + agent-key endpoints
