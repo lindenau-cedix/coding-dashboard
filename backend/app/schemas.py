@@ -293,6 +293,14 @@ class HeartbeatStatus(BaseModel):
     # Empty = no env injection (default). Non-empty = every auto-spawned
     # task runs that profile unless a per-project override is set.
     env_profile_key: str = ""
+    # Agent keys the operator can pick the heartbeat's auto-spawned agent
+    # from. Includes the configured default (CD_HEARTBEAT_AGENT_KEY) and
+    # every ``<key>-host`` sibling with ``enabled=True`` (the Docker
+    # entrypoint auto-creates ``claude-host`` when CD_CLAUDE_SSH_USER is
+    # set; systemd operators hand-write it in config.yaml). Mirrors the
+    # same selector the start form uses so the heartbeat can be flipped
+    # between container / host without a backend restart.
+    available_agent_keys: list[str] = []
     last_tick_at: Optional[datetime] = None
     last_tick_summary: Optional[str] = None
     projects: list[HeartbeatProjectStatus] = []
@@ -382,3 +390,28 @@ class ProjectHeartbeatEnvProfileIn(BaseModel):
     that is empty too)."""
 
     env_profile_key: str = ""
+
+
+class HeartbeatEnvProfileIn(BaseModel):
+    """Body for ``POST /api/heartbeat/env-profile`` — global default.
+
+    Empty string clears the global default (no env injection; per-project
+    overrides still win when set). Non-empty must reference an existing
+    ``env_profiles.key``. In-memory only: resets on backend restart,
+    same as the global enable toggle and the agent-key selector."""
+
+    env_profile_key: str = ""
+
+
+class HeartbeatAgentKeyIn(BaseModel):
+    """Body for ``POST /api/heartbeat/agent-key`` — swap the auto-spawned agent.
+
+    Lets the operator flip the heartbeat between ``claude`` (default,
+    in-container) and ``claude-host`` (SSH-into-host) without editing
+    env vars and restarting the backend. The key must exist in
+    ``agents.agents`` and be enabled — otherwise the route 400s. The
+    choice is in-memory only; resets on backend restart (operators
+    wanting a permanent switch set ``CD_HEARTBEAT_AGENT_KEY`` in the
+    service config)."""
+
+    agent_key: str

@@ -86,6 +86,13 @@ class HeartbeatRunner:
         self._task: asyncio.Task[None] | None = None
         self._enabled_override: bool | None = None  # None = use settings
         self._running = False
+        # In-memory overrides for the heartbeat's auto-spawned agent and
+        # the global env-profile default. ``None`` (NOT "") means "use
+        # the env-var default"; an empty string means "explicitly
+        # cleared" (only valid for the env-profile key — the agent
+        # always has SOME default, and the route validates non-empty).
+        self._agent_key_override: str | None = None
+        self._env_profile_key_override: str | None = None
         # ``asyncio.Lock`` so two simultaneous ticks can't double-spawn.
         self._tick_lock = asyncio.Lock()
         # Per-project semaphore: caps parallel GitHub polls per tick.
@@ -108,6 +115,38 @@ class HeartbeatRunner:
 
     def set_enabled(self, value: bool) -> None:
         self._enabled_override = value
+
+    # ------------------------------------------------------------------ #
+    # Runtime overrides for auto-spawned agent + global env-profile
+    # ------------------------------------------------------------------ #
+    # The default values still come from ``Settings`` (env vars). These
+    # getters/setters let the operator flip them from the /heartbeat page
+    # without editing env vars and restarting; the change is in-memory
+    # only and resets on backend restart, same as ``set_enabled``.
+    @property
+    def agent_key(self) -> str:
+        """Runtime override; empty string when not overridden."""
+        return self._agent_key_override or ""
+
+    def set_agent_key(self, key: str) -> None:
+        """Set / clear the runtime agent-key override. Empty string clears
+        the override (falls back to ``Settings.heartbeat_agent_key``)."""
+        self._agent_key_override = key.strip() or None
+
+    @property
+    def env_profile_key(self) -> str:
+        """Runtime override; empty string when not overridden (distinct
+        from ``None`` = no override at all — operators can clear the
+        global default explicitly)."""
+        return self._env_profile_key_override or ""
+
+    def set_env_profile_key(self, key: str) -> None:
+        """Set / clear the runtime env-profile override. Empty string
+        clears the override (falls back to
+        ``Settings.heartbeat_env_profile_key``). The setter does NOT
+        validate against the env_profiles table — callers (the route)
+        have already 404'd on a non-existent key."""
+        self._env_profile_key_override = key.strip() or None
 
     async def start(self) -> None:
         """Spawn the background loop. Idempotent."""
@@ -224,7 +263,10 @@ class HeartbeatRunner:
     async def _tick(self, *, bypass_cooldown: bool = False) -> dict[str, Any]:
         settings = get_settings()
         agents = get_agents_config()
-        agent_key = settings.heartbeat_agent_key
+        # Runtime override (set via POST /api/heartbeat/agent-key) wins;
+        # empty string falls back to the env-var default. Read at tick
+        # time so a flip on the /heartbeat page takes effect immediately.
+        agent_key = self.agent_key or settings.heartbeat_agent_key
         if agent_key not in agents.agents:
             log.warning(
                 "heartbeat: configured agent_key=%r not in agents config; skipping tick",
@@ -651,14 +693,21 @@ class HeartbeatRunner:
 
         Order of precedence (per tick, NOT persisted on ``HeartbeatSeen``):
         1. Per-project override (``projects.heartbeat_env_profile_key``).
-        2. Global default (``CD_HEARTBEAT_ENV_PROFILE_KEY``).
-        3. Empty string — no env injection (default).
+        2. Runtime global default (``POST /api/heartbeat/env-profile``).
+        3. Env-var global default (``CD_HEARTBEAT_ENV_PROFILE_KEY``).
+        4. Empty string — no env injection (default).
 
         Resolved at dispatch time so an operator who flips a setting on
         the /heartbeat page sees the new value apply to the NEXT tick.
         """
         if getattr(project, "heartbeat_env_profile_key", ""):
             return project.heartbeat_env_profile_key
+        # Runtime override (set via POST /api/heartbeat/env-profile) wins
+        # over the env-var default; an explicit empty string from the
+        # operator (clearing the global default) falls through to the
+        # env-var fallback below.
+        if self.env_profile_key:
+            return self.env_profile_key
         if getattr(settings, "heartbeat_env_profile_key", ""):
             return settings.heartbeat_env_profile_key
         return ""

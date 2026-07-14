@@ -25,6 +25,8 @@ from ..database import get_db
 from ..heartbeat import heartbeat, heartbeat_followup
 from ..models import EnvProfile, HeartbeatSeen, Project, Task
 from ..schemas import (
+    HeartbeatAgentKeyIn,
+    HeartbeatEnvProfileIn,
     HeartbeatIssueSeen,
     HeartbeatProjectStatus,
     HeartbeatStatus,
@@ -47,7 +49,9 @@ def get_heartbeat_status(
 ) -> HeartbeatStatus:
     settings = get_settings()
     agents = get_agents_config()
-    agent_key = settings.heartbeat_agent_key
+    # Effective agent key: in-memory override (set via POST
+    # /api/heartbeat/agent-key) wins; falls back to the env var.
+    agent_key = heartbeat.agent_key or settings.heartbeat_agent_key
     if agent_key not in agents.agents:
         agent_key = next(iter(agents.agents), "")
 
@@ -86,6 +90,21 @@ def get_heartbeat_status(
             )
         )
 
+    # Compute the agent keys the operator can switch to. Includes the
+    # configured default plus every enabled "<key>-host" sibling so the
+    # heartbeat can flip between container / host without an env edit.
+    available_agent_keys: list[str] = []
+    base_default = settings.heartbeat_agent_key
+    if base_default in agents.agents and agents.agents[base_default].enabled:
+        available_agent_keys.append(base_default)
+    for key, spec in agents.agents.items():
+        if (
+            key.endswith("-host")
+            and spec.enabled
+            and key not in available_agent_keys
+        ):
+            available_agent_keys.append(key)
+
     return HeartbeatStatus(
         enabled=heartbeat.enabled,
         interval_seconds=settings.heartbeat_interval_seconds,
@@ -97,9 +116,12 @@ def get_heartbeat_status(
         # tick's ``assignee_logins`` log line; operators can verify it
         # worked by checking the server log instead of blocking the GET.
         assignee_logins=settings.heartbeat_assignee_logins_list,
-        # Global env-profile default (CD_HEARTBEAT_ENV_PROFILE_KEY).
+        # Global env-profile default: in-memory override (set via POST
+        # /api/heartbeat/env-profile) wins; falls back to the env var.
         # Empty = standard Anthropic auth / endpoint.
-        env_profile_key=settings.heartbeat_env_profile_key,
+        env_profile_key=heartbeat.env_profile_key
+        or settings.heartbeat_env_profile_key,
+        available_agent_keys=available_agent_keys,
         projects=statuses,
     )
 
@@ -139,6 +161,73 @@ async def trigger_heartbeat(
     """
     summary = await heartbeat.tick_now(bypass_cooldown=True)
     return {"triggered": True, "summary": summary}
+
+
+@router.post("/env-profile")
+def set_heartbeat_env_profile(
+    body: HeartbeatEnvProfileIn,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[str, Depends(get_current_user)],
+) -> dict:
+    """Set or clear the GLOBAL heartbeat env-profile default.
+
+    Empty string clears the global default (no env injection; per-project
+    overrides on the projects table still win when set). Non-empty must
+    reference an existing ``env_profiles.key``. Effective at the NEXT
+    heartbeat tick (and applies to manual triggers too — the resolver
+    is read at dispatch time, not at HTTP time).
+
+    In-memory only: the change resets on backend restart, same as the
+    global enable toggle and the agent-key selector. Operators wanting a
+    permanent switch set ``CD_HEARTBEAT_ENV_PROFILE_KEY`` in the service
+    config and restart.
+    """
+    key = body.env_profile_key
+    if key:
+        exists = (
+            db.query(EnvProfile.id)
+            .filter(EnvProfile.key == key)
+            .first()
+        )
+        if exists is None:
+            raise HTTPException(
+                404, f"Env-Profil '{key}' nicht gefunden."
+            )
+    heartbeat.set_env_profile_key(key)
+    return {"env_profile_key": heartbeat.env_profile_key}
+
+
+@router.post("/agent-key")
+def set_heartbeat_agent_key(
+    body: HeartbeatAgentKeyIn,
+    user: Annotated[str, Depends(get_current_user)],
+) -> dict:
+    """Swap the heartbeat's auto-spawned agent at runtime.
+
+    Default ``CD_HEARTBEAT_AGENT_KEY`` (env var) wins at startup; the
+    operator can override at runtime via this endpoint to flip between
+    ``claude`` (in-container) and ``claude-host`` (SSH-into-host) without
+    editing env vars and restarting. The override resets on backend
+    restart (operators wanting a permanent switch set the env var).
+
+    The key must exist in ``agents.agents`` AND be enabled — otherwise
+    the route 400s with an operator message. Empty string falls back to
+    the env-var default (clear the runtime override).
+    """
+    key = body.agent_key.strip()
+    if key:
+        agents = get_agents_config()
+        spec = agents.agents.get(key)
+        if spec is None or not spec.enabled:
+            raise HTTPException(
+                400,
+                f"Agent '{key}' ist nicht aktiviert. Verfügbar: "
+                + ", ".join(sorted(agents.agents))
+                or "(keine)",
+            )
+    heartbeat.set_agent_key(key)
+    effective = heartbeat.agent_key or get_settings().heartbeat_agent_key
+    return {"agent_key": effective}
 
 
 # Per-project routes — mounted at /api. Paths start with

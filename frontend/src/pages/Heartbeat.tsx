@@ -135,6 +135,30 @@ export default function Heartbeat() {
     }
   }
 
+  async function setGlobalEnvProfile(key: string) {
+    setBusy(true);
+    try {
+      await api.setHeartbeatEnvProfile(key);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setGlobalAgentKey(key: string) {
+    setBusy(true);
+    try {
+      await api.setHeartbeatAgentKey(key);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function triggerNow() {
     setBusy(true);
     try {
@@ -177,15 +201,7 @@ export default function Heartbeat() {
 
       <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            {status.env_profile_key && (
-              <span
-                className="rounded bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300"
-                title={`Set via CD_HEARTBEAT_ENV_PROFILE_KEY; per-project override beats this`}
-              >
-                🔑 Globales Profil: {status.env_profile_key}
-              </span>
-            )}
+          <div className="flex flex-wrap items-center gap-3">
             <span
               className={`inline-flex h-3 w-3 rounded-full ${
                 status.enabled
@@ -243,6 +259,66 @@ export default function Heartbeat() {
               </Button>
             )}
           </div>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
+          <span className="flex items-center gap-2">
+            <label className="text-xs uppercase tracking-wide text-slate-400">
+              Agent
+            </label>
+            <select
+              value={status.agent_key}
+              onChange={(e) => setGlobalAgentKey(e.target.value)}
+              disabled={busy || status.available_agent_keys.length <= 1}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100 outline-none focus:border-cyan-500 disabled:opacity-60"
+              title={
+                status.available_agent_keys.length <= 1
+                  ? "Kein <agent>-host Sibling aktiviert (setze CD_<AGENT>_SSH_USER und starte neu)."
+                  : "Bestimmt, welcher Agent der Heartbeat pro Issue startet. In-Memory; resettet beim Neustart."
+              }
+            >
+              {status.available_agent_keys.length === 0 ? (
+                <option value={status.agent_key}>{status.agent_key}</option>
+              ) : (
+                status.available_agent_keys.map((k) => (
+                  <option key={k} value={k}>
+                    {k}
+                    {k.endsWith("-host") ? " 🖥 host" : ""}
+                  </option>
+                ))
+              )}
+            </select>
+            {status.agent_key.endsWith("-host") && (
+              <span
+                className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
+                title="Per SSH auf dem Host (CD_<AGENT>_SSH_USER)"
+              >
+                🖥 host
+              </span>
+            )}
+          </span>
+          <span className="flex items-center gap-2">
+            <label className="text-xs uppercase tracking-wide text-slate-400">
+              Default Env-Profil
+            </label>
+            <select
+              value={status.env_profile_key}
+              onChange={(e) => setGlobalEnvProfile(e.target.value)}
+              disabled={busy || profiles.length === 0}
+              className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100 outline-none focus:border-cyan-500 disabled:opacity-60"
+              title={
+                profiles.length === 0
+                  ? "Keine Env-Profile angelegt (lege welche unter /settings/env-profiles an)."
+                  : "Globaler Default für auto-gestartete Tasks. Pro-Projekt-Override (rechts) schlägt diesen."
+              }
+            >
+              <option value="">Standard (CD_HEARTBEAT_ENV_PROFILE_KEY)</option>
+              {profiles.map((pr) => (
+                <option key={pr.key} value={pr.key}>
+                  {pr.name}
+                </option>
+              ))}
+            </select>
+          </span>
         </div>
         <p className="mt-3 text-xs text-slate-500">
           Der globale Schalter gilt nur im laufenden Prozess. Für einen
