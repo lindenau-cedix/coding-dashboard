@@ -16,6 +16,68 @@ output → auto-commit & push → keep history. Web + Android.
 
 ## Letzter Durchlauf
 
+### 2026-07-14 — claude (Container/Host via SSH in the Agent-Dropdown)
+
+**Aufgabe:** Auf der Projekt-Detailseite wurde der Agent-Dropdown umgebaut,
+sodass Claude Code und Hermes ihre Container- und Host-via-SSH-Varianten
+direkt im selben Dropdown anbieten — statt der bisherigen 2-Schritt-Wahl
+("Agent" + separater "Runner: host"-Dropdown). Die bestehenden
+`<base>-host`-AgentSpec-Siblings (von der Docker-entrypoint und der
+`config_bootstrap` registriert) sind bereits da; sie wurden bisher nur über
+den sekundären Runner-Toggle angesteuert.
+
+**Was geändert wurde:**
+- `frontend/src/pages/ProjectDetail.tsx` — neuer `buildAgentChoices()`-Helper,
+  der für jeden Basis-Agent mit `host_agent_key` automatisch zwei Optionen
+  in einem Dropdown erzeugt: `<Base> — Container` und `<Base> — Host via SSH`.
+  Operators wechseln jetzt einmal statt zwei Mal. `Runner` bleibt als
+  interner State erhalten, damit `runner="host"` weiterhin in der
+  `submit`/`startSession`-Payload landet (Backend-Kompatibilität) — der
+  host-spezifische Anteil geht zusätzlich in `task.agent`/`task.agent
+  -host` (UI sendet die konkrete AgentSpec-Key). Der separate
+  "Runner"-Dropdown wurde entfernt. Env-Profile-Logik liest jetzt
+  `baseAgentKey(agent) === "claude"`, damit sie auch im
+  Claude-Code-Host-Modus sichtbar bleibt.
+- `backend/app/task_runner.py` — der Host-Shim (`runner == "host" → f"{
+  agent_key}-host"`) wird übersprungen, wenn der `agent_key` bereits ein
+  `-host`-Sibling ist. Ohne diese Wache würde das UI-Payload
+  (`agent="claude-host"` + `runner="host"`) zu einem
+  `claude-host-host`-Lookup kippen und das Sub-Skript sprengen. In
+  `SessionManager.start` dieselbe Wache.
+- `frontend/src/components/ui.tsx` — `ErrorText` bekommt eine optionale
+  `className`-Prop (war ein Tippfehler im `EnvProfiles.tsx`-Call, der
+  vorher stillschweigend in einer Pre-existing-TS-Fehleraufsammlung
+  endete und durch diesen Patch endlich grün wird).
+- `backend/tests/smoke.py` — neuer Test `test_runner_picks_host_sibling_by_key`
+  deckt vier Fälle ab: legacy `base` + `runner="host"`, neues UI-Payload
+  mit bereits aufgelöstem `<base>-host`-Key, Session-Pendant, plus die
+  legacy-Bestätigung dass `runner="host"` weiterhin sauber zum Sibling
+  swappt (kein Verhalten-Regress).
+
+**Verhalten danach:**
+- Operator sieht in der Projekt-Detailseite für Claude Code und Hermes
+  jeweils zwei Optionen in einem Dropdown: "Container" und "Host via
+  SSH". Andere Agents (Codex, …) erscheinen weiterhin mit nur einem
+  Eintrag.
+- Wechsel zwischen Container ↔ Host setzt Model-/Effort-Defaults nicht
+  zurück (Runner-Flag allein ist im UI-State). Env-Profil-Dropdown ist
+  sichtbar sobald der Basis-Agent `claude` ist, unabhängig vom Runner.
+- Bestehende `/api/projects/{id}/tasks`-Calls mit
+  `{"agent":"claude","runner":"host",…}` funktionieren weiter
+  (Legacy-Pfad); das neue Frontend sendet stattdessen
+  `{"agent":"claude-host","runner":"host",…}`. Beide Routen resolven
+  auf den gleichen Sibling-Spec.
+- `available_agent_keys` aus dem Heartbeat-Endpoint bleibt
+  unverändert (Containet `claude` + `claude-host`, der
+  `agent_key`-Selector zeigt weiter beide Optionen).
+
+**Verifikation:** `cd backend && .venv/bin/python tests/smoke.py` → alle
+pre-existing PASS + alle 4 neuen `host_key_payload:*`-Assertions PASS.
+Die einzigen Failures bleiben die 2 pre-existing CORS-Failures auf main
+(unverändert, unabhängig). Frontend: `npm run typecheck` → PASS
+(0 Errors), einschließlich des durch den `ErrorText`-Patch
+mitbehobenen `EnvProfiles.tsx`-TS2322.
+
 ### 2026-07-14 — claude (Shared Hermes/Claude SSH wiring + `hermes-host` sibling)
 
 **Aufgabe:** Zwei Dockerfile-/Entrypoint-Verbesserungen — (1) wenn der

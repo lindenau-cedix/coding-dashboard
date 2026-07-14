@@ -171,10 +171,18 @@ export function FullscreenShell({
   );
 }
 
-export function ErrorText({ children }: { children: ReactNode }) {
+export function ErrorText({
+  className = "",
+  children,
+}: {
+  className?: string;
+  children: ReactNode;
+}) {
   if (!children) return null;
   return (
-    <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+    <p
+      className={`rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-300 ${className}`}
+    >
       {children}
     </p>
   );

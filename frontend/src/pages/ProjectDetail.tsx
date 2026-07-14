@@ -31,6 +31,82 @@ function readAsDataUrl(file: File): Promise<string> {
   });
 }
 
+type AgentChoice = {
+  value: string;
+  agentKey: string;
+  runner: Runner;
+  label: string;
+  disabled: boolean;
+};
+
+function baseAgentKey(key: string): string {
+  return key.endsWith("-host") ? key.slice(0, -5) : key;
+}
+
+function isHostAgentChoice(agent: Agent): boolean {
+  return agent.key.endsWith("-host");
+}
+
+function supportsMode(agent: Agent, mode: TaskMode): boolean {
+  if (mode === "goal") return agent.supports_goal;
+  if (mode === "session") return agent.supports_session;
+  return true;
+}
+
+function buildAgentChoices(agents: Agent[], mode: TaskMode): AgentChoice[] {
+  const choices: AgentChoice[] = [];
+  const hostKeysRepresented = new Set<string>();
+
+  for (const agent of agents) {
+    if (isHostAgentChoice(agent) || !supportsMode(agent, mode)) continue;
+
+    const hasHostChoice = Boolean(agent.host_agent_key);
+    choices.push({
+      value: agent.key,
+      agentKey: agent.key,
+      runner: "",
+      label: hasHostChoice ? `${agent.display_name} — Container` : agent.display_name,
+      disabled: !agent.enabled,
+    });
+
+    if (agent.host_agent_key) {
+      const host = agents.find((candidate) => candidate.key === agent.host_agent_key);
+      if (host && supportsMode(host, mode)) {
+        choices.push({
+          value: `${agent.key}::host`,
+          agentKey: agent.key,
+          runner: "host",
+          label: `${agent.display_name} — Host via SSH`,
+          disabled: !host.enabled,
+        });
+        hostKeysRepresented.add(host.key);
+      }
+    }
+  }
+
+  // Keep explicitly configured host agents usable even when their base entry
+  // is absent from a hand-written config. Normal generated configs are folded
+  // into the base agent's two choices above.
+  for (const agent of agents) {
+    if (
+      !isHostAgentChoice(agent)
+      || hostKeysRepresented.has(agent.key)
+      || !supportsMode(agent, mode)
+    ) {
+      continue;
+    }
+    choices.push({
+      value: agent.key,
+      agentKey: agent.key,
+      runner: "",
+      label: `${agent.display_name} — Host via SSH`,
+      disabled: !agent.enabled,
+    });
+  }
+
+  return choices;
+}
+
 export default function ProjectDetail() {
   const { id = "" } = useParams();
   const ctx = useProject();
@@ -47,11 +123,9 @@ export default function ProjectDetail() {
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<TaskImagePayload[]>([]);
   const [sessionStartArgs, setSessionStartArgs] = useState("");
-  // Per-task "Runner: host" + "Env-Profil" selection. The Runner dropdown
-  // is hidden when the current agent has no enabled "<agent>-host" sibling;
-  // the Env-Profile dropdown is only shown for Claude (other agents ignore
-  // the field on the server). Both reset when the operator switches agent
-  // or mode.
+  // Per-task execution target selected through the Agent dropdown. Claude Code
+  // and Hermes expose explicit container/SSH choices there; the backend still
+  // receives the existing base-agent + runner payload for compatibility.
   const [runner, setRunner] = useState<Runner>("");
   const [envProfileKey, setEnvProfileKey] = useState("");
   // Loaded once per visit — the dropdown's items come from here.
@@ -86,7 +160,12 @@ export default function ProjectDetail() {
 
   const goalSupported = useMemo(() => agents.some((a) => a.supports_goal), [agents]);
   const sessionSupported = useMemo(() => agents.some((a) => a.supports_session), [agents]);
-  const currentAgent = useMemo(() => agents.find((a) => a.key === agent), [agents, agent]);
+  const currentAgent = useMemo(
+    () => agents.find((a) => a.key === agent) ?? agents.find((a) => a.key === `${agent}-host`),
+    [agents, agent],
+  );
+  const agentChoices = useMemo(() => buildAgentChoices(agents, mode), [agents, mode]);
+  const selectedAgentChoice = `${agent}${runner === "host" ? "::host" : ""}`;
   const modeOptions = useMemo<TaskMode[]>(() => {
     const options: TaskMode[] = ["task"];
     if (goalSupported) options.push("goal");
@@ -94,44 +173,41 @@ export default function ProjectDetail() {
     return options;
   }, [goalSupported, sessionSupported]);
 
-  function changeAgent(next: string) {
-    setAgent(next);
+  function changeAgentChoice(value: string) {
+    const choice = agentChoices.find((candidate) => candidate.value === value);
+    if (!choice) return;
+
+    setAgent(choice.agentKey);
+    setRunner(choice.runner);
     // Drop selections the new agent does not offer ("" = agent default).
-    const a = agents.find((x) => x.key === next);
+    const a = agents.find((x) => x.key === choice.agentKey);
     setModel((m) => (a?.model_choices?.includes(m) ? m : ""));
     setEffort((e) => (a?.effort_choices?.includes(e) ? e : ""));
-    // Runner + env-profile key depend on the agent: only Claude supports
-    // an env-profile overlay today; only agents with a -host sibling let
-    // the operator opt into the host runner.
-    setRunner((a?.host_agent_key ? runner : "") as Runner);
-    setEnvProfileKey(a?.key === "claude" ? envProfileKey : "");
+    // Env profiles apply to the Claude family, regardless of whether the
+    // selected execution target is its container or SSH sibling.
+    setEnvProfileKey(baseAgentKey(choice.agentKey) === "claude" ? envProfileKey : "");
   }
-  // In goal mode only agents that support it are selectable.
-  const selectableAgents = useMemo(
-    () => {
-      if (mode === "goal") return agents.filter((a) => a.supports_goal);
-      if (mode === "session") return agents.filter((a) => a.supports_session);
-      return agents;
-    },
-    [agents, mode],
-  );
 
   function changeMode(next: TaskMode) {
     setMode(next);
     if (next === "goal") {
       const current = agents.find((a) => a.key === agent);
       if (!current || !current.supports_goal) {
-        const first = agents.find((a) => a.supports_goal && a.enabled)
-          ?? agents.find((a) => a.supports_goal);
-        if (first) setAgent(first.key);
+        const first = buildAgentChoices(agents, "goal").find((choice) => !choice.disabled);
+        if (first) {
+          setAgent(first.agentKey);
+          setRunner(first.runner);
+        }
       }
     } else if (next === "session") {
       setImages([]);
       const current = agents.find((a) => a.key === agent);
       if (!current || !current.supports_session) {
-        const first = agents.find((a) => a.supports_session && a.enabled)
-          ?? agents.find((a) => a.supports_session);
-        if (first) setAgent(first.key);
+        const first = buildAgentChoices(agents, "session").find((choice) => !choice.disabled);
+        if (first) {
+          setAgent(first.agentKey);
+          setRunner(first.runner);
+        }
       }
       // Sessions DO support the host runner and env-profile overlays
       // (SessionManager.start wires both — the sibling's host_staging
@@ -230,15 +306,31 @@ export default function ProjectDetail() {
     return unsubscribe;
   }, [id]);
 
+  /** Resolve the actual agent key for the selected choice. The UI exposes
+   *  "Container" and "Host via SSH" variants through one dropdown, but the
+   *  backend stores the underlying AgentSpec key (e.g. ``claude`` vs
+   *  ``claude-host``) so existing tasks can keep filtering on it directly. */
+  function resolveSubmitAgentKey(): string {
+    if (runner === "host") {
+      const base = baseAgentKey(agent);
+      const hostKey = `${base}-host`;
+      if (agents.some((candidate) => candidate.key === hostKey)) {
+        return hostKey;
+      }
+    }
+    return agent;
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!agent || !prompt.trim()) return;
     setSubmitting(true);
     setError("");
     try {
+      const submitAgent = resolveSubmitAgentKey();
       const task = await api.createTask(
         id,
-        agent,
+        submitAgent,
         prompt.trim(),
         mode,
         model,
@@ -269,9 +361,10 @@ export default function ProjectDetail() {
     setSubmitting(true);
     setError("");
     try {
+      const submitAgent = resolveSubmitAgentKey();
       const { task_id } = await api.createSession(
         id,
-        agent,
+        submitAgent,
         "",
         "",
         sessionStartArgs.trim(),
@@ -286,7 +379,7 @@ export default function ProjectDetail() {
       const sessTask: Task = {
         id: task_id,
         project_id: id,
-        agent,
+        agent: submitAgent,
         prompt: sessionStartArgs.trim(),
         mode: "session",
         model: "",
@@ -316,7 +409,7 @@ export default function ProjectDetail() {
       };
       openAgentWindow(
         toRunningTask(sessTask, project),
-        agentName[agent] ?? agent,
+        agentName[submitAgent] ?? submitAgent,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Session konnte nicht gestartet werden");
@@ -512,14 +605,14 @@ export default function ProjectDetail() {
           <span className="flex items-center gap-2">
             <label className="text-sm text-slate-400">Agent:</label>
             <select
-              value={agent}
-              onChange={(e) => changeAgent(e.target.value)}
+              value={selectedAgentChoice}
+              onChange={(e) => changeAgentChoice(e.target.value)}
               className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
             >
-              {selectableAgents.map((a) => (
-                <option key={a.key} value={a.key} disabled={!a.enabled}>
-                  {a.display_name}
-                  {a.enabled ? "" : " (deaktiviert)"}
+              {agentChoices.map((choice) => (
+                <option key={choice.value} value={choice.value} disabled={choice.disabled}>
+                  {choice.label}
+                  {choice.disabled ? " (deaktiviert)" : ""}
                 </option>
               ))}
             </select>
@@ -558,32 +651,11 @@ export default function ProjectDetail() {
               </select>
             </span>
           )}
-          {/* Per-task "Runner: host". Only shown when the currently
-              selected agent has an enabled "<agent>-host" sibling
-              AgentSpec (Docker auto-creates it when
-              CD_<AGENT>_SSH_USER is set; systemd operators hand-write
-              it in config.yaml). Available in session mode too: the
-              SessionManager swaps to the sibling spec (which must have
-              a session_command) and the host-staging branch routes the
-              workdir through the host's shared staging copy. */}
-          {currentAgent?.host_agent_key && (
-            <span className="flex items-center gap-2">
-              <label className="text-sm text-slate-400">Runner:</label>
-              <select
-                value={runner}
-                onChange={(e) => setRunner(e.target.value as Runner)}
-                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
-              >
-                <option value="">Container (Standard)</option>
-                <option value="host">Host (SSH, wie Hermes)</option>
-              </select>
-            </span>
-          )}
           {/* Env-profile overlay. For today only Claude supports it
               (other agents ignore the field on the server). Available
               in session mode too — SessionManager.start applies the
               overlay onto _build_env before the PTY subprocess execs. */}
-          {currentAgent?.key === "claude" && profiles.length > 0 && (
+          {baseAgentKey(agent) === "claude" && profiles.length > 0 && (
             <span className="flex items-center gap-2">
               <label className="text-sm text-slate-400">Env-Profil:</label>
               <select
