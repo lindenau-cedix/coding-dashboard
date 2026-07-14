@@ -427,7 +427,7 @@ class TaskManager:
         # (worktree -> staging copy, session workdir -> session staging dir)
         # automatically — see ``host_staging.integrate`` + the existing
         # ``_setup_staging`` branch below.
-        if runner == "host":
+        if runner == "host" and not agent_key.endswith("-host"):
             sibling_key = f"{agent_key}-host"
             sibling = agents.agents.get(sibling_key)
             if sibling is None or not sibling.enabled:
@@ -1035,7 +1035,7 @@ class SessionManager:
         # so the session is driven over SSH on the host (mirrors the
         # Hermes-SSH pattern). The sibling's host_staging=True then flips
         # the workdir branch below automatically.
-        if runner == "host":
+        if runner == "host" and not agent_key.endswith("-host"):
             sibling_key = f"{agent_key}-host"
             sibling = agents.agents.get(sibling_key)
             if sibling is None or not sibling.enabled:

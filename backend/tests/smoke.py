@@ -4464,6 +4464,105 @@ def test_session_runner_shim() -> None:
     cfg.agents.pop("fake-host", None)
 
 
+def test_runner_picks_host_sibling_by_key() -> None:
+    """Mirrors the new "Agent" dropdown behaviour on the dashboard:
+    Claude Code and Hermes each expose a single dropdown that lists
+    ``<base>`` and ``<base>-host`` side-by-side; the UI sends the
+    concrete AgentSpec key (e.g. ``claude-host``) directly to the
+    backend instead of the historical ``agent=claude`` + ``runner=host``
+    pair.
+
+    The task runner / session manager must therefore accept the
+    already-resolved ``<base>-host`` key WITHOUT then trying to resolve
+    ``<base>-host-host`` (a regression of the host shim) and without
+    rejecting the request just because the host shim's defensive
+    guard wants a base key.
+    """
+    from app.config import AgentSpec, get_agents_config
+
+    cfg = get_agents_config()
+    cfg.agents["fake-host"] = AgentSpec(
+        key="fake-host",
+        display_name="Fake Host",
+        command=[PY, "-c", FAKE_SCRIPT],
+        session_command=[PY, "-c", "pass"],
+        prompt_via="arg",
+        stream_format="raw",
+        enabled=True,
+        host_staging=True,
+    )
+
+    # Pure-Python mirror of the SAME guard the runner / session manager
+    # use at start time. A bug that double-applied the host shim would
+    # flip "fake-host" into a "fake-host-host" lookup and raise here.
+    def _resolve_task(runner: str, agent: str):
+        spec = cfg.agents.get(agent)
+        if spec is None or not spec.enabled:
+            return None
+        if runner == "host" and not agent.endswith("-host"):
+            sibling = cfg.agents.get(f"{agent}-host")
+            if sibling is None or not sibling.enabled:
+                return None
+            spec = sibling
+        return spec
+
+    def _resolve_session(runner: str, agent: str):
+        spec = cfg.agents.get(agent)
+        if spec is None or not spec.enabled:
+            raise ValueError(f"Unknown or disabled agent: {agent}")
+        if runner == "host" and not agent.endswith("-host"):
+            sibling = cfg.agents.get(f"{agent}-host")
+            if sibling is None or not sibling.enabled:
+                raise ValueError(
+                    f"Host-Runner fuer Agent {agent!r} nicht aktiviert."
+                )
+            if not sibling.session_command:
+                raise ValueError(
+                    f"Agent {sibling.key!r} does not support session mode"
+                )
+            spec = sibling
+        if not spec.session_command:
+            raise ValueError(f"Agent {agent} does not support session mode")
+        return spec
+
+    # 1. The historical "base + runner=host" payload still resolves to
+    # the sibling (no regression for the legacy path).
+    legacy = _resolve_task("host", "fake")
+    check(
+        "host_key_payload: legacy base+runner=host picks fake-host",
+        legacy is not None and legacy.key == "fake-host",
+        repr(legacy.key if legacy else None),
+    )
+
+    # 2. The new "already-resolved <base>-host" payload bypasses the
+    # shim cleanly and does not look up "fake-host-host".
+    direct = _resolve_task("host", "fake-host")
+    check(
+        "host_key_payload: direct fake-host key bypasses shim",
+        direct is not None and direct.key == "fake-host",
+        repr(direct.key if direct else None),
+    )
+
+    # 3. The session path accepts the resolved key for the same reason.
+    sess = _resolve_session("host", "fake-host")
+    check(
+        "host_key_payload: direct fake-host resolves for sessions",
+        sess.key == "fake-host",
+        repr(sess.key),
+    )
+
+    # 4. The base-key path still works (no behaviour change for the
+    # legacy form even with the new guard in place).
+    legacy_sess = _resolve_session("host", "fake")
+    check(
+        "host_key_payload: base+runner=host still resolves to sibling",
+        legacy_sess.key == "fake-host",
+        repr(legacy_sess.key),
+    )
+
+    cfg.agents.pop("fake-host", None)
+
+
 def test_hermes_host_sibling_registers() -> None:
     """With CD_HERMES_SSH_USER set, the entrypoint generator must emit BOTH
     ``hermes`` (container-side, enabled iff the CLI is on PATH) AND
@@ -5492,6 +5591,7 @@ def main() -> int:
         test_runner_toggle_persistence()
         test_runner_fallback_when_ssh_not_configured()
         test_session_runner_shim()
+        test_runner_picks_host_sibling_by_key()
         test_hermes_host_sibling_registers()
         test_claude_host_reuses_hermes_ssh()
         test_hermes_container_in_image_only()
