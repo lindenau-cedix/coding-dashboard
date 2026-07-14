@@ -53,6 +53,24 @@ def _build_env(spec: AgentSpec) -> dict[str, str]:
     return env
 
 
+def _build_env_for(
+    spec: AgentSpec, *, extra: "dict[str, str] | None" = None
+) -> dict[str, str]:
+    """``_build_env`` + a per-call overlay (``extra`` later wins).
+
+    The overlay is the channel through which ``task_runner`` layers a
+    per-task env-profile (ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN) onto
+    the spawned subprocess.  ``ANTHROPIC_API_KEY=""`` lives in the overlay
+    by design so a host shell cannot leak an inherited upstream token.
+    Empty / None ``extra`` is a no-op (returns ``_build_env(spec)``
+    unchanged), so call sites that have nothing to overlay pay no cost.
+    """
+    env = _build_env(spec)
+    if extra:
+        env.update(extra)
+    return env
+
+
 def _write_claude_settings(effort: str) -> None:
     """Write effort to ~/.claude/settings.json so Claude Code honours it."""
     settings_path = Path.home() / ".claude" / "settings.json"

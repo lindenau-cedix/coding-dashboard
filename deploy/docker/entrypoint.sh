@@ -43,6 +43,21 @@ HERMES_STAGING_DIR="${CD_HERMES_STAGING_DIR:-/tmp/coding-dashboard-hermes}"
 HERMES_KNOWN_HOSTS="$HOME/.ssh_known_hosts"
 [[ -n "$HERMES_SSH_USER" ]] && { : > "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; touch "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; }
 
+# --- Claude Code runs on the HOST over SSH (mirrors the Hermes-SSH block) --
+# When CD_CLAUDE_SSH_USER is set, the generated config.yaml gets a SECOND
+# Claude agent entry under the key "claude-host" that drives the host's
+# `claude` CLI over SSH. The dashboard's per-task "Runner: host" toggle then
+# selects that sibling on a per-task basis (see TaskManager._run_inner +
+# SessionManager.start). Default (when this env var is empty) = container-only
+# claude; the host runner toggle is hidden in the UI.
+CLAUDE_SSH_USER="${CD_CLAUDE_SSH_USER:-}"
+CLAUDE_SSH_HOST="${CD_CLAUDE_SSH_HOST:-host.docker.internal}"
+CLAUDE_SSH_PORT="${CD_CLAUDE_SSH_PORT:-22}"
+CLAUDE_SSH_KEY="/home/app/.ssh/id_claude"
+# Reuse the Hermes staging dir: both agents' host-side copies live there with
+# per-project / per-task namespacing (no collision).
+[[ -n "$CLAUDE_SSH_USER" ]] && mkdir -p "$HERMES_STAGING_DIR" 2>/dev/null || true
+
 # --- Host-visible lock dir (one lock file per active task/goal/session) ---
 # Bind-mounted from the host by docker-compose so operators can see at a glance
 # "is something running?" without poking inside the container.  Create on boot
@@ -65,6 +80,7 @@ hermes_venv_bin="$HOME/.hermes/hermes-agent/venv/bin"
 if [[ ! -f "$CONFIG_YAML" ]]; then
   echo "==> First boot: generating $CONFIG_YAML"
   if python - "$CONFIG_YAML.tmp" <<'PY'
+import copy as _copy
 import os, shutil, sys, yaml
 from app.config import default_agents, DEFAULT_CONTEXT_INSTRUCTION
 
@@ -163,6 +179,79 @@ for key, spec in default_agents().items():
     elif key == "codex" and codex_sandbox:
         d["command"] = _set_cli_option(d["command"], "--sandbox", codex_sandbox)
         d["enabled"] = shutil.which(spec.command[0]) is not None
+    elif key == "claude" and bool(os.environ.get("CD_CLAUDE_SSH_USER", "").strip()):
+        # Mirror the Hermes-SSH pattern but for Claude Code. The dashboard
+        # registers a NEW AgentSpec under key ``claude-host`` so its
+        # per-task "Runner: host" toggle can pick it via f"{base}-host".
+        # Prompt is fed via stdin (``prompt_via="stdin"``) because SSH
+        # argv passing for arbitrary multi-line text is unreliable.
+        # ``exec env -u ANTHROPIC_API_KEY`` strips any inherited key on
+        # the host so it cannot reach the host's `claude` CLI; the
+        # container path's env-profile overlay sets it back to "" so
+        # both paths agree.
+        claude_ssh_user = os.environ["CD_CLAUDE_SSH_USER"].strip()
+        claude_ssh_host = (
+            os.environ.get("CD_CLAUDE_SSH_HOST", "").strip()
+            or "host.docker.internal"
+        )
+        claude_ssh_port = (
+            os.environ.get("CD_CLAUDE_SSH_PORT", "").strip() or "22"
+        )
+        claude_ssh_key = "/home/app/.ssh/id_claude"
+        d["prompt_via"] = "stdin"
+        d["stream_format"] = "raw"
+        d["env"] = {}        # set on the remote side instead
+        d["unset_env"] = []  # ssh client, not a python venv to sanitise
+        d["command"] = [
+            "ssh",
+            "-i", claude_ssh_key,
+            "-p", claude_ssh_port,
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={HERMES_KNOWN_HOSTS}",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            f"{claude_ssh_user}@{claude_ssh_host}",
+            'cd "{project_dir}" && exec env -u ANTHROPIC_API_KEY claude '
+            '-p "$(cat)" --output-format stream-json --verbose '
+            '--dangerously-skip-permissions',
+        ]
+        d["session_command"] = [
+            "ssh", "-tt",
+            "-i", claude_ssh_key,
+            "-p", claude_ssh_port,
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={HERMES_KNOWN_HOSTS}",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            f"{claude_ssh_user}@{claude_ssh_host}",
+            'cd "{project_dir}" && exec env -u ANTHROPIC_API_KEY claude',
+        ]
+        # Claude runs on the HOST, which cannot see the dashboard's data
+        # volume. Same host_staging pattern as Hermes-SSH: the dashboard
+        # copies the project to CD_HERMES_STAGING_DIR, the host edits it
+        # via the remote shell, and the result is merged back + pushed.
+        d["host_staging"] = True
+        d["enabled"] = True
+        # Re-add the model / effort flags so the per-task selectors still
+        # work (the remote shell above does NOT inline them — keeping the
+        # argv intact lets ``_set_cli_option`` mirror what the local claude
+        # spec does).
+        d["command"] = _set_cli_option(d["command"], "--model", "{model}")
+        d["command"] = _set_cli_option(d["command"], "--effort", "{effort}")
+        # Register as a SIBLING agent under the key "claude-host". The
+        # container `claude` entry below also stays enabled (we do NOT
+        # overwrite ``agents["claude"]`` — the dashboard uses it for the
+        # default in-container runner; the per-task "Runner: host" toggle
+        # routes tasks to ``claude-host``).
+        host_d = _copy.deepcopy(d)
+        host_d["key"] = "claude-host"
+        host_d["display_name"] = "Claude Code (Host)"
+        agents["claude-host"] = host_d
+        # Fall through: keep the container `claude` enabled like normal.
+        # ``d`` here is still the in-container spec (we mutated ``command``
+        # for the SSH variant, but operators are choosing the host-sibling
+        # when they tick the toggle — the container path uses the
+        # pre-rebuilt spec from ``default_agents()`` instead).
     else:
         # Enable an agent only if its CLI is actually installed in this image
         # (claude/codex baked in; Hermes only when self-contained / no SSH user).
@@ -216,6 +305,12 @@ elif have hermes; then
   echo "==> Hermes is self-contained in this image (CD_HERMES_SSH_USER unset)."
 else
   echo "==> Hermes is DISABLED: set CD_HERMES_SSH_USER to run the host's Hermes over SSH (delete config.yaml in cd-config to regenerate)."
+fi
+if [[ -n "$CLAUDE_SSH_USER" ]]; then
+  echo "==> Claude Code runs on the HOST over SSH as ${CLAUDE_SSH_USER}@${CLAUDE_SSH_HOST}:${CLAUDE_SSH_PORT} (key: $CLAUDE_SSH_KEY)."
+  echo "    The dashboard agent dropdown now exposes 'Claude Code (Host)' alongside"
+  echo "    the in-container 'Claude Code'; per-task 'Runner: host' toggles route"
+  echo "    into the host-staging copy + host's `claude` CLI just like Hermes-SSH."
 fi
 
 

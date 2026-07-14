@@ -135,6 +135,13 @@ chown -R "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR"; chmod 750 "$DATA_DIR"
 chown root:"$SERVICE_USER" "$CONFIG_DIR"; chmod 750 "$CONFIG_DIR"
 
 # --- config.yaml ----------------------------------------------------------- #
+# Per-task "Runner: host" for Claude Code is OFF by default on systemd installs
+# (operators hand-write the sibling ``claude-host`` block below if they want
+# it). The Docker install instead does the auto-generation in entrypoint.sh
+# when CD_CLAUDE_SSH_USER is set; we follow the hand-write path here because
+# systemd deployments vary too much in their SSH layout (separate jump-host,
+# different key path, etc.) to auto-derive. After adding the block, restart
+# the service; the dashboard picks up the new sibling automatically.
 if [[ -f $CONFIG_YAML && $FORCE != 1 ]]; then
   info "config.yaml existiert – unverändert (FORCE=1 zum Überschreiben)"
 else

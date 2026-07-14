@@ -11,7 +11,7 @@ from .. import uploads
 from ..auth import get_current_user
 from ..config import get_agents_config
 from ..database import get_db
-from ..models import Project, Task
+from ..models import EnvProfile, Project, Task
 from ..schemas import AgentInfo, RunningTaskOut, TaskCreate, TaskDetail, TaskOut
 from ..task_runner import manager
 
@@ -43,18 +43,29 @@ def list_running(db: Session = Depends(get_db)) -> list[RunningTaskOut]:
 @router.get("/agents", response_model=list[AgentInfo])
 def list_agents() -> list[AgentInfo]:
     cfg = get_agents_config()
-    return [
-        AgentInfo(
-            key=a.key,
-            display_name=a.display_name,
-            enabled=a.enabled,
-            supports_goal=bool(a.goal_command),
-            supports_session=bool(a.session_command),
-            model_choices=a.model_choices if a.model_args else [],
-            effort_choices=a.effort_choices if a.effort_args else [],
+    # Pre-compute host-sibling map so each row knows whether the per-task
+    # "Runner: host" toggle is actually selectable (the Docker entrypoint
+    # auto-creates ``<agent>-host`` siblings when ``CD_<AGENT>_SSH_USER``
+    # is set; systemd operators hand-write them in config.yaml).
+    out: list[AgentInfo] = []
+    for a in cfg.agents.values():
+        host_key = f"{a.key}-host"
+        host = cfg.agents.get(host_key)
+        out.append(
+            AgentInfo(
+                key=a.key,
+                display_name=a.display_name,
+                enabled=a.enabled,
+                supports_goal=bool(a.goal_command),
+                supports_session=bool(a.session_command),
+                model_choices=a.model_choices if a.model_args else [],
+                effort_choices=a.effort_choices if a.effort_args else [],
+                host_agent_key=(
+                    host_key if (host is not None and host.enabled) else None
+                ),
+            )
         )
-        for a in cfg.agents.values()
-    ]
+    return out
 
 
 @router.get("/projects/{project_id}/tasks", response_model=list[TaskOut])
@@ -95,6 +106,34 @@ async def create_task(
         raise HTTPException(
             400, f"Agent {spec.display_name} unterstützt Effort '{body.effort}' nicht."
         )
+    # Per-task "host" runner: must have an enabled "<agent>-host" sibling.
+    # This is the operator-facing guard for the toggle on the start form;
+    # the runner also defensively checks at start time.
+    if body.runner == "host":
+        host_key = f"{body.agent}-host"
+        host_spec = cfg.agents.get(host_key)
+        if host_spec is None or not host_spec.enabled:
+            raise HTTPException(
+                400,
+                f"Host-Runner fuer Agent '{body.agent}' nicht aktiviert. "
+                f"Setze CD_{body.agent.upper()}_SSH_USER in der Env-Datei "
+                f"und starte das Backend neu.",
+            )
+    # Env-profile must exist when set. ``EnvProfile.key`` is unique so we
+    # look up directly — no SELECT roundtrip needed. An empty token in the
+    # stored profile is still valid (operator may only want to redirect
+    # the base URL).
+    if body.env_profile_key:
+        exists = (
+            db.query(EnvProfile.id)
+            .filter(EnvProfile.key == body.env_profile_key)
+            .first()
+        )
+        if exists is None:
+            raise HTTPException(
+                404,
+                f"Env-Profil '{body.env_profile_key}' nicht gefunden.",
+            )
     # Decode/validate the attachments BEFORE creating the task row so a bad
     # upload rejects the whole request without leaving artifacts behind.
     try:
@@ -109,6 +148,8 @@ async def create_task(
         mode=body.mode,
         model=body.model,
         effort=body.effort,
+        runner=body.runner,
+        env_profile_key=body.env_profile_key,
         status="queued",
     )
     db.add(task)

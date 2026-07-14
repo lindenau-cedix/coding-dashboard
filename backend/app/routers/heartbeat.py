@@ -23,11 +23,13 @@ from ..auth import get_current_user
 from ..config import get_agents_config, get_settings
 from ..database import get_db
 from ..heartbeat import heartbeat, heartbeat_followup
-from ..models import HeartbeatSeen, Project, Task
+from ..models import EnvProfile, HeartbeatSeen, Project, Task
 from ..schemas import (
     HeartbeatIssueSeen,
     HeartbeatProjectStatus,
     HeartbeatStatus,
+    ProjectHeartbeatEnvProfileIn,
+    ProjectOut,
 )
 
 log = logging.getLogger("coding-dashboard.heartbeat")
@@ -78,6 +80,7 @@ def get_heartbeat_status(
                 last_issue_poll_at=p.last_issue_poll_at,
                 last_heartbeat_status=p.last_heartbeat_status,
                 last_heartbeat_error=p.last_heartbeat_error,
+                heartbeat_env_profile_key=p.heartbeat_env_profile_key,
                 open_issues_count=0,
                 inflight_task_ids=inflight,
             )
@@ -94,6 +97,9 @@ def get_heartbeat_status(
         # tick's ``assignee_logins`` log line; operators can verify it
         # worked by checking the server log instead of blocking the GET.
         assignee_logins=settings.heartbeat_assignee_logins_list,
+        # Global env-profile default (CD_HEARTBEAT_ENV_PROFILE_KEY).
+        # Empty = standard Anthropic auth / endpoint.
+        env_profile_key=settings.heartbeat_env_profile_key,
         projects=statuses,
     )
 
@@ -167,6 +173,43 @@ def disable_project_heartbeat(
     p.heartbeat_enabled = False
     db.commit()
     return {"id": project_id, "heartbeat_enabled": False}
+
+
+@projects_router.post(
+    "/projects/{project_id}/heartbeat/env-profile",
+    response_model=ProjectOut,
+)
+def set_project_heartbeat_env_profile(
+    project_id: str,
+    body: ProjectHeartbeatEnvProfileIn,
+    db: Annotated[Session, Depends(get_db)],
+    user: Annotated[str, Depends(get_current_user)],
+) -> Project:
+    """Set or clear this project's heartbeat env-profile override.
+
+    Empty string clears the override (falls back to ``CD_HEARTBEAT_ENV_PROFILE_KEY``
+    or to "no env injection" when that is empty too). Non-empty must reference
+    an existing ``env_profiles.key``. Effective at the NEXT heartbeat tick;
+    the currently-running tick is not modified.
+    """
+    p = db.get(Project, project_id)
+    if p is None:
+        raise HTTPException(404, "Projekt nicht gefunden.")
+    if body.env_profile_key:
+        exists = (
+            db.query(EnvProfile.id)
+            .filter(EnvProfile.key == body.env_profile_key)
+            .first()
+        )
+        if exists is None:
+            raise HTTPException(
+                404,
+                f"Env-Profil '{body.env_profile_key}' nicht gefunden.",
+            )
+    p.heartbeat_env_profile_key = body.env_profile_key
+    db.commit()
+    db.refresh(p)
+    return p
 
 
 @projects_router.get(

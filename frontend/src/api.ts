@@ -1,6 +1,7 @@
 import type {
   Agent,
   DirListing,
+  EnvProfile,
   FileContent,
   GithubRepo,
   HeartbeatIssueSeen,
@@ -9,6 +10,7 @@ import type {
   Project,
   ProjectCreatePayload,
   RunningTask,
+  Runner,
   SessionMessage,
   Task,
   TaskImagePayload,
@@ -195,6 +197,8 @@ export const api = {
     model = "",
     effort = "",
     images: TaskImagePayload[] = [],
+    runner: Runner = "",
+    envProfileKey = "",
   ) =>
     request<Task>("POST", `/projects/${projectId}/tasks`, {
       agent,
@@ -203,6 +207,8 @@ export const api = {
       model,
       effort,
       images,
+      runner,
+      env_profile_key: envProfileKey,
     }),
   getTask: (id: string) => request<Task>("GET", `/tasks/${id}`),
   stopTask: (id: string) =>
@@ -254,6 +260,8 @@ export const api = {
     model = "",
     effort = "",
     startArgs = "",
+    runner: Runner = "",
+    envProfileKey = "",
   ) =>
     request<{ task_id: string; status: string }>("POST", "/sessions", {
       project_id: projectId,
@@ -261,6 +269,8 @@ export const api = {
       model,
       effort,
       start_args: startArgs,
+      runner,
+      env_profile_key: envProfileKey,
     }),
   getSession: (taskId: string) =>
     request<{
@@ -298,6 +308,34 @@ export const api = {
       "POST",
       `/projects/${projectId}/heartbeat/${enabled ? "enable" : "disable"}`,
     ),
+  setProjectHeartbeatEnvProfile: (projectId: string, envProfileKey: string) =>
+    request<Project>(
+      "POST",
+      `/projects/${projectId}/heartbeat/env-profile`,
+      { env_profile_key: envProfileKey },
+    ),
+
+  // Env-profile CRUD (operator-level). The plaintext token is WRITE-ONLY
+  // (the GET response replaces it with an anonymised hint); to rotate,
+  // PATCH with a new plaintext value; to clear, PATCH with "".
+  listEnvProfiles: () => request<EnvProfile[]>("GET", "/env-profiles"),
+  createEnvProfile: (data: {
+    key: string;
+    name: string;
+    anthropic_base_url?: string;
+    anthropic_auth_token?: string;
+  }) => request<EnvProfile>("POST", "/env-profiles", data),
+  updateEnvProfile: (
+    key: string,
+    data: {
+      key: string;
+      name: string;
+      anthropic_base_url?: string;
+      anthropic_auth_token?: string;
+    },
+  ) => request<EnvProfile>("PATCH", `/env-profiles/${key}`, data),
+  deleteEnvProfile: (key: string) =>
+    request<void>("DELETE", `/env-profiles/${key}`),
   listHeartbeatIssues: (projectId: string) =>
     request<HeartbeatIssueSeen[]>(
       "GET",

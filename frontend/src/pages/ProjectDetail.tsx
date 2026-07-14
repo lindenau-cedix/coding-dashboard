@@ -17,7 +17,7 @@ import {
 } from "../components/ui";
 import { useProject } from "../projectContext";
 import { openAgentWindow } from "../components/WindowManager";
-import type { Agent, Project, RunningTask, Task, TaskImagePayload, TaskMode } from "../types";
+import type { Agent, EnvProfile, Project, RunningTask, Runner, Task, TaskImagePayload, TaskMode } from "../types";
 
 const MAX_IMAGES = 6;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -47,6 +47,15 @@ export default function ProjectDetail() {
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<TaskImagePayload[]>([]);
   const [sessionStartArgs, setSessionStartArgs] = useState("");
+  // Per-task "Runner: host" + "Env-Profil" selection. The Runner dropdown
+  // is hidden when the current agent has no enabled "<agent>-host" sibling;
+  // the Env-Profile dropdown is only shown for Claude (other agents ignore
+  // the field on the server). Both reset when the operator switches agent
+  // or mode.
+  const [runner, setRunner] = useState<Runner>("");
+  const [envProfileKey, setEnvProfileKey] = useState("");
+  // Loaded once per visit — the dropdown's items come from here.
+  const [profiles, setProfiles] = useState<EnvProfile[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [submitting, setSubmitting] = useState(false);
   // Multiple tasks/goals can run at once (each on its own branch); show a live
@@ -91,6 +100,11 @@ export default function ProjectDetail() {
     const a = agents.find((x) => x.key === next);
     setModel((m) => (a?.model_choices?.includes(m) ? m : ""));
     setEffort((e) => (a?.effort_choices?.includes(e) ? e : ""));
+    // Runner + env-profile key depend on the agent: only Claude supports
+    // an env-profile overlay today; only agents with a -host sibling let
+    // the operator opt into the host runner.
+    setRunner((a?.host_agent_key ? runner : "") as Runner);
+    setEnvProfileKey(a?.key === "claude" ? envProfileKey : "");
   }
   // In goal mode only agents that support it are selectable.
   const selectableAgents = useMemo(
@@ -119,6 +133,12 @@ export default function ProjectDetail() {
           ?? agents.find((a) => a.supports_session);
         if (first) setAgent(first.key);
       }
+      // Sessions intentionally can't use the host runner or env-profile
+      // overlays today (the PTY path is wired for host-staging but env
+      // injection requires the sibling spec which has session_command;
+      // revisit when an operator needs it).
+      setRunner("");
+      setEnvProfileKey("");
     }
   }
 
@@ -164,10 +184,11 @@ export default function ProjectDetail() {
     let active = true;
     (async () => {
       try {
-        const [p, ag, ts] = await Promise.all([
+        const [p, ag, ts, profs] = await Promise.all([
           api.getProject(id),
           api.agents(),
           api.listTasks(id),
+          api.listEnvProfiles().catch(() => [] as EnvProfile[]),
         ]);
         if (!active) return;
         setProject(p);
@@ -175,6 +196,7 @@ export default function ProjectDetail() {
         ctx.setProject(p);
         ctx.setAgents(ag);
         setTasks(ts);
+        setProfiles(profs);
         const firstEnabled = ag.find((a) => a.enabled);
         if (firstEnabled) setAgent(firstEnabled.key);
         const live = ts
@@ -214,7 +236,17 @@ export default function ProjectDetail() {
     setSubmitting(true);
     setError("");
     try {
-      const task = await api.createTask(id, agent, prompt.trim(), mode, model, effort, images);
+      const task = await api.createTask(
+        id,
+        agent,
+        prompt.trim(),
+        mode,
+        model,
+        effort,
+        images,
+        runner,
+        envProfileKey,
+      );
       setActiveTaskIds((ids) => [task.id, ...ids.filter((x) => x !== task.id)]);
       setPrompt("");
       setImages([]);
@@ -237,7 +269,15 @@ export default function ProjectDetail() {
     setSubmitting(true);
     setError("");
     try {
-      const { task_id } = await api.createSession(id, agent, "", "", sessionStartArgs.trim());
+      const { task_id } = await api.createSession(
+        id,
+        agent,
+        "",
+        "",
+        sessionStartArgs.trim(),
+        runner,
+        envProfileKey,
+      );
       setSessionStartArgs("");
       await refreshTasks();
       // Pin the new session to its own browser tab. Closing the tab does NOT
@@ -516,6 +556,47 @@ export default function ProjectDetail() {
               </select>
             </span>
           )}
+          {/* Per-task "Runner: host". Only shown when the currently
+              selected agent has an enabled "<agent>-host" sibling
+              AgentSpec (Docker auto-creates it when
+              CD_<AGENT>_SSH_USER is set; systemd operators hand-write
+              it in config.yaml). Hidden entirely for session mode
+              (PTY path is host-staging but env injection is off for
+              v1; revisit when an operator needs it). */}
+          {mode !== "session" && currentAgent?.host_agent_key && (
+            <span className="flex items-center gap-2">
+              <label className="text-sm text-slate-400">Runner:</label>
+              <select
+                value={runner}
+                onChange={(e) => setRunner(e.target.value as Runner)}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
+              >
+                <option value="">Container (Standard)</option>
+                <option value="host">Host (SSH, wie Hermes)</option>
+              </select>
+            </span>
+          )}
+          {/* Env-profile overlay. For today only Claude supports it
+              (other agents ignore the field on the server). Hidden in
+              session mode. Empty value = today's behaviour (no env
+              injection). */}
+          {mode !== "session" && currentAgent?.key === "claude" && profiles.length > 0 && (
+            <span className="flex items-center gap-2">
+              <label className="text-sm text-slate-400">Env-Profil:</label>
+              <select
+                value={envProfileKey}
+                onChange={(e) => setEnvProfileKey(e.target.value)}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
+              >
+                <option value="">Standard (Anthropic)</option>
+                {profiles.map((p) => (
+                  <option key={p.key} value={p.key}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </span>
+          )}
         </div>
         {mode === "session" ? (
           <label className="block">
@@ -731,6 +812,22 @@ export default function ProjectDetail() {
                       title={`Automatisch vom Heartbeat für GitHub-Issue #${t.heartbeat_issue_number ?? "?"} gestartet`}
                     >
                       🤖 Auto-Fix #{t.heartbeat_issue_number ?? "?"}
+                    </span>
+                  )}
+                  {t.runner === "host" && (
+                    <span
+                      className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
+                      title="Auf dem Host per SSH ausgefuehrt (CD_<AGENT>_SSH_USER)"
+                    >
+                      🖥 host
+                    </span>
+                  )}
+                  {t.env_profile_key && (
+                    <span
+                      className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300"
+                      title={`Env-Profil: ${t.env_profile_key}`}
+                    >
+                      🔑 {t.env_profile_key}
                     </span>
                   )}
                   {t.heartbeat_commented_at && (

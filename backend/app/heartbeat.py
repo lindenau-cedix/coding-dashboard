@@ -609,6 +609,10 @@ class HeartbeatRunner:
     ) -> str:
         settings = get_settings()
         prompt = self._build_prompt(project, issue, settings.heartbeat_prompt_template)
+        # Resolve the effective env-profile key per tick: per-project
+        # override beats the global default; empty = no env injection
+        # for this auto-spawn (today's behaviour).
+        profile_key = self._resolve_env_profile_key(project, settings)
 
         def _create() -> Task:
             with session_scope() as db:
@@ -620,6 +624,10 @@ class HeartbeatRunner:
                     status="queued",
                     heartbeat_spawned=True,
                     heartbeat_issue_number=int(issue["number"]),
+                    # Empty (default) — the heartbeat is only opt-in to
+                    # the host-SSH model via CD_HEARTBEAT_AGENT_KEY.
+                    runner="",
+                    env_profile_key=profile_key,
                 )
                 db.add(t)
                 db.commit()
@@ -629,9 +637,31 @@ class HeartbeatRunner:
                 return t
 
         task = await asyncio.to_thread(_create)
-        # Fire-and-forget submit; the task runs in the background.
+        # Fire-and-forget submit; the task runs in the background. The
+        # env-overlay is applied inside ``_run_inner`` because the
+        # ``Task.env_profile_key`` column carries the resolved value
+        # that was effective at dispatch time.
         manager.submit(task.id, project.id)
         return task.id
+
+    def _resolve_env_profile_key(
+        self, project: Project, settings
+    ) -> str:
+        """Effective env-profile for an auto-spawned task for this project.
+
+        Order of precedence (per tick, NOT persisted on ``HeartbeatSeen``):
+        1. Per-project override (``projects.heartbeat_env_profile_key``).
+        2. Global default (``CD_HEARTBEAT_ENV_PROFILE_KEY``).
+        3. Empty string — no env injection (default).
+
+        Resolved at dispatch time so an operator who flips a setting on
+        the /heartbeat page sees the new value apply to the NEXT tick.
+        """
+        if getattr(project, "heartbeat_env_profile_key", ""):
+            return project.heartbeat_env_profile_key
+        if getattr(settings, "heartbeat_env_profile_key", ""):
+            return settings.heartbeat_env_profile_key
+        return ""
 
 
 # --------------------------------------------------------------------------- #
