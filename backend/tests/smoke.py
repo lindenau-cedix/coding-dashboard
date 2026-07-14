@@ -4784,6 +4784,438 @@ def test_heartbeat_env_profile_resolution() -> None:
         ).delete()
 
 
+# --- 2026-07-14: global heartbeat env-profile + agent-key endpoints --- #
+
+
+def test_heartbeat_global_env_profile_endpoint() -> None:
+    """POST /api/heartbeat/env-profile mutates the runner override.
+
+    Asserts the 404-on-unknown-key guard, the success path (the runner
+    exposes the new key on GET), and the empty-string clearing path.
+    In-memory only — verifies the runner singleton's
+    ``set_env_profile_key`` is wired through to the GET response without
+    touching the settings or env vars.
+    """
+    from fastapi.testclient import TestClient
+
+    from app import heartbeat as hb_mod
+    from app.database import session_scope
+    from app.main import app
+    from app.models import EnvProfile
+
+    _clean_env_profiles()
+    with session_scope() as db:
+        db.add(EnvProfile(key="p_global_e", name="Global E", anthropic_base_url=""))
+
+    runner = hb_mod.heartbeat
+    saved_override = runner._env_profile_key_override
+    runner.set_env_profile_key("")
+    try:
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+            )
+            H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+            # 1. unknown key -> 404
+            r = client.post(
+                "/api/heartbeat/env-profile",
+                headers=H,
+                json={"env_profile_key": "does-not-exist"},
+            )
+            check(
+                "hb_env_profile_endpoint: unknown key -> 404",
+                r.status_code == 404,
+                f"got {r.status_code}",
+            )
+
+            # 2. success -> 200, GET reflects the new key
+            r = client.post(
+                "/api/heartbeat/env-profile",
+                headers=H,
+                json={"env_profile_key": "p_global_e"},
+            )
+            check(
+                "hb_env_profile_endpoint: known key -> 200",
+                r.status_code == 200,
+                f"got {r.status_code}",
+            )
+            check(
+                "hb_env_profile_endpoint: response carries new key",
+                r.json().get("env_profile_key") == "p_global_e",
+                repr(r.json()),
+            )
+
+            r = client.get("/api/heartbeat", headers=H)
+            check(
+                "hb_env_profile_endpoint: GET reflects runtime override",
+                r.json().get("env_profile_key") == "p_global_e",
+                repr(r.json().get("env_profile_key")),
+            )
+
+            # 3. empty string -> clears the runtime override
+            r = client.post(
+                "/api/heartbeat/env-profile",
+                headers=H,
+                json={"env_profile_key": ""},
+            )
+            check(
+                "hb_env_profile_endpoint: empty clears override -> 200",
+                r.status_code == 200,
+                f"got {r.status_code}",
+            )
+            check(
+                "hb_env_profile_endpoint: cleared override echoes ''",
+                r.json().get("env_profile_key") == "",
+                repr(r.json()),
+            )
+    finally:
+        runner.set_env_profile_key(saved_override or "")
+        with session_scope() as db:
+            db.query(EnvProfile).filter(EnvProfile.key == "p_global_e").delete()
+
+
+def test_heartbeat_agent_key_endpoint() -> None:
+    """POST /api/heartbeat/agent-key swaps the runner's auto-spawned agent.
+
+    Registers a ``fake-host`` sibling (mirrors what the Docker entrypoint
+    does when ``CD_FAKE_SSH_USER`` is set), verifies that GET surfaces
+    both ``fake`` (default) and ``fake-host`` in ``available_agent_keys``,
+    flips the runner via the endpoint, asserts the next tick's spawned
+    task carries ``agent='fake-host'``, then clears the override and
+    asserts the next tick reverts to ``fake``. Also exercises the
+    unknown-key 400 path.
+    """
+    from fastapi.testclient import TestClient
+
+    from app import github_client
+    from app import heartbeat as hb_mod
+    from app.config import get_agents_config
+    from app.database import session_scope
+    from app.main import app
+    from app.models import HeartbeatSeen, Project, Task
+
+    cfg = get_agents_config()
+    cfg.agents["fake-host"] = AgentSpec(
+        key="fake-host",
+        display_name="Fake Host",
+        command=[PY, "-c", "pass"],
+        prompt_via="arg",
+        stream_format="raw",
+        enabled=True,
+        host_staging=True,
+    )
+
+    runner = hb_mod.heartbeat
+    saved_override = runner._agent_key_override
+    saved_assignee = os.environ.get("CD_HEARTBEAT_ASSIGNEE_LOGINS")
+    os.environ["CD_HEARTBEAT_ASSIGNEE_LOGINS"] = "self"
+    runner.set_agent_key("")
+
+    with session_scope() as db:
+        db.add(
+            Project(
+                id="hbak",
+                name="hbak",
+                slug="hbak",
+                local_path=str(TMP / "hbak"),
+                github_full_name="acme/hbak",
+                heartbeat_enabled=True,
+            )
+        )
+        Path(TMP / "hbak").mkdir(parents=True, exist_ok=True)
+        db.query(HeartbeatSeen).delete()
+
+    async def _fake_resolve():
+        return (("self",), hb_mod.ASSIGNEE_RESOLVED)
+
+    runner._resolve_assignee_logins = _fake_resolve
+    runner.set_enabled(True)
+
+    issue_counter = {"n": 200}
+
+    async def fake_list_issues(full_name, **kw):
+        issue_counter["n"] += 1
+        return [
+            {
+                "number": issue_counter["n"],
+                "title": "test",
+                "user": {"login": "self"},
+                "assignees": [{"login": "self"}],
+                "labels": [],
+                "created_at": "2026-07-14T00:00:00Z",
+                "body": "b",
+                "html_url": f"https://github.com/{full_name}/issues/{issue_counter['n']}",
+            }
+        ]
+
+    original_list = github_client.list_issues
+    hb_mod.github_client.list_issues = fake_list_issues
+    try:
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+            )
+            H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+            # 1. unknown key -> 400
+            r = client.post(
+                "/api/heartbeat/agent-key",
+                headers=H,
+                json={"agent_key": "no-such-agent"},
+            )
+            check(
+                "hb_agent_key_endpoint: unknown agent -> 400",
+                r.status_code == 400,
+                f"got {r.status_code}",
+            )
+
+            # 2. GET surfaces available_agent_keys with both fake + fake-host
+            r = client.get("/api/heartbeat", headers=H)
+            keys = r.json().get("available_agent_keys", [])
+            check(
+                "hb_agent_key_endpoint: GET lists 'fake'",
+                "fake" in keys,
+                repr(keys),
+            )
+            check(
+                "hb_agent_key_endpoint: GET lists 'fake-host'",
+                "fake-host" in keys,
+                repr(keys),
+            )
+            check(
+                "hb_agent_key_endpoint: GET reports current agent_key='fake'",
+                r.json().get("agent_key") == "fake",
+                repr(r.json().get("agent_key")),
+            )
+
+            # 3. flip to fake-host -> 200, GET reflects
+            r = client.post(
+                "/api/heartbeat/agent-key",
+                headers=H,
+                json={"agent_key": "fake-host"},
+            )
+            check(
+                "hb_agent_key_endpoint: flip to fake-host -> 200",
+                r.status_code == 200,
+                f"got {r.status_code}",
+            )
+            r = client.get("/api/heartbeat", headers=H)
+            check(
+                "hb_agent_key_endpoint: GET reports agent_key='fake-host'",
+                r.json().get("agent_key") == "fake-host",
+                repr(r.json().get("agent_key")),
+            )
+
+            # 4. trigger a tick; spawned task should carry agent='fake-host'
+            r = client.post("/api/heartbeat/trigger", headers=H)
+            check(
+                "hb_agent_key_endpoint: POST trigger -> 200",
+                r.status_code == 200,
+                f"got {r.status_code}",
+            )
+
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                with session_scope() as db:
+                    row = (
+                        db.query(Task)
+                        .filter(Task.project_id == "hbak")
+                        .filter(Task.heartbeat_spawned.is_(True))
+                        .order_by(Task.created_at.desc())
+                        .first()
+                    )
+                if row is not None:
+                    break
+                time.sleep(0.2)
+
+            with session_scope() as db:
+                row = (
+                    db.query(Task)
+                    .filter(Task.project_id == "hbak")
+                    .filter(Task.heartbeat_spawned.is_(True))
+                    .order_by(Task.created_at.desc())
+                    .first()
+                )
+            check(
+                "hb_agent_key_endpoint: spawned task agent=fake-host",
+                row is not None and row.agent == "fake-host",
+                repr(row.agent if row else None),
+            )
+
+            # 5. clear override -> back to env-var default ('fake')
+            r = client.post(
+                "/api/heartbeat/agent-key",
+                headers=H,
+                json={"agent_key": ""},
+            )
+            check(
+                "hb_agent_key_endpoint: empty clears override -> 200",
+                r.status_code == 200,
+                f"got {r.status_code}",
+            )
+            r = client.get("/api/heartbeat", headers=H)
+            check(
+                "hb_agent_key_endpoint: cleared override falls back to env default 'fake'",
+                r.json().get("agent_key") == "fake",
+                repr(r.json().get("agent_key")),
+            )
+    finally:
+        hb_mod.github_client.list_issues = original_list
+        runner.set_agent_key(saved_override or "")
+        if saved_assignee is None:
+            os.environ.pop("CD_HEARTBEAT_ASSIGNEE_LOGINS", None)
+        else:
+            os.environ["CD_HEARTBEAT_ASSIGNEE_LOGINS"] = saved_assignee
+        runner.set_enabled(False)
+        runner._resolve_assignee_logins = lambda: (("",), hb_mod.ASSIGNEE_RESOLVED)
+        cfg.agents.pop("fake-host", None)
+        with session_scope() as db:
+            db.query(Task).filter(Task.project_id == "hbak").delete()
+            db.query(HeartbeatSeen).delete()
+            db.query(Project).filter(Project.id == "hbak").delete()
+
+
+def test_session_env_profile_persists() -> None:
+    """POST /api/sessions accepts env_profile_key and persists it on the Task.
+
+    Round-trips through the public REST surface so the SessionCreate
+    schema + the route's write path are exercised together. Verifies
+    the Task row carries the env_profile_key + is_session=True; the
+    existing ``test_runner_toggle_persistence`` already covers the
+    runner field on the tasks route, so we focus on env_profile_key
+    here (the new field added by the 2026-07-14 env-profiles feature,
+    previously never round-tripped through /sessions).
+
+    Adds a transient ``fake`` ``session_command`` so the route's
+    ``supports_session`` guard passes; restores the original (empty)
+    list on exit so other tests keep their assumption that the
+    default fake agent is task-only.
+    """
+    from datetime import datetime, timezone
+
+    from fastapi.testclient import TestClient
+
+    from app.database import session_scope
+    from app.main import app
+    from app.models import EnvProfile, Project, Task
+
+    _clean_env_profiles()
+    cfg = get_agents_config()
+    saved_session_cmd = cfg.agents["fake"].session_command
+    cfg.agents["fake"] = cfg.agents["fake"].model_copy(
+        update={"session_command": [PY, "-c", "pass"]}
+    )
+
+    with session_scope() as db:
+        db.add(EnvProfile(key="p_sess", name="Sess Profile", anthropic_base_url=""))
+
+    with session_scope() as db:
+        proj = db.query(Project).first()
+        if proj is None:
+            proj = Project(
+                id="sess-env-1",
+                name="sess-env",
+                slug="sess-env",
+                local_path=str(TMP / "sess-env-1"),
+            )
+            Path(proj.local_path).mkdir(parents=True, exist_ok=True)
+            db.add(proj)
+            db.commit()
+        pid = proj.id
+
+    try:
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login", json={"username": "admin", "password": "secret-pw"}
+            )
+            H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+            # 1. unknown env_profile_key -> 404 (validation runs BEFORE the
+            # supports_session guard, so it fires regardless of agent).
+            r = client.post(
+                "/api/sessions",
+                headers=H,
+                json={
+                    "project_id": pid,
+                    "agent": "fake",
+                    "env_profile_key": "no-such-profile",
+                },
+            )
+            check(
+                "sess_env_profile: unknown env_profile_key -> 404",
+                r.status_code == 404,
+                f"got {r.status_code}",
+            )
+
+            # 2. valid env_profile_key + runner="" -> row carries the key.
+            # The session's PTY will then be started; we never call
+            # /sessions/{id}/end so the pump loop keeps the process alive
+            # until we mark the row interrupted in the cleanup.
+            r = client.post(
+                "/api/sessions",
+                headers=H,
+                json={
+                    "project_id": pid,
+                    "agent": "fake",
+                    "env_profile_key": "p_sess",
+                    "runner": "",
+                },
+            )
+            check(
+                "sess_env_profile: POST /sessions with env_profile_key -> 201",
+                r.status_code == 201,
+                f"got {r.status_code} {r.text[:200]}",
+            )
+            sess_id = r.json().get("task_id")
+            check(
+                "sess_env_profile: response carries task_id",
+                bool(sess_id),
+                repr(r.json()),
+            )
+            with session_scope() as db:
+                t = db.get(Task, sess_id) if sess_id else None
+            check(
+                "sess_env_profile: Task row stores env_profile_key='p_sess'",
+                t is not None and t.env_profile_key == "p_sess",
+                repr(t.env_profile_key if t else None),
+            )
+            check(
+                "sess_env_profile: Task row stores runner='' (default container)",
+                t is not None and t.runner == "",
+                repr(t.runner if t else None),
+            )
+            check(
+                "sess_env_profile: Task row is_session=True",
+                t is not None and t.is_session is True,
+                repr(t.is_session if t else None),
+            )
+
+            # 3. GET /api/sessions/{id} -> 200 (round-trip stays alive)
+            r = client.get(f"/api/sessions/{sess_id}", headers=H)
+            check(
+                "sess_env_profile: GET /sessions/{id} -> 200",
+                r.status_code == 200,
+                f"got {r.status_code}",
+            )
+    finally:
+        # Mark the session interrupted so SessionManager.end_session
+        # doesn't have to find the still-living PTY (which would block
+        # the test process on SIGTERM waitpid); then drop the row.
+        with session_scope() as db:
+            t = db.get(Task, sess_id) if sess_id else None
+            if t:
+                t.status = "interrupted"
+                t.finished_at = datetime.now(timezone.utc)
+            db.query(Task).filter(
+                Task.project_id == pid, Task.is_session.is_(True)
+            ).delete()
+            db.query(EnvProfile).filter(EnvProfile.key == "p_sess").delete()
+        cfg.agents["fake"] = cfg.agents["fake"].model_copy(
+            update={"session_command": saved_session_cmd}
+        )
+
+
 # --- small helpers used by the new tests --- #
 
 def _clean_env_profiles() -> None:
@@ -4835,6 +5267,11 @@ def main() -> int:
         test_session_runner_shim()
         test_create_task_persists_env_profile_key()
         test_heartbeat_env_profile_resolution()
+        # 2026-07-14: global heartbeat env-profile + agent-key endpoints
+        # (operator-facing UI on the /heartbeat page; in-memory only)
+        test_heartbeat_global_env_profile_endpoint()
+        test_heartbeat_agent_key_endpoint()
+        test_session_env_profile_persists()
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
 

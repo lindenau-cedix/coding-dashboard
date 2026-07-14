@@ -133,12 +133,12 @@ export default function ProjectDetail() {
           ?? agents.find((a) => a.supports_session);
         if (first) setAgent(first.key);
       }
-      // Sessions intentionally can't use the host runner or env-profile
-      // overlays today (the PTY path is wired for host-staging but env
-      // injection requires the sibling spec which has session_command;
-      // revisit when an operator needs it).
-      setRunner("");
-      setEnvProfileKey("");
+      // Sessions DO support the host runner and env-profile overlays
+      // (SessionManager.start wires both — the sibling's host_staging
+      // flips the workdir to the host-staging copy and the env-overlay
+      // is merged onto _build_env before exec). Keeping the previously
+      // chosen values when switching into session mode matches the
+      // task-mode behaviour; the dropdowns below stay visible.
     }
   }
 
@@ -308,6 +308,8 @@ export default function ProjectDetail() {
         heartbeat_issue_number: null,
         heartbeat_commented_at: null,
         heartbeat_closed_at: null,
+        runner,
+        env_profile_key: envProfileKey,
         created_at: new Date().toISOString(),
         started_at: null,
         finished_at: null,
@@ -560,10 +562,11 @@ export default function ProjectDetail() {
               selected agent has an enabled "<agent>-host" sibling
               AgentSpec (Docker auto-creates it when
               CD_<AGENT>_SSH_USER is set; systemd operators hand-write
-              it in config.yaml). Hidden entirely for session mode
-              (PTY path is host-staging but env injection is off for
-              v1; revisit when an operator needs it). */}
-          {mode !== "session" && currentAgent?.host_agent_key && (
+              it in config.yaml). Available in session mode too: the
+              SessionManager swaps to the sibling spec (which must have
+              a session_command) and the host-staging branch routes the
+              workdir through the host's shared staging copy. */}
+          {currentAgent?.host_agent_key && (
             <span className="flex items-center gap-2">
               <label className="text-sm text-slate-400">Runner:</label>
               <select
@@ -577,10 +580,10 @@ export default function ProjectDetail() {
             </span>
           )}
           {/* Env-profile overlay. For today only Claude supports it
-              (other agents ignore the field on the server). Hidden in
-              session mode. Empty value = today's behaviour (no env
-              injection). */}
-          {mode !== "session" && currentAgent?.key === "claude" && profiles.length > 0 && (
+              (other agents ignore the field on the server). Available
+              in session mode too — SessionManager.start applies the
+              overlay onto _build_env before the PTY subprocess execs. */}
+          {currentAgent?.key === "claude" && profiles.length > 0 && (
             <span className="flex items-center gap-2">
               <label className="text-sm text-slate-400">Env-Profil:</label>
               <select

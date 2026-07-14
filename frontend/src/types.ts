@@ -243,8 +243,19 @@ export interface HeartbeatStatus {
   assignee_logins: string[];
   /** Global default env-profile key for heartbeat-spawned tasks. Empty =
    *  no env injection (standard Anthropic auth / endpoint). Settable per
-   *  project on the /heartbeat page; per-project override beats this. */
+   *  project on the /heartbeat page; per-project override beats this.
+   *  Settable globally from the /heartbeat page itself
+   *  (POST /api/heartbeat/env-profile); in-memory only — resets on
+   *  backend restart (operators wanting a permanent switch set
+   *  CD_HEARTBEAT_ENV_PROFILE_KEY in the service config). */
   env_profile_key: string;
+  /** Agent keys the heartbeat's auto-spawned agent can be flipped to
+   *  via POST /api/heartbeat/agent-key. Includes the configured default
+   *  (CD_HEARTBEAT_AGENT_KEY) and every enabled "<key>-host" sibling
+   *  (Docker entrypoint auto-creates "claude-host" when
+   *  CD_CLAUDE_SSH_USER is set). The current choice is in
+   *  ``agent_key`` above. */
+  available_agent_keys: string[];
   last_tick_at: string | null;
   last_tick_summary: string | null;
   projects: HeartbeatProjectStatus[];

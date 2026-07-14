@@ -303,6 +303,29 @@ export const api = {
     ),
   triggerHeartbeat: () =>
     request<{ triggered: boolean }>("POST", "/heartbeat/trigger"),
+  /** Set the global default env-profile key for heartbeat-spawned
+   *  tasks. Empty string clears the override (falls back to
+   *  CD_HEARTBEAT_ENV_PROFILE_KEY). In-memory only — resets on backend
+   *  restart. Per-project overrides on the projects table still beat
+   *  this global default. */
+  setHeartbeatEnvProfile: (envProfileKey: string) =>
+    request<{ env_profile_key: string }>(
+      "POST",
+      "/heartbeat/env-profile",
+      { env_profile_key: envProfileKey },
+    ),
+  /** Swap the heartbeat's auto-spawned agent at runtime. Lets the
+   *  operator flip between ``claude`` (in-container) and ``claude-host``
+   *  (SSH-into-host) without editing env vars and restarting. Empty
+   *  string clears the override (falls back to
+   *  CD_HEARTBEAT_AGENT_KEY). In-memory only — resets on backend
+   *  restart. */
+  setHeartbeatAgentKey: (agentKey: string) =>
+    request<{ agent_key: string }>(
+      "POST",
+      "/heartbeat/agent-key",
+      { agent_key: agentKey },
+    ),
   setProjectHeartbeatEnabled: (projectId: string, enabled: boolean) =>
     request<{ id: string; heartbeat_enabled: boolean }>(
       "POST",

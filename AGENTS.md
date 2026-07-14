@@ -14,6 +14,65 @@ Self-hosted dashboard for delegating coding tasks per project to Claude Code,
 Hermes, or Codex: create/import a repo → give an agent a task → watch live
 output → auto-commit & push → keep history. Web + Android.
 
+## Letzter Durchlauf
+
+### 2026-07-14 — claude (Sessions: Env-Profil + Runner; Heartbeat: Global Env-Profil + Agent-Auswahl)
+
+**Aufgabe:** Zwei fehlende UI-Bedienelemente nachgerüstet — (1) auf der
+Projekt-Detailseite war im Session-Modus weder Env-Profil noch
+Runner sichtbar (war hartkodiert auf `mode !== "session"` gegated,
+obwohl das Backend beides schon korrekt verdrahtet hatte); (2) auf
+der Heartbeat-Seite gab es nur eine Lese-Anzeige des globalen
+`CD_HEARTBEAT_ENV_PROFILE_KEY`-Wertes als Chip und keine Möglichkeit,
+den Heartbeat zwischen `claude` und `claude-host` umzuschalten.
+
+**Was geändert wurde:**
+- `frontend/src/pages/ProjectDetail.tsx` — die `mode !== "session"`
+  Gates um den Runner- und Env-Profil-Dropdown entfernt. `changeMode`
+  setzt jetzt nicht mehr `runner` und `envProfileKey` zurück, wenn auf
+  Session gewechselt wird. Das lokale `sessTask`-Literal in
+  `startSession` führt `runner` + `env_profile_key` mit, damit der
+  TypeScript-Build sauber bleibt.
+- `backend/app/schemas.py` — `HeartbeatEnvProfileIn`,
+  `HeartbeatAgentKeyIn` hinzugefügt; `HeartbeatStatus` um
+  `available_agent_keys: list[str]` erweitert, damit die UI weiß,
+  welche Agent-Keys aktuell umschaltbar sind.
+- `backend/app/routers/heartbeat.py` — neue Endpoints
+  `POST /api/heartbeat/env-profile` und
+  `POST /api/heartbeat/agent-key`. Beide validieren serverseitig
+  (404 bei unbekanntem Env-Profil-Key, 400 bei unbekanntem/deaktiviertem
+  Agent), sind in-memory (resetten beim Backend-Neustart) und liefern
+  den effective Wert im Response. `GET /api/heartbeat` zieht jetzt
+  runtime-overrides vor die env-Var-Defaults und berechnet
+  `available_agent_keys` aus `agents.agents` (env-Default + alle
+  enabled `<key>-host`-Siblings).
+- `backend/app/heartbeat.py` — `HeartbeatRunner` um
+  `_agent_key_override` + `_env_profile_key_override` plus
+  `set_agent_key` / `set_env_profile_key` Properties/Setters erweitert.
+  `_tick` liest den Agent-Override, `_resolve_env_profile_key` zieht
+  den Env-Override vor die env-Var. Reihenfolge jetzt:
+  per-project override → runtime-global → env-var global → leer.
+- `frontend/src/pages/Heartbeat.tsx` — neue Zeile unter dem Toggle-
+  Bereich mit zwei Selects: "Agent" (alle `available_agent_keys`,
+  `claude-host` bekommt einen 🖥 host-Suffix), "Default Env-Profil"
+  (Profile aus `/api/env-profiles` + "Standard"-Eintrag der auf den
+  env-var zurückfällt).
+- `frontend/src/api.ts` — `setHeartbeatEnvProfile`,
+  `setHeartbeatAgentKey` hinzugefügt.
+- `frontend/src/types.ts` — `HeartbeatStatus.available_agent_keys`
+  ergänzt, `env_profile_key` Doc-Kommentar präzisiert (mentiont jetzt
+  explizit POST /api/heartbeat/env-profile + den in-memory Charme).
+- `backend/tests/smoke.py` — drei neue Tests:
+  `test_heartbeat_global_env_profile_endpoint` (404/200/Clear-Pfad),
+  `test_heartbeat_agent_key_endpoint` (mit echtem Tick → spawned task
+  trägt `agent='fake-host'`), `test_session_env_profile_persists`
+  (round-trippt `env_profile_key` + `runner` durch POST /sessions und
+  liest sie aus dem Task-Row).
+
+**Verifikation:** `python tests/smoke.py` → alle Pre-existing PASS +
+alle 21 neuen Assertions PASS. Die einzigen Failures bleiben die zwei
+pre-existing CORS-Failures auf `main` (unverändert, unabhängig).
+
 ## Quick commands
 
 Backend (Python 3.10-3.12, FastAPI). From `backend/`:
