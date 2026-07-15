@@ -322,16 +322,33 @@ when the live channel is gone, so reconnects don't lose output.
   Leaving `ANTHROPIC_API_KEY` unset lets the host's shell export a
   leaked upstream token that would silently hit the wrong endpoint.
 - **First-boot `config.yaml` is written once, never overwritten — except
-  when the Hermes seed lands on PATH.** The Docker entrypoint only writes
+  when the Hermes seed lands on PATH, or when a shared-wiring
+  SSH-driven sibling is missing.** The Docker entrypoint only writes
   the file when `/etc/coding-dashboard/config.yaml` is absent; upgrading
   the image does NOT re-merge new built-in siblings into the existing
-  volume-held file. The one exception is the Hermes-in-image first-boot
-  seed (see the convention above): on every container start, if `hermes`
-  is on PATH but the existing YAML's `hermes:` entry is `enabled: false`
-  (left over from a pre-seed boot), the entrypoint regenerates the file
-  so the UI flips the option without operator intervention. To pick up
-  any other new built-ins on an upgrade, delete the file (or the volume)
-  and restart.
+  volume-held file. The exceptions are:
+  1. The Hermes-in-image first-boot seed (see the convention above): on
+     every container start, if `hermes` is on PATH but the existing YAML's
+     `hermes:` entry is `enabled: false` (left over from a pre-seed boot),
+     the entrypoint regenerates the file so the UI flips the option
+     without operator intervention.
+  2. The shared-SSH-wiring backfill (see "Shared Hermes/Claude/Codex SSH
+     wiring" above): on every container start, if any
+     `CD_{HERMES,CLAUDE,CODEX}_SSH_USER` is set AND the YAML is missing
+     one of the three `<base>-host` siblings the generator would emit
+     (e.g. an upgrade that adds `codex-host` to a YAML written before it
+     existed), the entrypoint regenerates the file so `/api/agents` ships
+     the full expected sibling set. The Python loader
+     (`app.config.load_agents_config`) also runs an in-memory backfill
+     of the same kind, so a running container picks up the missing
+     sibling on the next backend start even if the operator has not
+     restarted the full image (e.g. only a backend reload). The
+     loader-side backfill is gated on `_is_legacy_builtin_config_with_siblings`
+     so custom (non-builtin) agents in the YAML are never silently
+     mutated; operator-set `enabled: false` on a present `-host` key is
+     preserved because the backfill only ADDS missing keys.
+  To pick up any other new built-ins on an upgrade, delete the file (or
+  the volume) and restart.
 - **`shutil.which(cmd, path=…)` in `config_bootstrap.py` is
   load-bearing.** Calling it without `path=` falls back to
   `os.defpath` (`/bin:/usr/bin`), ignoring any caller-supplied PATH —

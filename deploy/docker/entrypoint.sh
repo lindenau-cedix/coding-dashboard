@@ -177,15 +177,52 @@ PY
 )"
 hermes_on_path_now=0
 have hermes && hermes_on_path_now=1
+# SSH-driven siblings currently present in the on-disk YAML. The generator
+# emits ALL THREE of {hermes-host,claude-host,codex-host} whenever ANY
+# CD_*_SSH_USER is set (shared-wiring: setting one applies to all). When
+# the YAML predates this support — e.g. it was written before codex-host
+# landed — it can be missing one or more of those keys even though the
+# operator's current SSH env vars would create them today. Detect that
+# staleness here so the entrypoint regenerates the file instead of forcing
+# the operator to delete it by hand after every image upgrade.
+ssh_yaml_state="$(python - <<'PY' 2>/dev/null || echo MISSING
+import sys, yaml, os
+path = "/etc/coding-dashboard/config.yaml"
+if not os.path.exists(path):
+    print("MISSING"); sys.exit(0)
+try:
+    doc = yaml.safe_load(open(path))
+except Exception:
+    print("MISSING"); sys.exit(0)
+agents = (doc or {}).get("agents") or {}
+print(",".join(sorted(k for k in agents if k.endswith("-host"))))
+PY
+)"
 should_regen=0
 if [[ ! -f "$CONFIG_YAML" ]]; then
   should_regen=1
 elif [[ "$hermes_on_path_now" -eq 1 ]] && [[ "$hermes_yaml_state" == "DISABLED" ]]; then
   should_regen=1
+elif [[ -n "$EFFECTIVE_HERMES_SSH_USER" || -n "$EFFECTIVE_CLAUDE_SSH_USER" \
+        || -n "$EFFECTIVE_CODEX_SSH_USER" ]]; then
+  # Shared-wiring is active. Regenerate when ANY of the three -host
+  # siblings is absent from the YAML so the on-disk file matches what the
+  # generator would emit today.
+  for sib in claude-host codex-host hermes-host; do
+    if [[ ",$ssh_yaml_state," != *",$sib,"* ]]; then
+      should_regen=1
+      break
+    fi
+  done
 fi
 if [[ "$should_regen" -eq 1 ]]; then
   if [[ -f "$CONFIG_YAML" ]]; then
-    echo "==> Regenerating $CONFIG_YAML (hermes now on PATH, old YAML predates seed)"
+    if [[ -n "$EFFECTIVE_HERMES_SSH_USER" || -n "$EFFECTIVE_CLAUDE_SSH_USER" \
+          || -n "$EFFECTIVE_CODEX_SSH_USER" ]]; then
+      echo "==> Regenerating $CONFIG_YAML (SSH-driven sibling missing; YAML predates shared-wiring support)"
+    else
+      echo "==> Regenerating $CONFIG_YAML (hermes now on PATH, old YAML predates seed)"
+    fi
   else
     echo "==> First boot: generating $CONFIG_YAML"
   fi
