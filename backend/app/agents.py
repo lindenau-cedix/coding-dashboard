@@ -475,7 +475,9 @@ async def _run_agent_inner(
 
     # For Codex, write model + model_reasoning_effort to ~/.codex/config.toml
     # so Codex uses exactly the values the user selected in the dashboard.
-    if (model or effort) and spec.key == "codex":
+    # The host-side ``codex-host`` sibling gets the same treatment so the
+    # SSH-driven run on the host picks up the same selections.
+    if (model or effort) and spec.key in ("codex", "codex-host"):
         _write_codex_config(model, effort)
 
     try:

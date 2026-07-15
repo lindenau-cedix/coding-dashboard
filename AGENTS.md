@@ -123,7 +123,13 @@ CLI argv injection via `model_args` / `effort_args`. In addition to argv,
 the built-in `claude` / `codex` agents get the value written into their
 own dotfile (`~/.claude/settings.json` for effort; `~/.codex/config.toml`
 for model + `model_reasoning_effort`) — **keys off `spec.key`, so
-renaming those agents silently drops the dotfile write.**
+renaming those agents silently drops the dotfile write.** Codex uses
+`-c model_reasoning_effort={effort}` rather than a `--effort` CLI flag
+(Codex has no such flag); the SSH `codex-host` sibling inherits the
+same `model_args` / `effort_args` from the base spec via the deep-copy
+in `config_bootstrap.py`, so `_build_command` substitutes the user's
+selections into the appended `-c model_reasoning_effort=…` argv after
+the SSH remote-shell string.
 
 **Image attachments** — `TaskCreate.images = [{name, data}]` (Base64 or
 data URLs; ≤6 images, ≤8 MB each, png/jpg/jpeg/gif/webp). Stored outside
@@ -153,9 +159,15 @@ profile) → env-var default → empty.
 
 **Per-task host runner** — `Task.runner="host"` resolves to the
 `<agent>-host` sibling AgentSpec. The sibling is auto-created by the
-Docker entrypoint when `CD_<AGENT>_SSH_USER` is set, or hand-written in
-`config.yaml` for systemd. Sibling has `host_staging=True`, reusing the
-existing `host_staging.*` copy/merge plumbing.
+Docker entrypoint when `CD_<AGENT>_SSH_USER` is set (`hermes`, `claude`,
+`codex` — see "Shared SSH wiring" below), or hand-written in
+`config.yaml` for systemd (`deploy/install.sh` ships commented templates
+for `claude-host`, `hermes-host`, `codex-host`). Sibling has
+`host_staging=True`, reusing the existing `host_staging.*` copy/merge
+plumbing. The UI exposes host support as a **separate Runner dropdown**
+(`Container` / `Host via SSH`) next to the Agent dropdown — the Runner
+control is hidden entirely for agents whose selected base has no
+enabled host sibling.
 
 **Heartbeat** — `heartbeat.HeartbeatRunner` is one long-lived
 `asyncio.Task` started from `main.lifespan()`. Every
@@ -220,34 +232,45 @@ when the live channel is gone, so reconnects don't lose output.
   earlier `docker-compose.yml` line used to forward the shell env
   defaulting to empty, which silently beat the Dockerfile default and
   dropped every install — don't reintroduce that).
-- **Shared Hermes/Claude SSH wiring (Docker entrypoint).** Setting EITHER
-  `CD_HERMES_SSH_USER` OR `CD_CLAUDE_SSH_USER` lights up BOTH the
-  `hermes-host` and `claude-host` siblings at the resolved user/host/port
-  (each sibling prefers its own env, falls back to the other agent's).
-  Setting BOTH only matters when they point at different hosts. Setting
-  NEITHER disables both. Container `hermes` (and `claude`) stay as their
-  own entries — only the SSH form moves to the sibling, mirroring the
-  existing `claude`/`claude-host` pair. Operator-facing wording lives in
-  `deploy/docker/coding-dashboard.docker.env.example`.
+- **Shared Hermes/Claude/Codex SSH wiring (Docker entrypoint).** Setting ANY
+  one of `CD_{HERMES,CLAUDE,CODEX}_SSH_USER` lights up ALL THREE
+  `<agent>-host` siblings at the resolved user/host/port (each sibling
+  prefers its own env, falls back to the next agent's in the
+  `(hermes, claude, codex)` resolver order). Setting TWO/THREE only
+  matters when they point at different hosts. Setting NONE disables all
+  three. Container `hermes` / `claude` / `codex` stay as their own
+  entries — only the SSH form moves into the sibling, mirroring the
+  `claude`/`claude-host` pair. Operator-facing wording lives in
+  `deploy/docker/coding-dashboard.docker.env.example`. The single pair
+  of `id_hermes` / `id_claude` / `id_codex` keys per agent is honoured
+  the same way as user/host/port (next bullet).
 - **SSH private-key paths follow the same shared-wiring rule as USER/HOST/PORT**
   in `backend/app/config_bootstrap.py` + `deploy/docker/entrypoint.sh`. Each
-  agent defaults to its own key path (`/home/app/.ssh/id_hermes` / `id_claude`).
-  The resolver: honours an explicit `CD_{HERMES,CLAUDE}_SSH_KEY` env override
-  as a pin (no fallback); otherwise inherits the other agent's key path when
-  the sibling inherited its SSH user (a Hermes-only setup → `claude-host`
-  uses `id_hermes`); finally, if the resolved key file is absent on disk but
-  the other agent's key exists, falls back to the existing key — unless
-  pinned. The Python generator emits the key into `<agent>-host.command` /
-  `session_command`; the entrypoint prints the **effective** key (after
-  resolution) in the boot log + `Verify connectivity` snippet. The frontend's
-  `/api/agents` returns the generator output — never the raw default — so
-  what the boot log says matches what runs.
+  agent defaults to its own key path (`/home/app/.ssh/id_hermes` /
+  `id_claude` / `id_codex`). The resolver: honours an explicit
+  `CD_{HERMES,CLAUDE,CODEX}_SSH_KEY` env override as a pin (no
+  fallback); otherwise inherits the next agent's key path when the
+  sibling inherited that agent's SSH user (a Hermes-only setup →
+  `claude-host` + `codex-host` use `id_hermes`); finally, if the
+  resolved key file is absent on disk but any other agent's key exists,
+  falls back to the existing key — unless pinned. The Python generator
+  emits the key into `<agent>-host.command` / `session_command`; the
+  entrypoint prints the **effective** key (after resolution) in the
+  boot log + `Verify connectivity` snippet. The frontend's `/api/agents`
+  returns the generator output — never the raw default — so what the
+  boot log says matches what runs.
 - **`<base>-host` is the universal sibling-swap pattern.** Adding a new
   on-host agent = register a sibling under `<base>-host` with
   `host_staging=True`; the per-task Runner dropdown, the heartbeat
   `available_agent_keys` selector, the SessionManager / TaskManager
   `<base>-host` swap shims, and the front-end `host_agent_key` resolver
-  all pick it up with no code change.
+  all pick it up with no code change. The Codex variant adds two
+  deviations: the SSH `command` must drop `--output-last-message
+  {last_message_file}` (the host's codex process can't reach the
+  container's tempfile) and inject effort via
+  `-c model_reasoning_effort={effort}` instead of `--effort`. Both are
+  handled in `config_bootstrap.py`'s codex branch — mirror them when
+  adding a fourth on-host agent.
 - **Generator emits the base agent BEFORE its `-host` sibling** in
   `backend/app/config_bootstrap.py`. This ordering is load-bearing:
   `/api/agents` preserves dict order, and the frontend defaults to the
@@ -287,6 +310,14 @@ when the live channel is gone, so reconnects don't lose output.
   To clear, PATCH with `""`. `CD_SECRET_KEY` rotation invalidates all
   stored tokens; setting it back to the bundled default disables token
   writes (CRUD returns 503).
+- **`codex-host` cannot use `--output-last-message`.** The container-side
+  `codex` spec writes its final answer to a tempfile in
+  `tempfile.mkstemp(prefix="cd-last-msg-…")`; the host SSH process can't
+  reach that path. `config_bootstrap.py` strips
+  `--output-last-message {last_message_file}` from the `codex-host`
+  command so `run_agent` skips temp-file creation entirely and the
+  summary falls back to `_CodexParser.summary()`. If a fourth on-host
+  agent ever needs the same opt, mirror this in its sibling block.
 - **When ANY profile field is set, `ANTHROPIC_API_KEY=""` is stamped.**
   Leaving `ANTHROPIC_API_KEY` unset lets the host's shell export a
   leaked upstream token that would silently hit the wrong endpoint.

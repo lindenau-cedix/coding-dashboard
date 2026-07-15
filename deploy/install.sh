@@ -135,13 +135,14 @@ chown -R "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR"; chmod 750 "$DATA_DIR"
 chown root:"$SERVICE_USER" "$CONFIG_DIR"; chmod 750 "$CONFIG_DIR"
 
 # --- config.yaml ----------------------------------------------------------- #
-# Per-task "Runner: host" for Claude Code is OFF by default on systemd installs
-# (operators hand-write the sibling ``claude-host`` block below if they want
-# it). The Docker install instead does the auto-generation in entrypoint.sh
-# when CD_CLAUDE_SSH_USER is set; we follow the hand-write path here because
-# systemd deployments vary too much in their SSH layout (separate jump-host,
-# different key path, etc.) to auto-derive. After adding the block, restart
-# the service; the dashboard picks up the new sibling automatically.
+# Per-task "Runner: host" for Claude Code, Hermes, and Codex is OFF by
+# default on systemd installs (operators hand-write the sibling
+# ``*-host`` blocks if they want them). The Docker install instead does
+# the auto-generation in entrypoint.sh when CD_{HERMES,CLAUDE,CODEX}_SSH_USER
+# is set; we follow the hand-write path here because systemd deployments
+# vary too much in their SSH layout (separate jump-host, different key
+# path, etc.) to auto-derive. After adding the block, restart the
+# service; the dashboard picks up the new sibling automatically.
 if [[ -f $CONFIG_YAML && $FORCE != 1 ]]; then
   info "config.yaml existiert – unverändert (FORCE=1 zum Überschreiben)"
 else
@@ -197,6 +198,37 @@ agents:
     env:
       NO_COLOR: "1"
     unset_env: ["PYTHONPATH", "PYTHONHOME"]
+
+  # Per-task "Runner: host" for Codex on systemd installs is OFF by default —
+  # operators hand-write this sibling block if they want it (the Docker
+  # install auto-creates it from the CD_CODEX_SSH_USER env var). To enable,
+  # uncomment the block below, set the SSH user/host/port/keyfile, and
+  # restart the service. The dashboard's "Runner: host" dropdown then
+  # routes Codex tasks through `ssh <user>@<host> 'codex exec ...'`.
+  # Note: the host's codex CLI does NOT have access to the dashboard's
+  # tempfile for `--output-last-message`, so the SSH form drops that flag
+  # and uses the parser's summary instead. The dashboard also copies the
+  # project into a staging dir the host can reach (default /tmp), runs the
+  # codex CLI there, then merges + pushes the result back.
+  # codex-host:
+  #   display_name: "Codex (Host)"
+  #   command: ["ssh", "-i", "/home/<host-user>/.ssh/id_codex", "-p", "22",
+  #             "-o", "StrictHostKeyChecking=accept-new",
+  #             "-o", "UserKnownHostsFile=/home/<host-user>/.ssh_known_hosts",
+  #             "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+  #             "<host-user>@<host>",
+  #             'cd "{project_dir}" && export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && exec env NO_COLOR=1 codex exec --cd "{project_dir}" --sandbox workspace-write --color never --ephemeral -',
+  #             "--model", "{model}", "-c", "model_reasoning_effort={effort}"]
+  #   session_command: ["ssh", "-tt", "-i", "/home/<host-user>/.ssh/id_codex", "-p", "22",
+  #             "-o", "StrictHostKeyChecking=accept-new",
+  #             "-o", "UserKnownHostsFile=/home/<host-user>/.ssh_known_hosts",
+  #             "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+  #             "<host-user>@<host>",
+  #             'cd "{project_dir}" && export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH" && exec codex']
+  #   prompt_via: stdin
+  #   stream_format: codex
+  #   enabled: true
+  #   host_staging: true
 YAML
   chown root:"$SERVICE_USER" "$CONFIG_YAML"; chmod 640 "$CONFIG_YAML"
 fi
