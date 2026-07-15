@@ -4857,6 +4857,227 @@ def test_claude_host_reuses_hermes_ssh() -> None:
     check("neither_set: claude-host absent", "claude-host" not in doc_d, list(doc_d))
 
 
+def test_ssh_sibling_backfill_in_load_agents_config() -> None:
+    """``load_agents_config`` must backfill missing SSH-driven siblings
+    when the on-disk YAML predates the shared-wiring support.
+
+    The first-boot generator emits all three of
+    ``{hermes-host,claude-host,codex-host}`` whenever ANY ``CD_*_SSH_USER``
+    is set (shared-wiring). An existing YAML written BEFORE a given
+    ``-host`` flavor landed only has the older siblings — e.g. an
+    upgrade that adds ``codex-host`` leaves the YAML with
+    ``claude-host`` + ``hermes-host`` but no ``codex-host``, even though
+    the operator's current SSH env vars would create all three today.
+
+    The entrypoint also detects this and regenerates the on-disk YAML on
+    the next container start, but operators that can't restart immediately
+    still need the runtime to see the missing sibling. The loader-side
+    backfill adds it in-memory so ``/api/agents`` ships the expected set
+    right away. This test pins that behaviour:
+
+      * YAML with only ``claude-host`` + ``hermes-host`` + base entries
+        under SSH wiring -> ``codex-host`` gets added at load time.
+      * Operator-disabled ``codex-host`` (``enabled: false``) is preserved
+        — the key is already present, so the backfill is a no-op.
+      * No SSH wiring -> nothing gets added, stale YAML entries stay as-is.
+      * Custom (non-built-in) agents in the YAML are never touched.
+    """
+    from app.config import load_agents_config
+
+    # --- case 1: stale YAML + Hermes-only SSH user -> codex-host backfilled ---
+    stale_yaml = TMP / "ssh-backfill-stale.yaml"
+    stale_yaml.write_text(
+        "agents:\n"
+        "  claude:\n"
+        '    display_name: "Claude Code"\n'
+        "    command:\n"
+        "      - claude\n"
+        "      - -p\n"
+        "      - '{prompt}'\n"
+        "      - --output-format\n"
+        "      - stream-json\n"
+        "      - --verbose\n"
+        "      - --dangerously-skip-permissions\n"
+        "    prompt_via: arg\n"
+        "    stream_format: claude-json\n"
+        "    session_command: [claude]\n"
+        "    enabled: true\n"
+        "  claude-host:\n"
+        '    display_name: "Claude Code (Host)"\n'
+        "    command: [ssh, -i, /home/app/.ssh/id_hermes, -p, '22', debian@host.docker.internal, "
+        "'cd {project_dir} && claude']\n"
+        "    prompt_via: stdin\n"
+        "    stream_format: raw\n"
+        "    session_command: [ssh, -tt, -i, /home/app/.ssh/id_hermes, -p, '22', "
+        "debian@host.docker.internal, 'cd {project_dir} && claude']\n"
+        "    host_staging: true\n"
+        "    enabled: true\n"
+        "  hermes:\n"
+        '    display_name: "Hermes"\n'
+        "    command: [hermes, chat, -q, '{prompt}', --yolo, --accept-hooks]\n"
+        "    prompt_via: arg\n"
+        "    stream_format: raw\n"
+        "    session_command: [hermes, chat]\n"
+        "    enabled: true\n"
+        "  hermes-host:\n"
+        '    display_name: "Hermes (Host)"\n'
+        "    command: [ssh, -i, /home/app/.ssh/id_hermes, -p, '22', debian@host.docker.internal, "
+        "'cd {project_dir} && hermes chat -q $(cat) --yolo --accept-hooks']\n"
+        "    prompt_via: stdin\n"
+        "    stream_format: raw\n"
+        "    session_command: [ssh, -tt, -i, /home/app/.ssh/id_hermes, -p, '22', "
+        "debian@host.docker.internal, 'cd {project_dir} && hermes chat']\n"
+        "    host_staging: true\n"
+        "    enabled: true\n"
+        "  codex:\n"
+        '    display_name: "Codex"\n'
+        "    command: [codex, exec, --cd, '{project_dir}', --sandbox, workspace-write, "
+        "--color, never, --ephemeral, --output-last-message, '{last_message_file}', '-']\n"
+        "    prompt_via: stdin\n"
+        "    stream_format: codex\n"
+        "    session_command: [codex]\n"
+        "    enabled: true\n",
+        encoding="utf-8",
+    )
+    old_ssh = {k: os.environ.get(k) for k in (
+        "CD_HERMES_SSH_USER", "CD_HERMES_SSH_HOST", "CD_HERMES_SSH_PORT",
+        "CD_HERMES_SSH_KEY", "CD_CLAUDE_SSH_KEY", "CD_CODEX_SSH_KEY",
+    )}
+    try:
+        os.environ["CD_HERMES_SSH_USER"] = "huser"
+        os.environ.pop("CD_CLAUDE_SSH_USER", None)
+        os.environ.pop("CD_CODEX_SSH_USER", None)
+        cfg = load_agents_config(stale_yaml)
+        agents = cfg.agents
+        check(
+            "ssh_backfill: codex-host added to stale YAML under shared wiring",
+            "codex-host" in agents,
+            sorted(agents),
+        )
+        codex_host = agents["codex-host"]
+        check(
+            "ssh_backfill: codex-host ssh argv targets the shared user@host",
+            any(t == "huser@host.docker.internal" for t in codex_host.command),
+            str(codex_host.command),
+        )
+        check(
+            "ssh_backfill: codex-host host_staging=True",
+            codex_host.host_staging is True,
+            str(codex_host.host_staging),
+        )
+        check(
+            "ssh_backfill: claude-host + hermes-host entries preserved (not regenerated)",
+            "claude-host" in agents and "hermes-host" in agents,
+            sorted(agents),
+        )
+        # The existing legacy base-entry backfill must still work alongside
+        # the SSH sibling backfill — codex is already in the YAML, so the
+        # base-entry backfill is a no-op for this fixture.
+        check(
+            "ssh_backfill: codex (base) entry preserved",
+            "codex" in agents,
+            sorted(agents),
+        )
+
+        # --- case 2: operator-disabled codex-host is NOT overwritten ---
+        disabled_yaml = TMP / "ssh-backfill-disabled.yaml"
+        disabled_yaml.write_text(
+            "agents:\n"
+            "  claude:\n"
+            '    display_name: "Claude Code"\n'
+            "    command: [claude, -p, '{prompt}']\n"
+            "    prompt_via: arg\n"
+            "    stream_format: claude-json\n"
+            "    enabled: true\n"
+            "  hermes:\n"
+            '    display_name: "Hermes"\n'
+            "    command: [hermes, chat, -q, '{prompt}', --yolo, --accept-hooks]\n"
+            "    prompt_via: arg\n"
+            "    stream_format: raw\n"
+            "    enabled: true\n"
+            "  codex:\n"
+            '    display_name: "Codex"\n'
+            "    command: [codex, exec, --cd, '{project_dir}', --sandbox, workspace-write, "
+            "--color, never, --ephemeral, --output-last-message, '{last_message_file}', '-']\n"
+            "    prompt_via: stdin\n"
+            "    stream_format: codex\n"
+            "    enabled: true\n"
+            "  codex-host:\n"
+            '    display_name: "Codex (Host)"\n'
+            "    command: [ssh, -i, /custom/pinned/id_codex, -p, '99', custom@host, "
+            "'cd {project_dir} && codex exec']\n"
+            "    prompt_via: stdin\n"
+            "    stream_format: codex\n"
+            "    host_staging: true\n"
+            "    enabled: false\n",
+            encoding="utf-8",
+        )
+        cfg2 = load_agents_config(disabled_yaml)
+        check(
+            "ssh_backfill: operator-disabled codex-host stays disabled",
+            cfg2.agents["codex-host"].enabled is False,
+            str(cfg2.agents["codex-host"].enabled),
+        )
+        check(
+            "ssh_backfill: operator's custom key path preserved",
+            "-i" in cfg2.agents["codex-host"].command
+            and cfg2.agents["codex-host"].command[
+                cfg2.agents["codex-host"].command.index("-i") + 1
+            ] == "/custom/pinned/id_codex",
+            str(cfg2.agents["codex-host"].command),
+        )
+
+        # --- case 3: no SSH wiring -> nothing backfilled, stale keys stay ---
+        # Clear all SSH envs and load the stale YAML. There is no SSH user
+        # set, so the generator emits no -host siblings and the loader must
+        # not invent any. The YAML's claude-host + hermes-host are preserved
+        # because the loader only ADDS, never deletes.
+        os.environ.pop("CD_HERMES_SSH_USER", None)
+        os.environ.pop("CD_HERMES_SSH_HOST", None)
+        os.environ.pop("CD_HERMES_SSH_PORT", None)
+        cfg3 = load_agents_config(stale_yaml)
+        check(
+            "ssh_backfill: no SSH wiring -> existing -host siblings preserved",
+            "claude-host" in cfg3.agents and "hermes-host" in cfg3.agents,
+            sorted(cfg3.agents),
+        )
+        check(
+            "ssh_backfill: no SSH wiring -> codex-host NOT invented by loader",
+            "codex-host" not in cfg3.agents,
+            sorted(cfg3.agents),
+        )
+
+        # --- case 4: custom-only YAML under SSH wiring is left alone ---
+        # Operators with custom agents should not have any built-in -host
+        # siblings injected. The backfill only touches the SSH-driven
+        # built-in keys the YAML already lacks; a YAML without claude/
+        # hermes/codex in any form is not a legacy built-in config.
+        custom_yaml = TMP / "ssh-backfill-custom.yaml"
+        custom_yaml.write_text(
+            "agents:\n"
+            "  custom-agent:\n"
+            '    display_name: "Custom"\n'
+            "    command: [some-cli, -p, '{prompt}']\n"
+            "    prompt_via: arg\n"
+            "    stream_format: raw\n"
+            "    enabled: true\n",
+            encoding="utf-8",
+        )
+        os.environ["CD_HERMES_SSH_USER"] = "huser"
+        cfg4 = load_agents_config(custom_yaml)
+        check(
+            "ssh_backfill: custom-only YAML stays explicit",
+            set(cfg4.agents) == {"custom-agent"},
+            sorted(cfg4.agents),
+        )
+    finally:
+        for k, v in old_ssh.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_ssh_key_shared_wiring() -> None:
     """The SSH private-key path follows the same shared-wiring rule as
     user/host/port, plus an on-disk existence fallback:
@@ -6203,6 +6424,7 @@ def main() -> int:
         test_runner_picks_host_sibling_by_key()
         test_hermes_host_sibling_registers()
         test_claude_host_reuses_hermes_ssh()
+        test_ssh_sibling_backfill_in_load_agents_config()
         test_ssh_key_shared_wiring()
         test_ssh_remote_path_export()
         test_hermes_container_in_image_only()
