@@ -198,6 +198,28 @@ agents = (doc or {}).get("agents") or {}
 print(",".join(sorted(k for k in agents if k.endswith("-host"))))
 PY
 )"
+# Resolve the EFFECTIVE_*_SSH_{USER,HOST,PORT} vars now (before the regen
+# check immediately below) so the shared-wiring probe can detect when ANY
+# of the three CD_*_SSH_USER env vars is set. The key-path resolver further
+# down also depends on these USER vars, so this is the right place to
+# compute them once. Order mirrors backend/app/config_bootstrap.py: each
+# agent prefers its own env var and falls back to the next in
+# (hermes, claude, codex).
+EFFECTIVE_HERMES_SSH_USER="${HERMES_SSH_USER:-${CLAUDE_SSH_USER:-$CODEX_SSH_USER}}"
+EFFECTIVE_HERMES_SSH_HOST="${HERMES_SSH_HOST:-${CLAUDE_SSH_HOST:-$CODEX_SSH_HOST}}"
+EFFECTIVE_HERMES_SSH_HOST="${EFFECTIVE_HERMES_SSH_HOST:-host.docker.internal}"
+EFFECTIVE_HERMES_SSH_PORT="${HERMES_SSH_PORT:-${CLAUDE_SSH_PORT:-$CODEX_SSH_PORT}}"
+EFFECTIVE_HERMES_SSH_PORT="${EFFECTIVE_HERMES_SSH_PORT:-22}"
+EFFECTIVE_CLAUDE_SSH_USER="${CLAUDE_SSH_USER:-${HERMES_SSH_USER:-$CODEX_SSH_USER}}"
+EFFECTIVE_CLAUDE_SSH_HOST="${CLAUDE_SSH_HOST:-${HERMES_SSH_HOST:-$CODEX_SSH_HOST}}"
+EFFECTIVE_CLAUDE_SSH_HOST="${EFFECTIVE_CLAUDE_SSH_HOST:-host.docker.internal}"
+EFFECTIVE_CLAUDE_SSH_PORT="${CLAUDE_SSH_PORT:-${HERMES_SSH_PORT:-$CODEX_SSH_PORT}}"
+EFFECTIVE_CLAUDE_SSH_PORT="${EFFECTIVE_CLAUDE_SSH_PORT:-22}"
+EFFECTIVE_CODEX_SSH_USER="${CODEX_SSH_USER:-${HERMES_SSH_USER:-$CLAUDE_SSH_USER}}"
+EFFECTIVE_CODEX_SSH_HOST="${CODEX_SSH_HOST:-${HERMES_SSH_HOST:-$CLAUDE_SSH_HOST}}"
+EFFECTIVE_CODEX_SSH_HOST="${EFFECTIVE_CODEX_SSH_HOST:-host.docker.internal}"
+EFFECTIVE_CODEX_SSH_PORT="${CODEX_SSH_PORT:-${HERMES_SSH_PORT:-$CLAUDE_SSH_PORT}}"
+EFFECTIVE_CODEX_SSH_PORT="${EFFECTIVE_CODEX_SSH_PORT:-22}"
 should_regen=0
 if [[ ! -f "$CONFIG_YAML" ]]; then
   should_regen=1
@@ -268,26 +290,11 @@ echo "      docker compose exec dashboard claude        # then log in in the TUI
 echo "      docker compose exec dashboard codex login"
 
 # --- Shared host-over-SSH summary ------------------------------------------
-# Effective values mirror the resolver in backend/app/config_bootstrap.py:
-# each sibling prefers its own env vars and falls back to the next agent's
-# (in order hermes -> claude -> codex). We resolve them here so the boot
-# log shows operators where tasks will go.
-EFFECTIVE_HERMES_SSH_USER="${HERMES_SSH_USER:-${CLAUDE_SSH_USER:-$CODEX_SSH_USER}}"
-EFFECTIVE_HERMES_SSH_HOST="${HERMES_SSH_HOST:-${CLAUDE_SSH_HOST:-$CODEX_SSH_HOST}}"
-EFFECTIVE_HERMES_SSH_HOST="${EFFECTIVE_HERMES_SSH_HOST:-host.docker.internal}"
-EFFECTIVE_HERMES_SSH_PORT="${HERMES_SSH_PORT:-${CLAUDE_SSH_PORT:-$CODEX_SSH_PORT}}"
-EFFECTIVE_HERMES_SSH_PORT="${EFFECTIVE_HERMES_SSH_PORT:-22}"
-EFFECTIVE_CLAUDE_SSH_USER="${CLAUDE_SSH_USER:-${HERMES_SSH_USER:-$CODEX_SSH_USER}}"
-EFFECTIVE_CLAUDE_SSH_HOST="${CLAUDE_SSH_HOST:-${HERMES_SSH_HOST:-$CODEX_SSH_HOST}}"
-EFFECTIVE_CLAUDE_SSH_HOST="${EFFECTIVE_CLAUDE_SSH_HOST:-host.docker.internal}"
-EFFECTIVE_CLAUDE_SSH_PORT="${CLAUDE_SSH_PORT:-${HERMES_SSH_PORT:-$CODEX_SSH_PORT}}"
-EFFECTIVE_CLAUDE_SSH_PORT="${EFFECTIVE_CLAUDE_SSH_PORT:-22}"
-EFFECTIVE_CODEX_SSH_USER="${CODEX_SSH_USER:-${HERMES_SSH_USER:-$CLAUDE_SSH_USER}}"
-EFFECTIVE_CODEX_SSH_HOST="${CODEX_SSH_HOST:-${HERMES_SSH_HOST:-$CLAUDE_SSH_HOST}}"
-EFFECTIVE_CODEX_SSH_HOST="${EFFECTIVE_CODEX_SSH_HOST:-host.docker.internal}"
-EFFECTIVE_CODEX_SSH_PORT="${CODEX_SSH_PORT:-${HERMES_SSH_PORT:-$CLAUDE_SSH_PORT}}"
-EFFECTIVE_CODEX_SSH_PORT="${EFFECTIVE_CODEX_SSH_PORT:-22}"
-# Key paths follow the same shared-wiring rule as user/host/port: a sibling
+# Effective USER/HOST/PORT values were resolved above (before the regen
+# check) so the shared-wiring backfill could probe them. We re-emit the
+# summary here so the boot log shows operators where tasks will go; the
+# values are unchanged. Key paths follow the same shared-wiring rule as
+# user/host/port: a sibling
 # that inherited its SSH user from another agent also inherits that
 # agent's default key path. An explicit ``CD_{HERMES,CLAUDE,CODEX}_SSH_KEY``
 # env override always wins — a pin is the operator's way to say "use THIS
