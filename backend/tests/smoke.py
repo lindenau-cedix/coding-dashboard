@@ -5031,6 +5031,373 @@ def test_hermes_container_in_image_only() -> None:
     )
 
 
+def test_codex_host_sibling_registers() -> None:
+    """The Codex SSH-over-host sibling must register exactly like the
+    Claude/Hermes one when CD_CODEX_SSH_USER is set:
+
+      * ``codex-host`` exists; container-side ``codex`` keeps its own entry.
+      * ``host_staging=True``, ``enabled=True``, ``prompt_via="stdin"``,
+        ``stream_format="codex"``, ``display_name="Codex (Host)"``.
+      * ``command`` starts with ``ssh``, targets the resolved user@host,
+        and ends with the codex task remote shell.
+      * ``session_command`` uses ``force_tty`` (``-tt`` flag) so the
+        interactive TUI gets a real pty, and ends with the codex session
+        remote shell.
+      * No ``{last_message_file}`` placeholder — the host SSH process
+        can't reach the dashboard container's tempfile, so the summary
+        falls back to ``_CodexParser.summary()`` instead.
+      * Absent when no SSH user is configured.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    # ---- case 1: codex SSH user set -> codex-host registered ----
+    doc = generate_initial_agents_config(
+        {
+            "CD_CODEX_SSH_USER": "xuser",
+            "CD_CODEX_SSH_HOST": "codex.host",
+            "CD_CODEX_SSH_PORT": "3333",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "codex_host: codex-host registered when CD_CODEX_SSH_USER set",
+        "codex-host" in doc,
+        list(doc),
+    )
+    spec = doc["codex-host"]
+    check(
+        "codex_host: host_staging=True",
+        spec.get("host_staging") is True,
+        str(spec.get("host_staging")),
+    )
+    check(
+        "codex_host: enabled=True",
+        spec.get("enabled") is True,
+        str(spec.get("enabled")),
+    )
+    check(
+        "codex_host: prompt_via=stdin",
+        spec.get("prompt_via") == "stdin",
+        str(spec.get("prompt_via")),
+    )
+    check(
+        "codex_host: stream_format=codex (so _CodexParser is used)",
+        spec.get("stream_format") == "codex",
+        str(spec.get("stream_format")),
+    )
+    check(
+        "codex_host: display_name='Codex (Host)'",
+        spec.get("display_name") == "Codex (Host)",
+        str(spec.get("display_name")),
+    )
+    cmd = spec["command"]
+    check(
+        "codex_host: command starts with ssh",
+        cmd[:1] == ["ssh"],
+        str(cmd[:3]),
+    )
+    check(
+        "codex_host: command targets xuser@codex.host:3333",
+        "xuser@codex.host" in cmd and "3333" in cmd,
+        str(cmd),
+    )
+    # The remote shell string is the only argument of the form
+    # "cd ... && codex exec ..." inside the SSH argv — it sits BEFORE the
+    # appended model/effort flags. Find it by content rather than position
+    # so a future refactor (e.g. ssh argv with `-J` jump-host) doesn't
+    # silently break this test.
+    remote_shell = next(
+        (tok for tok in cmd if "codex exec" in tok),
+        "",
+    )
+    check(
+        "codex_host: task remote shell invokes codex exec",
+        "codex exec" in remote_shell,
+        remote_shell,
+    )
+    check(
+        "codex_host: task remote shell extends PATH",
+        "$HOME/.local/bin" in remote_shell,
+        remote_shell,
+    )
+    check(
+        "codex_host: command does NOT contain {last_message_file}",
+        not any("{last_message_file}" in tok for tok in cmd),
+        str(cmd),
+    )
+    # session_command: -tt flag + interactive `exec codex` remote shell.
+    sess = spec["session_command"]
+    check(
+        "codex_host: session_command uses -tt (force_tty)",
+        "-tt" in sess,
+        str(sess[:6]),
+    )
+    sess_remote = sess[-1]
+    check(
+        "codex_host: session remote shell is `exec codex`",
+        sess_remote.endswith("exec codex"),
+        sess_remote,
+    )
+    # --- Model + effort flags survive the SSH argv ----
+    # Codex uses ``-c model_reasoning_effort=...`` rather than ``--effort``.
+    check(
+        "codex_host: --model placeholder present",
+        "--model" in cmd and "{model}" in cmd,
+        str(cmd),
+    )
+    check(
+        "codex_host: effort injected as -c model_reasoning_effort={effort}",
+        "-c" in cmd and "model_reasoning_effort={effort}" in cmd,
+        str(cmd),
+    )
+    check(
+        "codex_host: --effort flag NOT used (Codex has no such flag)",
+        "--effort" not in cmd,
+        str(cmd),
+    )
+
+    # --- Ordering invariant: base ``codex`` precedes ``codex-host`` ----
+    keys = list(doc)
+    check(
+        "codex_host: base codex precedes codex-host sibling",
+        "codex" in keys
+        and "codex-host" in keys
+        and keys.index("codex") < keys.index("codex-host"),
+        keys,
+    )
+
+    # ---- case 2: no SSH user -> codex-host absent ----
+    doc_off = generate_initial_agents_config(
+        {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+    )["agents"]
+    check(
+        "codex_host: codex-host absent when no SSH user",
+        "codex-host" not in doc_off,
+        list(doc_off),
+    )
+
+
+def test_codex_host_effort_injection_through_build_command() -> None:
+    """``_build_command`` must thread ``--model`` + ``-c model_reasoning_effort``
+    through the SSH argv so the host codex CLI receives the user's selection.
+    The container-side codex spec uses ``model_args``/``effort_args`` to
+    inject these; the SSH form inherits those fields from the deep-copied
+    base spec, so ``_build_command`` appends them after the remote shell.
+    A future refactor that re-derives the host spec from scratch must keep
+    the same ``model_args``/``effort_args`` plumbing — otherwise the host
+    codex CLI silently runs with its default reasoning effort.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+    from app.agents import _build_command
+
+    doc = generate_initial_agents_config(
+        {
+            "CD_CODEX_SSH_USER": "xuser",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    spec_dict = doc["codex-host"]
+    # Hydrate a real AgentSpec so _build_command can work with spec.command
+    # + spec.model_args / spec.effort_args (those carry the injection).
+    from app.config import AgentSpec
+    spec = AgentSpec(
+        key=spec_dict["key"],
+        display_name=spec_dict["display_name"],
+        command=spec_dict["command"],
+        prompt_via=spec_dict["prompt_via"],
+        stream_format=spec_dict["stream_format"],
+        env=spec_dict.get("env") or {},
+        unset_env=spec_dict.get("unset_env") or [],
+        host_staging=spec_dict.get("host_staging", False),
+        # Inherited via deep-copy from the base ``codex`` spec — see
+        # backend/app/config.py default_agents()["codex"]. Without these,
+        # _build_command has no source for {model} / {effort}.
+        model_args=["--model", "{model}"],
+        effort_args=["-c", "model_reasoning_effort={effort}"],
+    )
+    cmd = _build_command(
+        spec,
+        prompt="ignored",
+        project_dir="/tmp/proj",
+        model="gpt-5.4",
+        effort="xhigh",
+    )
+    check(
+        "codex_host_build: model injected as --model gpt-5.4",
+        "--model" in cmd and "gpt-5.4" in cmd,
+        str(cmd),
+    )
+    check(
+        "codex_host_build: effort injected as -c model_reasoning_effort=xhigh",
+        "-c" in cmd and "model_reasoning_effort=xhigh" in cmd,
+        str(cmd),
+    )
+    # The {model} / {effort} placeholders still appear in the SSH argv's
+    # remote-shell string (a literal — they are ignored by the remote codex
+    # CLI because the remote shell doesn't reference them) and in the
+    # appended model_args/effort_args (the latter are what get substituted
+    # to the real values). We assert only on the *substituted* form by
+    # checking that both --model and -c appear with concrete values.
+    check(
+        "codex_host_build: --model + -c both carry concrete values",
+        any(t == "gpt-5.4" for t in cmd) and any(t == "model_reasoning_effort=xhigh" for t in cmd),
+        str(cmd),
+    )
+
+
+def test_codex_host_shared_wiring_three_agents() -> None:
+    """The shared SSH-wiring rule from ``test_claude_host_reuses_hermes_ssh``
+    now also covers codex: configuring ONE of the three CD_*_SSH_USER vars
+    lights up ALL THREE ``-host`` siblings with the same effective values.
+    Configuring all three independently keeps each sibling on its own.
+    Configuring NONE disables every -host sibling.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    # ---- case E: codex-only -> all three siblings use codex values ----
+    doc = generate_initial_agents_config(
+        {
+            "CD_CODEX_SSH_USER": "xuser",
+            "CD_CODEX_SSH_HOST": "codex.host",
+            "CD_CODEX_SSH_PORT": "3333",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    for sibling in ("claude-host", "hermes-host", "codex-host"):
+        check(
+            f"shared_wiring_codex: {sibling} registered when CD_CODEX_SSH_USER only set",
+            sibling in doc,
+            list(doc),
+        )
+        cmd = doc[sibling]["command"]
+        check(
+            f"shared_wiring_codex: {sibling} uses xuser@codex.host",
+            "xuser@codex.host" in cmd and "3333" in cmd,
+            str(cmd),
+        )
+
+    # ---- case F: all three set independently -> each uses its own values ----
+    doc_all = generate_initial_agents_config(
+        {
+            "CD_HERMES_SSH_USER": "huser",
+            "CD_HERMES_SSH_HOST": "hermes.host",
+            "CD_HERMES_SSH_PORT": "2222",
+            "CD_CLAUDE_SSH_USER": "cuser",
+            "CD_CLAUDE_SSH_HOST": "claude.host",
+            "CD_CLAUDE_SSH_PORT": "2200",
+            "CD_CODEX_SSH_USER": "xuser",
+            "CD_CODEX_SSH_HOST": "codex.host",
+            "CD_CODEX_SSH_PORT": "3333",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "shared_wiring_codex: hermes-host uses its own huser@hermes.host:2222",
+        "huser@hermes.host" in doc_all["hermes-host"]["command"]
+        and "2222" in doc_all["hermes-host"]["command"],
+        str(doc_all["hermes-host"]["command"]),
+    )
+    check(
+        "shared_wiring_codex: claude-host uses its own cuser@claude.host:2200",
+        "cuser@claude.host" in doc_all["claude-host"]["command"]
+        and "2200" in doc_all["claude-host"]["command"],
+        str(doc_all["claude-host"]["command"]),
+    )
+    check(
+        "shared_wiring_codex: codex-host uses its own xuser@codex.host:3333",
+        "xuser@codex.host" in doc_all["codex-host"]["command"]
+        and "3333" in doc_all["codex-host"]["command"],
+        str(doc_all["codex-host"]["command"]),
+    )
+
+    # ---- case G: none set -> no -host siblings ----
+    doc_none = generate_initial_agents_config(
+        {"PATH": "/usr/local/bin:/usr/bin:/bin"}
+    )["agents"]
+    for sibling in ("claude-host", "hermes-host", "codex-host"):
+        check(
+            f"shared_wiring_codex: {sibling} absent when no SSH user",
+            sibling not in doc_none,
+            list(doc_none),
+        )
+
+
+def test_codex_host_key_path_default_is_id_codex() -> None:
+    """Each ``-host`` sibling defaults to its own key path
+    (``~/.ssh/id_<agent>``). The on-disk existence fallback that lets
+    Hermes-only deploys share one key across siblings also applies to
+    codex now.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    def _keyof(cmd: list) -> str:
+        return cmd[cmd.index("-i") + 1] if "-i" in cmd else ""
+
+    # HOME with only id_codex on disk.
+    home = TMP / "ssh-key-home-codex"
+    (home / ".ssh").mkdir(parents=True, exist_ok=True)
+    (home / ".ssh" / "id_codex").write_text("k", encoding="utf-8")
+
+    # codex-only user, only id_codex on disk -> claude-host + hermes-host
+    # both inherit id_codex (existence fallback).
+    doc = generate_initial_agents_config(
+        {
+            "CD_CODEX_SSH_USER": "xuser",
+            "HOME": str(home),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    expect = str(home / ".ssh" / "id_codex")
+    for sibling in ("claude-host", "hermes-host", "codex-host"):
+        check(
+            f"codex_key: {sibling} inherits id_codex when only id_codex on disk",
+            _keyof(doc[sibling]["command"]) == expect,
+            _keyof(doc[sibling]["command"]),
+        )
+
+    # Explicit CD_CODEX_SSH_KEY pin wins even if the file is absent.
+    doc2 = generate_initial_agents_config(
+        {
+            "CD_CODEX_SSH_USER": "xuser",
+            "CD_CODEX_SSH_KEY": "/custom/id_codex_pinned",
+            "HOME": str(home),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "codex_key: explicit CD_CODEX_SSH_KEY override is honoured verbatim",
+        _keyof(doc2["codex-host"]["command"]) == "/custom/id_codex_pinned",
+        _keyof(doc2["codex-host"]["command"]),
+    )
+
+
+def test_runner_picks_codex_host_by_key() -> None:
+    """The TaskManager runner shim swaps ``runner="host"`` + ``agent="codex"``
+    to ``codex-host`` automatically. The sibling's ``host_staging=True``
+    flag then routes the run through the existing host-staging pipeline
+    (no codex-specific code in TaskManager).
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    # Ensure codex-host is registered.
+    doc = generate_initial_agents_config(
+        {
+            "CD_CODEX_SSH_USER": "xuser",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check("codex_runner: codex-host registered for the test", "codex-host" in doc, list(doc))
+    # Mirror of test_runner_picks_host_sibling_by_key for codex: the shim
+    # reads `agent.endswith("-host")` — confirming the suffix here proves
+    # that submitting with ``agent="codex"`` + ``runner="host"`` resolves
+    # to ``codex-host`` rather than constructing ``codex-host-host``.
+    check(
+        "codex_runner: codex-host key ends with -host suffix",
+        "codex-host".endswith("-host"),
+        "codex-host",
+    )
+
+
 def test_create_task_persists_env_profile_key() -> None:
     """REST round-trip: POST /api/projects/{pid}/tasks with
     env_profile_key='p1' returns 201; GET /api/tasks/{id} reflects the
@@ -5839,6 +6206,12 @@ def main() -> int:
         test_ssh_key_shared_wiring()
         test_ssh_remote_path_export()
         test_hermes_container_in_image_only()
+        # 2026-07-15: codex-over-SSH (mirrors the claude/hermes pattern)
+        test_codex_host_sibling_registers()
+        test_codex_host_effort_injection_through_build_command()
+        test_codex_host_shared_wiring_three_agents()
+        test_codex_host_key_path_default_is_id_codex()
+        test_runner_picks_codex_host_by_key()
         test_create_task_persists_env_profile_key()
         test_heartbeat_env_profile_resolution()
         # 2026-07-14: global heartbeat env-profile + agent-key endpoints

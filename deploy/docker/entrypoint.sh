@@ -47,20 +47,20 @@ HERMES_SSH_PORT="${CD_HERMES_SSH_PORT:-22}"
 # on-disk existence fallback; this shell resolver keeps the boot log
 # honest about which key will actually be used.
 HERMES_SSH_KEY="${CD_HERMES_SSH_KEY:-/home/app/.ssh/id_hermes}"
-# The host's Hermes (and Claude Code, when the claude-host sibling is also
-# SSH-driven) cannot see the data volume, so the dashboard runs them inside
-# a COPY of the project here — a dir bind-mounted from the host at the SAME
-# path so `cd {project_dir}` resolves identically on both sides. Ensure it
-# exists/writable whenever EITHER SSH route is active (since the operator
-# may configure only one of the two CD_*_SSH_USER vars — see
-# deploy/docker/coding-dashboard.docker.env.example for the shared-wiring
-# rules). Both agent CLIs share this single staging dir.
+# The host's Hermes (and Claude Code + Codex, when their -host siblings
+# are also SSH-driven) cannot see the data volume, so the dashboard runs
+# them inside a COPY of the project here — a dir bind-mounted from the
+# host at the SAME path so `cd {project_dir}` resolves identically on
+# both sides. Ensure it exists/writable whenever ANY SSH route is active
+# (since the operator may configure only one of the three CD_*_SSH_USER
+# vars — see deploy/docker/coding-dashboard.docker.env.example for the
+# shared-wiring rules). All three agent CLIs share this single staging dir.
 HERMES_STAGING_DIR="${CD_HERMES_STAGING_DIR:-/tmp/coding-dashboard-hermes}"
-[[ -n "$HERMES_SSH_USER" || -n "$CLAUDE_SSH_USER" ]] && mkdir -p "$HERMES_STAGING_DIR" 2>/dev/null || true
+[[ -n "$HERMES_SSH_USER" || -n "$CLAUDE_SSH_USER" || -n "$CODEX_SSH_USER" ]] && mkdir -p "$HERMES_STAGING_DIR" 2>/dev/null || true
 # known_hosts must live somewhere the app user can write (the single-file key
 # bind mount leaves ~/.ssh root-owned), so keep it in the home volume root.
 HERMES_KNOWN_HOSTS="$HOME/.ssh_known_hosts"
-[[ -n "$HERMES_SSH_USER" || -n "$CLAUDE_SSH_USER" ]] && { : > "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; touch "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; }
+[[ -n "$HERMES_SSH_USER" || -n "$CLAUDE_SSH_USER" || -n "$CODEX_SSH_USER" ]] && { : > "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; touch "$HERMES_KNOWN_HOSTS" 2>/dev/null || true; }
 
 # --- Claude Code runs on the HOST over SSH (mirrors the Hermes-SSH block) --
 # When CD_CLAUDE_SSH_USER is set, the generated config.yaml gets a SECOND
@@ -73,9 +73,21 @@ CLAUDE_SSH_USER="${CD_CLAUDE_SSH_USER:-}"
 CLAUDE_SSH_HOST="${CD_CLAUDE_SSH_HOST:-host.docker.internal}"
 CLAUDE_SSH_PORT="${CD_CLAUDE_SSH_PORT:-22}"
 CLAUDE_SSH_KEY="${CD_CLAUDE_SSH_KEY:-/home/app/.ssh/id_claude}"
-# The shared staging dir was already created above when either SSH user
-# was set; nothing to do here. (Both agents' host-side copies live in
-# that dir with per-project / per-task namespacing — no collision.)
+# The shared staging dir was already created above when any SSH user
+# was set; nothing to do here. (All three agents' host-side copies live
+# in that dir with per-project / per-task namespacing — no collision.)
+
+# --- Codex runs on the HOST over SSH (mirrors the Hermes/Claude-SSH blocks) -
+# When CD_CODEX_SSH_USER is set, the generated config.yaml gets a SECOND
+# Codex agent entry under the key "codex-host" that drives the host's
+# `codex` CLI over SSH. Default (empty) = container-only codex; the host
+# runner toggle is hidden for Codex in the UI. Same shared-wiring rules
+# as Hermes/Claude: setting this var ALSO lights up hermes-host +
+# claude-host unless those vars are set independently.
+CODEX_SSH_USER="${CD_CODEX_SSH_USER:-}"
+CODEX_SSH_HOST="${CD_CODEX_SSH_HOST:-host.docker.internal}"
+CODEX_SSH_PORT="${CD_CODEX_SSH_PORT:-22}"
+CODEX_SSH_KEY="${CD_CODEX_SSH_KEY:-/home/app/.ssh/id_codex}"
 
 # --- Host-visible lock dir (one lock file per active task/goal/session) ---
 # Bind-mounted from the host by docker-compose so operators can see at a glance
@@ -211,7 +223,7 @@ if have hermes; then
   printf '    %-7s %s (self-contained in-image)\n' "hermes" "$(command -v hermes)"
   any_agent=1
 fi
-if [[ $any_agent -eq 0 && -z "$HERMES_SSH_USER" && -z "$CLAUDE_SSH_USER" ]]; then
+if [[ $any_agent -eq 0 && -z "$HERMES_SSH_USER" && -z "$CLAUDE_SSH_USER" && -z "$CODEX_SSH_USER" ]]; then
   echo "WARN: no agent CLI found in the image — rebuild with the *_NPM_PKG build args." >&2
 fi
 echo "==> Claude + Codex authenticate via interactive login (credentials persist in the cd-home volume):"
@@ -220,28 +232,29 @@ echo "      docker compose exec dashboard codex login"
 
 # --- Shared host-over-SSH summary ------------------------------------------
 # Effective values mirror the resolver in backend/app/config_bootstrap.py:
-# each sibling prefers its own env vars and falls back to the other agent's.
-# We resolve them here so the boot log shows operators where tasks will go.
-EFFECTIVE_HERMES_SSH_USER="${HERMES_SSH_USER:-$CLAUDE_SSH_USER}"
-EFFECTIVE_HERMES_SSH_HOST="${HERMES_SSH_HOST:-$CLAUDE_SSH_HOST}"
+# each sibling prefers its own env vars and falls back to the next agent's
+# (in order hermes -> claude -> codex). We resolve them here so the boot
+# log shows operators where tasks will go.
+EFFECTIVE_HERMES_SSH_USER="${HERMES_SSH_USER:-${CLAUDE_SSH_USER:-$CODEX_SSH_USER}}"
+EFFECTIVE_HERMES_SSH_HOST="${HERMES_SSH_HOST:-${CLAUDE_SSH_HOST:-$CODEX_SSH_HOST}}"
 EFFECTIVE_HERMES_SSH_HOST="${EFFECTIVE_HERMES_SSH_HOST:-host.docker.internal}"
-EFFECTIVE_HERMES_SSH_PORT="${HERMES_SSH_PORT:-$CLAUDE_SSH_PORT}"
+EFFECTIVE_HERMES_SSH_PORT="${HERMES_SSH_PORT:-${CLAUDE_SSH_PORT:-$CODEX_SSH_PORT}}"
 EFFECTIVE_HERMES_SSH_PORT="${EFFECTIVE_HERMES_SSH_PORT:-22}"
-EFFECTIVE_CLAUDE_SSH_USER="${CLAUDE_SSH_USER:-$HERMES_SSH_USER}"
-EFFECTIVE_CLAUDE_SSH_HOST="${CLAUDE_SSH_HOST:-$HERMES_SSH_HOST}"
+EFFECTIVE_CLAUDE_SSH_USER="${CLAUDE_SSH_USER:-${HERMES_SSH_USER:-$CODEX_SSH_USER}}"
+EFFECTIVE_CLAUDE_SSH_HOST="${CLAUDE_SSH_HOST:-${HERMES_SSH_HOST:-$CODEX_SSH_HOST}}"
 EFFECTIVE_CLAUDE_SSH_HOST="${EFFECTIVE_CLAUDE_SSH_HOST:-host.docker.internal}"
-EFFECTIVE_CLAUDE_SSH_PORT="${CLAUDE_SSH_PORT:-$HERMES_SSH_PORT}"
+EFFECTIVE_CLAUDE_SSH_PORT="${CLAUDE_SSH_PORT:-${HERMES_SSH_PORT:-$CODEX_SSH_PORT}}"
 EFFECTIVE_CLAUDE_SSH_PORT="${EFFECTIVE_CLAUDE_SSH_PORT:-22}"
-# Key paths follow the same shared-wiring rule (a sibling that inherited
-# the other agent's SSH user also inherits its key path), plus an on-disk
-# existence fallback: if the chosen key is missing but the other agent's
-# key is present, the existing key wins. This keeps the boot log + the
-# ``Verify connectivity`` snippet aligned with the Python generator.
+EFFECTIVE_CODEX_SSH_USER="${CODEX_SSH_USER:-${HERMES_SSH_USER:-$CLAUDE_SSH_USER}}"
+EFFECTIVE_CODEX_SSH_HOST="${CODEX_SSH_HOST:-${HERMES_SSH_HOST:-$CLAUDE_SSH_HOST}}"
+EFFECTIVE_CODEX_SSH_HOST="${EFFECTIVE_CODEX_SSH_HOST:-host.docker.internal}"
+EFFECTIVE_CODEX_SSH_PORT="${CODEX_SSH_PORT:-${HERMES_SSH_PORT:-$CLAUDE_SSH_PORT}}"
+EFFECTIVE_CODEX_SSH_PORT="${EFFECTIVE_CODEX_SSH_PORT:-22}"
 # Key paths follow the same shared-wiring rule as user/host/port: a sibling
-# that inherited its SSH user from the other agent also inherits that
-# agent's default key path. An explicit ``CD_{HERMES,CLAUDE}_SSH_KEY`` env
-# override always wins — a pin is the operator's way to say "use THIS key,
-# do not second-guess me", regardless of which user the SSH connection
+# that inherited its SSH user from another agent also inherits that
+# agent's default key path. An explicit ``CD_{HERMES,CLAUDE,CODEX}_SSH_KEY``
+# env override always wins — a pin is the operator's way to say "use THIS
+# key, do not second-guess me", regardless of which user the SSH connection
 # ended up with. The Python generator in backend/app/config_bootstrap.py
 # applies the same rule plus an on-disk existence fallback; this shell
 # resolver keeps the boot log + the ``Verify connectivity`` snippet in
@@ -250,30 +263,54 @@ EFFECTIVE_CLAUDE_SSH_PORT="${EFFECTIVE_CLAUDE_SSH_PORT:-22}"
 # these env vars (they are optional in docker-compose env_file).
 CD_HERMES_SSH_KEY="${CD_HERMES_SSH_KEY:-}"
 CD_CLAUDE_SSH_KEY="${CD_CLAUDE_SSH_KEY:-}"
+CD_CODEX_SSH_KEY="${CD_CODEX_SSH_KEY:-}"
 EFFECTIVE_HERMES_SSH_KEY="$HERMES_SSH_KEY"
 EFFECTIVE_CLAUDE_SSH_KEY="$CLAUDE_SSH_KEY"
+EFFECTIVE_CODEX_SSH_KEY="$CODEX_SSH_KEY"
 if [[ -n "$HERMES_SSH_USER" ]]; then
   [[ -z "$CD_HERMES_SSH_KEY" ]] && EFFECTIVE_HERMES_SSH_KEY="$HERMES_SSH_KEY"
 elif [[ -n "$EFFECTIVE_HERMES_SSH_USER" && -z "$CD_HERMES_SSH_KEY" ]]; then
   EFFECTIVE_HERMES_SSH_KEY="$CLAUDE_SSH_KEY"
+  [[ ! -e "$EFFECTIVE_HERMES_SSH_KEY" ]] && EFFECTIVE_HERMES_SSH_KEY="$CODEX_SSH_KEY"
 fi
 if [[ -n "$CLAUDE_SSH_USER" ]]; then
   [[ -z "$CD_CLAUDE_SSH_KEY" ]] && EFFECTIVE_CLAUDE_SSH_KEY="$CLAUDE_SSH_KEY"
 elif [[ -n "$EFFECTIVE_CLAUDE_SSH_USER" && -z "$CD_CLAUDE_SSH_KEY" ]]; then
   EFFECTIVE_CLAUDE_SSH_KEY="$HERMES_SSH_KEY"
+  [[ ! -e "$EFFECTIVE_CLAUDE_SSH_KEY" ]] && EFFECTIVE_CLAUDE_SSH_KEY="$CODEX_SSH_KEY"
+fi
+if [[ -n "$CODEX_SSH_USER" ]]; then
+  [[ -z "$CD_CODEX_SSH_KEY" ]] && EFFECTIVE_CODEX_SSH_KEY="$CODEX_SSH_KEY"
+elif [[ -n "$EFFECTIVE_CODEX_SSH_USER" && -z "$CD_CODEX_SSH_KEY" ]]; then
+  EFFECTIVE_CODEX_SSH_KEY="$HERMES_SSH_KEY"
+  [[ ! -e "$EFFECTIVE_CODEX_SSH_KEY" ]] && EFFECTIVE_CODEX_SSH_KEY="$CLAUDE_SSH_KEY"
 fi
 # On-disk existence fallback — a configured key that isn't there yet is
-# useless; prefer the other agent's key if THAT one exists. Skipped when
+# useless; prefer another agent's key if THAT one exists. Skipped when
 # the operator pinned the path via env.
 if [[ -n "$EFFECTIVE_HERMES_SSH_KEY" && ! -e "$EFFECTIVE_HERMES_SSH_KEY" \
-      && -z "$CD_HERMES_SSH_KEY" \
-      && -e "$EFFECTIVE_CLAUDE_SSH_KEY" ]]; then
-  EFFECTIVE_HERMES_SSH_KEY="$EFFECTIVE_CLAUDE_SSH_KEY"
+      && -z "$CD_HERMES_SSH_KEY" ]]; then
+  if [[ -e "$EFFECTIVE_CLAUDE_SSH_KEY" ]]; then
+    EFFECTIVE_HERMES_SSH_KEY="$EFFECTIVE_CLAUDE_SSH_KEY"
+  elif [[ -e "$EFFECTIVE_CODEX_SSH_KEY" ]]; then
+    EFFECTIVE_HERMES_SSH_KEY="$EFFECTIVE_CODEX_SSH_KEY"
+  fi
 fi
 if [[ -n "$EFFECTIVE_CLAUDE_SSH_KEY" && ! -e "$EFFECTIVE_CLAUDE_SSH_KEY" \
-      && -z "$CD_CLAUDE_SSH_KEY" \
-      && -e "$EFFECTIVE_HERMES_SSH_KEY" ]]; then
-  EFFECTIVE_CLAUDE_SSH_KEY="$EFFECTIVE_HERMES_SSH_KEY"
+      && -z "$CD_CLAUDE_SSH_KEY" ]]; then
+  if [[ -e "$EFFECTIVE_HERMES_SSH_KEY" ]]; then
+    EFFECTIVE_CLAUDE_SSH_KEY="$EFFECTIVE_HERMES_SSH_KEY"
+  elif [[ -e "$EFFECTIVE_CODEX_SSH_KEY" ]]; then
+    EFFECTIVE_CLAUDE_SSH_KEY="$EFFECTIVE_CODEX_SSH_KEY"
+  fi
+fi
+if [[ -n "$EFFECTIVE_CODEX_SSH_KEY" && ! -e "$EFFECTIVE_CODEX_SSH_KEY" \
+      && -z "$CD_CODEX_SSH_KEY" ]]; then
+  if [[ -e "$EFFECTIVE_HERMES_SSH_KEY" ]]; then
+    EFFECTIVE_CODEX_SSH_KEY="$EFFECTIVE_HERMES_SSH_KEY"
+  elif [[ -e "$EFFECTIVE_CLAUDE_SSH_KEY" ]]; then
+    EFFECTIVE_CODEX_SSH_KEY="$EFFECTIVE_CLAUDE_SSH_KEY"
+  fi
 fi
 
 if [[ -n "$EFFECTIVE_HERMES_SSH_USER" ]]; then
@@ -282,8 +319,12 @@ if [[ -n "$EFFECTIVE_HERMES_SSH_USER" ]]; then
   echo "    the dashboard copies the project there, Hermes edits it, and the result is merged back + pushed."
   echo "    The dashboard agent dropdown exposes 'Hermes' (container) and 'Hermes (Host)' side-by-side;"
   echo "    per-task 'Runner: host' toggles route into the host-staging copy + host's \`hermes\` CLI."
-  if [[ -z "$HERMES_SSH_USER" && -n "$CLAUDE_SSH_USER" ]]; then
-    echo "    (effective values inherited from CD_CLAUDE_SSH_* since CD_HERMES_SSH_USER is unset)"
+  if [[ -z "$HERMES_SSH_USER" ]]; then
+    if [[ -n "$CLAUDE_SSH_USER" ]]; then
+      echo "    (effective values inherited from CD_CLAUDE_SSH_* since CD_HERMES_SSH_USER is unset)"
+    elif [[ -n "$CODEX_SSH_USER" ]]; then
+      echo "    (effective values inherited from CD_CODEX_SSH_* since CD_HERMES_SSH_USER is unset)"
+    fi
   fi
   if [[ "$EFFECTIVE_HERMES_SSH_KEY" != "$HERMES_SSH_KEY" ]]; then
     echo "    (key path inherited/fell back to $EFFECTIVE_HERMES_SSH_KEY — set CD_HERMES_SSH_KEY to pin)"
@@ -293,18 +334,41 @@ if [[ -n "$EFFECTIVE_HERMES_SSH_USER" ]]; then
 elif have hermes; then
   echo "==> Hermes is self-contained in this image (CD_HERMES_SSH_USER unset)."
 else
-  echo "==> Hermes is DISABLED: set CD_HERMES_SSH_USER (or CD_CLAUDE_SSH_USER — shared wiring) to run the host's Hermes over SSH (delete config.yaml in cd-config to regenerate)."
+  echo "==> Hermes is DISABLED: set CD_HERMES_SSH_USER (or CD_CLAUDE_SSH_USER / CD_CODEX_SSH_USER — shared wiring) to run the host's Hermes over SSH (delete config.yaml in cd-config to regenerate)."
 fi
 if [[ -n "$EFFECTIVE_CLAUDE_SSH_USER" ]]; then
   echo "==> Claude Code runs on the HOST over SSH as ${EFFECTIVE_CLAUDE_SSH_USER}@${EFFECTIVE_CLAUDE_SSH_HOST}:${EFFECTIVE_CLAUDE_SSH_PORT} (key: $EFFECTIVE_CLAUDE_SSH_KEY)."
   echo "    The dashboard agent dropdown exposes 'Claude Code' (container) and 'Claude Code (Host)' side-by-side;"
   echo "    per-task 'Runner: host' toggles route into the host-staging copy + host's \`claude\` CLI just like Hermes-SSH."
-  if [[ -z "$CLAUDE_SSH_USER" && -n "$HERMES_SSH_USER" ]]; then
-    echo "    (effective values inherited from CD_HERMES_SSH_* since CD_CLAUDE_SSH_USER is unset)"
+  if [[ -z "$CLAUDE_SSH_USER" ]]; then
+    if [[ -n "$HERMES_SSH_USER" ]]; then
+      echo "    (effective values inherited from CD_HERMES_SSH_* since CD_CLAUDE_SSH_USER is unset)"
+    elif [[ -n "$CODEX_SSH_USER" ]]; then
+      echo "    (effective values inherited from CD_CODEX_SSH_* since CD_CLAUDE_SSH_USER is unset)"
+    fi
   fi
   if [[ "$EFFECTIVE_CLAUDE_SSH_KEY" != "$CLAUDE_SSH_KEY" ]]; then
     echo "    (key path inherited/fell back to $EFFECTIVE_CLAUDE_SSH_KEY — set CD_CLAUDE_SSH_KEY to pin)"
   fi
+fi
+if [[ -n "$EFFECTIVE_CODEX_SSH_USER" ]]; then
+  echo "==> Codex runs on the HOST over SSH as ${EFFECTIVE_CODEX_SSH_USER}@${EFFECTIVE_CODEX_SSH_HOST}:${EFFECTIVE_CODEX_SSH_PORT} (key: $EFFECTIVE_CODEX_SSH_KEY)."
+  echo "    The dashboard agent dropdown exposes 'Codex' (container) and 'Codex (Host)' side-by-side;"
+  echo "    per-task 'Runner: host' toggles route into the host-staging copy + host's \`codex\` CLI."
+  if [[ -z "$CODEX_SSH_USER" ]]; then
+    if [[ -n "$HERMES_SSH_USER" ]]; then
+      echo "    (effective values inherited from CD_HERMES_SSH_* since CD_CODEX_SSH_USER is unset)"
+    elif [[ -n "$CLAUDE_SSH_USER" ]]; then
+      echo "    (effective values inherited from CD_CLAUDE_SSH_* since CD_CODEX_SSH_USER is unset)"
+    fi
+  fi
+  if [[ "$EFFECTIVE_CODEX_SSH_KEY" != "$CODEX_SSH_KEY" ]]; then
+    echo "    (key path inherited/fell back to $EFFECTIVE_CODEX_SSH_KEY — set CD_CODEX_SSH_KEY to pin)"
+  fi
+  echo "    Verify connectivity (host must allow this key + have codex installed + logged in):"
+  echo "      docker compose exec dashboard ssh -i $EFFECTIVE_CODEX_SSH_KEY -p $EFFECTIVE_CODEX_SSH_PORT -o UserKnownHostsFile=$HERMES_KNOWN_HOSTS -o StrictHostKeyChecking=accept-new ${EFFECTIVE_CODEX_SSH_USER}@${EFFECTIVE_CODEX_SSH_HOST} 'export PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && codex --version'"
+elif have codex; then
+  echo "==> Codex is self-contained in this image (CD_CODEX_SSH_USER unset)."
 fi
 
 

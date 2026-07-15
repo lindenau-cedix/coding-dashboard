@@ -39,6 +39,11 @@ type AgentChoice = {
   disabled: boolean;
 };
 
+type RunnerChoice = {
+  value: Runner;
+  label: string;
+};
+
 function baseAgentKey(key: string): string {
   return key.endsWith("-host") ? key.slice(0, -5) : key;
 }
@@ -53,44 +58,38 @@ function supportsMode(agent: Agent, mode: TaskMode): boolean {
   return true;
 }
 
+/** Build the Agent <select> options: one entry per base agent (no doubled
+ *  Container/Host entries). When only a hand-written `<base>-host` sibling
+ *  exists without its base, expose the host variant directly (mirrors the
+ *  previous fallback). */
 function buildAgentChoices(agents: Agent[], mode: TaskMode): AgentChoice[] {
   const choices: AgentChoice[] = [];
   const hostKeysRepresented = new Set<string>();
+  const baseKeys = new Set<string>();
 
   for (const agent of agents) {
     if (isHostAgentChoice(agent) || !supportsMode(agent, mode)) continue;
-
-    const hasHostChoice = Boolean(agent.host_agent_key);
+    baseKeys.add(agent.key);
     choices.push({
       value: agent.key,
       agentKey: agent.key,
       runner: "",
-      label: hasHostChoice ? `${agent.display_name} — Container` : agent.display_name,
+      label: agent.display_name,
       disabled: !agent.enabled,
     });
-
     if (agent.host_agent_key) {
-      const host = agents.find((candidate) => candidate.key === agent.host_agent_key);
-      if (host && supportsMode(host, mode)) {
-        choices.push({
-          value: `${agent.key}::host`,
-          agentKey: agent.key,
-          runner: "host",
-          label: `${agent.display_name} — Host via SSH`,
-          disabled: !host.enabled,
-        });
-        hostKeysRepresented.add(host.key);
-      }
+      hostKeysRepresented.add(agent.host_agent_key);
     }
   }
 
   // Keep explicitly configured host agents usable even when their base entry
   // is absent from a hand-written config. Normal generated configs are folded
-  // into the base agent's two choices above.
+  // into the base agent's entry above; only hand-written configs hit this path.
   for (const agent of agents) {
     if (
       !isHostAgentChoice(agent)
       || hostKeysRepresented.has(agent.key)
+      || baseKeys.has(baseAgentKey(agent.key))
       || !supportsMode(agent, mode)
     ) {
       continue;
@@ -98,13 +97,34 @@ function buildAgentChoices(agents: Agent[], mode: TaskMode): AgentChoice[] {
     choices.push({
       value: agent.key,
       agentKey: agent.key,
-      runner: "",
-      label: `${agent.display_name} — Host via SSH`,
+      runner: "host",
+      label: `${agent.display_name} (Host)`,
       disabled: !agent.enabled,
     });
   }
 
   return choices;
+}
+
+/** Runner choices available for the currently selected agent. Hidden in the
+ *  UI when the array has a single entry (no host sibling for this agent+mode).
+ *  Order: Container first, then Host via SSH. */
+function runnerOptions(
+  selected: Agent | undefined,
+  agents: Agent[],
+  mode: TaskMode,
+): RunnerChoice[] {
+  if (!selected) return [{ value: "", label: "Container" }];
+  const host = selected.host_agent_key
+    ? agents.find((candidate) => candidate.key === selected.host_agent_key)
+    : undefined;
+  if (!host || !supportsMode(host, mode) || !host.enabled) {
+    return [{ value: "", label: "Container" }];
+  }
+  return [
+    { value: "", label: "Container" },
+    { value: "host", label: "Host via SSH" },
+  ];
 }
 
 export default function ProjectDetail() {
@@ -165,7 +185,14 @@ export default function ProjectDetail() {
     [agents, agent],
   );
   const agentChoices = useMemo(() => buildAgentChoices(agents, mode), [agents, mode]);
-  const selectedAgentChoice = `${agent}${runner === "host" ? "::host" : ""}`;
+  // Runner dropdown options for the currently selected agent. When the array
+  // has a single "Container" entry, the Runner <select> is hidden entirely
+  // (the host option isn't available for this agent+mode).
+  const currentRunnerOptions = useMemo(
+    () => runnerOptions(currentAgent ?? undefined, agents, mode),
+    [currentAgent, agents, mode],
+  );
+  const showRunnerDropdown = currentRunnerOptions.length > 1;
   const modeOptions = useMemo<TaskMode[]>(() => {
     const options: TaskMode[] = ["task"];
     if (goalSupported) options.push("goal");
@@ -178,6 +205,10 @@ export default function ProjectDetail() {
     if (!choice) return;
 
     setAgent(choice.agentKey);
+    // Agent dropdown no longer carries runner info; the user picks Container
+    // vs Host via SSH in the dedicated Runner <select> below. Honour the
+    // ``runner`` already encoded in the choice for hand-written configs
+    // that surface a host-only entry — for everything else, reset to "".
     setRunner(choice.runner);
     // Drop selections the new agent does not offer ("" = agent default).
     const a = agents.find((x) => x.key === choice.agentKey);
@@ -186,6 +217,17 @@ export default function ProjectDetail() {
     // Env profiles apply to the Claude family, regardless of whether the
     // selected execution target is its container or SSH sibling.
     setEnvProfileKey(baseAgentKey(choice.agentKey) === "claude" ? envProfileKey : "");
+  }
+
+  function changeRunnerChoice(next: Runner) {
+    // Force the runner back to Container if the user picks an agent whose
+    // host sibling isn't available for this mode.
+    const opts = runnerOptions(currentAgent ?? undefined, agents, mode);
+    if (!opts.some((o) => o.value === next)) {
+      setRunner("");
+      return;
+    }
+    setRunner(next);
   }
 
   function changeMode(next: TaskMode) {
@@ -274,9 +316,9 @@ export default function ProjectDetail() {
         setTasks(ts);
         setProfiles(profs);
         // Pick the default agent from the SAME choice list the dropdown
-        // renders, not the raw agent array: buildAgentChoices never yields
-        // a bare ``-host`` key as its agentKey (it folds host siblings into
-        // a "Container"/"Host via SSH" pair on the base agent). Using
+        // renders, not the raw agent array: buildAgentChoices yields one
+        // entry per base agent and a host-only fallback when a hand-written
+        // config registers `<base>-host` without its base. Using
         // ``ag.find(a => a.enabled)`` here would default to whatever entry
         // comes first — which can be ``claude-host`` — silently starting an
         // SSH run on the very first submit even though the UI reads
@@ -317,10 +359,24 @@ export default function ProjectDetail() {
     return unsubscribe;
   }, [id]);
 
+  // Clamp the runner whenever the selected agent+mode no longer supports
+  // the host variant. This catches config reloads (the host sibling
+  // disappeared), mode switches (the host sibling doesn't support
+  // session/goal), and direct agent changes. Without this guard, the
+  // Runner <select> would silently become inconsistent with its parent
+  // Agent.
+  useEffect(() => {
+    if (runner === "") return;
+    const opts = runnerOptions(currentAgent ?? undefined, agents, mode);
+    if (!opts.some((o) => o.value === runner)) {
+      setRunner("");
+    }
+  }, [currentAgent, agents, mode, runner]);
+
   /** Resolve the actual agent key for the selected choice. The UI exposes
-   *  "Container" and "Host via SSH" variants through one dropdown, but the
-   *  backend stores the underlying AgentSpec key (e.g. ``claude`` vs
-   *  ``claude-host``) so existing tasks can keep filtering on it directly. */
+   *  Container and Host via SSH through separate controls, but the backend
+   *  stores the underlying AgentSpec key (e.g. ``claude`` vs ``claude-host``)
+   *  so existing tasks can keep filtering on it directly. */
   function resolveSubmitAgentKey(): string {
     if (runner === "host") {
       const base = baseAgentKey(agent);
@@ -616,7 +672,7 @@ export default function ProjectDetail() {
           <span className="flex items-center gap-2">
             <label className="text-sm text-slate-400">Agent:</label>
             <select
-              value={selectedAgentChoice}
+              value={agent}
               onChange={(e) => changeAgentChoice(e.target.value)}
               className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
             >
@@ -628,6 +684,23 @@ export default function ProjectDetail() {
               ))}
             </select>
           </span>
+          {showRunnerDropdown && (
+            <span className="flex items-center gap-2">
+              <label className="text-sm text-slate-400">Runner:</label>
+              <select
+                value={runner}
+                onChange={(e) => changeRunnerChoice(e.target.value as Runner)}
+                className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
+                title="Container läuft im Dashboard-Container; Host via SSH führt den Agent auf dem Host aus (geteilter Staging-Ordner)."
+              >
+                {currentRunnerOptions.map((opt) => (
+                  <option key={opt.value || "container"} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+          )}
           {mode !== "session" && (currentAgent?.model_choices?.length ?? 0) > 0 && (
             <span className="flex items-center gap-2">
               <label className="text-sm text-slate-400">Modell:</label>

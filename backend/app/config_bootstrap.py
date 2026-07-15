@@ -143,6 +143,30 @@ def _claude_ssh_session_remote() -> str:
     )
 
 
+def _codex_ssh_task_remote() -> str:
+    """Codex ``exec`` task-mode remote shell string (stdin prompt).
+
+    No ``--output-last-message {last_message_file}`` — the placeholder
+    resolves to a tempfile path inside the dashboard container, which the
+    SSH-driven host process cannot write to. The summary falls back to
+    ``_CodexParser.summary()`` via the empty ``{last_message_file}``
+    no-op branch in ``agents.run_agent``.
+    """
+    return (
+        f'cd "{{project_dir}}" && {_ssh_remote_path_export()} && '
+        'exec env NO_COLOR=1 codex exec --cd "{project_dir}" '
+        '--sandbox workspace-write --color never --ephemeral -'
+    )
+
+
+def _codex_ssh_session_remote() -> str:
+    """Codex interactive TUI session-mode remote shell string."""
+    return (
+        f'cd "{{project_dir}}" && {_ssh_remote_path_export()} && '
+        'exec codex'
+    )
+
+
 # --------------------------------------------------------------------------- #
 # The single public entry point
 # --------------------------------------------------------------------------- #
@@ -180,34 +204,64 @@ def generate_initial_agents_config(
     effective_path = env.get("PATH") or os.environ.get("PATH") or os.defpath
 
     # --- Shared host-over-SSH wiring ----------------------------------------
-    # Hermes and Claude Code both run on the host over SSH. Operators
-    # configure ONE pair of CD_{HERMES,CLAUDE}_SSH_{USER,HOST,PORT} env vars
-    # and it applies to BOTH siblings; setting both is allowed but only
-    # meaningful when the two agents really point at different hosts. If
-    # neither is set, neither ``-host`` sibling is registered.
-    hermes_user = env.get("CD_HERMES_SSH_USER", "").strip()
-    hermes_host = (env.get("CD_HERMES_SSH_HOST") or "host.docker.internal").strip()
-    hermes_port = (env.get("CD_HERMES_SSH_PORT") or "22").strip()
-    claude_user = env.get("CD_CLAUDE_SSH_USER", "").strip()
-    claude_host = (env.get("CD_CLAUDE_SSH_HOST") or "host.docker.internal").strip()
-    claude_port = (env.get("CD_CLAUDE_SSH_PORT") or "22").strip()
+    # Hermes, Claude Code, and Codex all run on the host over SSH. Operators
+    # configure ONE pair of CD_{HERMES,CLAUDE,CODEX}_SSH_{USER,HOST,PORT} env
+    # vars and it applies to ALL three siblings; setting more than one is
+    # allowed but only meaningful when the agents really point at different
+    # hosts. If none are set, no ``-host`` sibling is registered.
+    #
+    # The agents list below also drives the loop that picks each sibling's
+    # effective user/host/port (preferring its own env, falling back to the
+    # next agent's values in order) and the matching key-path resolver. Keep
+    # the order in sync with the corresponding main-loop branch order so
+    # the smoke test ordering invariant (``base agent before its -host``)
+    # is preserved when a sibling falls back to the next agent's wiring.
+    ssh_agents: tuple[str, ...] = ("hermes", "claude", "codex")
 
-    # Effective values: prefer that agent's own env, fall back to the
-    # OTHER agent's (so configuring Hermes-only also lights up claude-host,
-    # and vice-versa).
-    hermes_ssh_user = hermes_user or claude_user
-    hermes_ssh_host = hermes_host if hermes_user else (claude_host or "host.docker.internal")
-    hermes_ssh_port = hermes_port if hermes_user else (claude_port or "22")
-    claude_ssh_user = claude_user or hermes_user
-    claude_ssh_host = claude_host if claude_user else (hermes_host or "host.docker.internal")
-    claude_ssh_port = claude_port if claude_user else (hermes_port or "22")
-    hermes_ssh_active = bool(hermes_ssh_user)
-    claude_ssh_active = bool(claude_ssh_user)
+    def _own(agent: str, kind: str) -> tuple[str, str, str]:
+        """Read an agent's own CD_<AGENT>_SSH_{USER,HOST,PORT} triple."""
+        user = env.get(f"CD_{agent.upper()}_SSH_USER", "").strip()
+        host = (
+            env.get(f"CD_{agent.upper()}_SSH_HOST") or "host.docker.internal"
+        ).strip()
+        port = (env.get(f"CD_{agent.upper()}_SSH_PORT") or "22").strip()
+        return user, host, port
+
+    # Per-agent OWN triples (for the loop below + the key resolver).
+    own: dict[str, tuple[str, str, str]] = {a: _own(a, "user_host_port") for a in ssh_agents}
+
+    # Effective triples: prefer the agent's own env; otherwise walk the
+    # OTHER agents in ``ssh_agents`` order and inherit the first one that
+    # has a non-empty user. Active iff the resolved user is non-empty.
+    effective: dict[str, tuple[str, str, str]] = {}
+    active: dict[str, bool] = {}
+    for idx, agent in enumerate(ssh_agents):
+        user, host, port = own[agent]
+        if not user:
+            for other in ssh_agents[:idx] + ssh_agents[idx + 1:]:
+                o_user, o_host, o_port = own[other]
+                if o_user:
+                    user, host, port = o_user, o_host, o_port
+                    break
+        host = host or "host.docker.internal"
+        port = port or "22"
+        effective[agent] = (user, host, port)
+        active[agent] = bool(user)
+
+    hermes_user, hermes_host, hermes_port = own["hermes"]
+    claude_user, claude_host, claude_port = own["claude"]
+    codex_user, codex_host, codex_port = own["codex"]
+    hermes_ssh_user, hermes_ssh_host, hermes_ssh_port = effective["hermes"]
+    claude_ssh_user, claude_ssh_host, claude_ssh_port = effective["claude"]
+    codex_ssh_user, codex_ssh_host, codex_ssh_port = effective["codex"]
+    hermes_ssh_active = active["hermes"]
+    claude_ssh_active = active["claude"]
+    codex_ssh_active = active["codex"]
 
     # --- SSH private-key resolution (shared-wiring, mirrors user/host/port) --
     # Each sibling defaults to its own key path, but:
-    #   * an explicit ``CD_{HERMES,CLAUDE}_SSH_KEY`` env override wins;
-    #   * when a sibling inherited the OTHER agent's SSH user (only one
+    #   * an explicit ``CD_{HERMES,CLAUDE,CODEX}_SSH_KEY`` env override wins;
+    #   * when a sibling inherited another agent's SSH user (only one
     #     ``CD_*_SSH_USER`` set), it also inherits that agent's key path — a
     #     Hermes-only setup should drive claude-host with the Hermes key
     #     instead of pointing at a non-existent ``id_claude``;
@@ -215,35 +269,62 @@ def generate_initial_agents_config(
     #     agent's key does, fall back to that one (unless pinned by env).
     # The file-existence check honours the caller-supplied HOME so the smoke
     # tests and the container agree on where the keys live.
-    default_hermes_key = os.path.join(home, ".ssh", "id_hermes")
-    default_claude_key = os.path.join(home, ".ssh", "id_claude")
-    hermes_key_env = (env.get("CD_HERMES_SSH_KEY") or "").strip()
-    claude_key_env = (env.get("CD_CLAUDE_SSH_KEY") or "").strip()
+    default_keys: dict[str, str] = {
+        agent: os.path.join(home, ".ssh", f"id_{agent}")
+        for agent in ssh_agents
+    }
+    key_env: dict[str, str] = {
+        agent: (env.get(f"CD_{agent.upper()}_SSH_KEY") or "").strip()
+        for agent in ssh_agents
+    }
 
     # Step 1: env override, else inherit the effective user's own key.
-    hermes_ssh_key = hermes_key_env or (
-        default_hermes_key if hermes_user else default_claude_key
-    )
-    claude_ssh_key = claude_key_env or (
-        default_claude_key if claude_user else default_hermes_key
-    )
+    # ``inherited_from[agent]`` is the name of the agent whose user/host/port
+    # we fell back to (or ``agent`` itself when it owns its own user).
+    inherited_from: dict[str, str] = {}
+    for idx, agent in enumerate(ssh_agents):
+        own_user = own[agent][0]
+        if own_user:
+            inherited_from[agent] = agent
+        else:
+            for other in ssh_agents[:idx] + ssh_agents[idx + 1:]:
+                if own[other][0]:
+                    inherited_from[agent] = other
+                    break
+            else:
+                inherited_from[agent] = agent
+
+    ssh_key: dict[str, str] = {}
+    for agent in ssh_agents:
+        if key_env[agent]:
+            ssh_key[agent] = key_env[agent]
+        else:
+            # Own key path if the operator configured this agent's own user;
+            # otherwise inherit the key path of the agent whose user we
+            # fell back to (e.g. Hermes-only setup -> claude-host uses
+            # ``id_hermes`` rather than the absent ``id_claude``).
+            ssh_key[agent] = default_keys[inherited_from[agent]]
 
     # Step 2: existence fallback — a configured key that isn't on disk yet is
-    # useless; prefer the other agent's key if THAT one exists. Skipped when
+    # useless; prefer the next agent's key if THAT one exists. Skipped when
     # the operator pinned the path explicitly via env.
-    def _resolve_key(chosen: str, other: str, pinned: bool) -> str:
+    def _resolve_key(agent: str, chosen: str, pinned: bool) -> str:
         if pinned:
             return chosen
-        if not os.path.exists(chosen) and os.path.exists(other):
-            return other
+        for other in ssh_agents:
+            if other == agent:
+                continue
+            other_key = ssh_key.get(other) or default_keys[other]
+            if other_key != chosen and os.path.exists(other_key) and not os.path.exists(chosen):
+                return other_key
         return chosen
 
-    hermes_ssh_key = _resolve_key(
-        hermes_ssh_key, default_claude_key, bool(hermes_key_env)
-    )
-    claude_ssh_key = _resolve_key(
-        claude_ssh_key, default_hermes_key, bool(claude_key_env)
-    )
+    for agent in ssh_agents:
+        ssh_key[agent] = _resolve_key(agent, ssh_key[agent], bool(key_env[agent]))
+
+    hermes_ssh_key = ssh_key["hermes"]
+    claude_ssh_key = ssh_key["claude"]
+    codex_ssh_key = ssh_key["codex"]
 
     known_hosts = os.path.join(home, ".ssh_known_hosts")
     codex_sandbox = (env.get("CD_CODEX_SANDBOX") or "").strip()
@@ -276,9 +357,67 @@ def generate_initial_agents_config(
         # first submit even though the UI shows "Container").
         agents[key] = d
 
-        if key == "codex" and codex_sandbox:
-            d["command"] = _set_cli_option(d["command"], "--sandbox", codex_sandbox)
+        if key == "codex":
+            # Container-side ``codex`` stays enabled iff its CLI is on PATH
+            # (same default the loop applies for every other built-in).
+            # The SSH-driven sibling is registered SEPARATELY below when
+            # ``CD_CODEX_SSH_USER`` is set — same shape as the
+            # ``claude`` / ``claude-host`` pair.
+            if codex_sandbox:
+                d["command"] = _set_cli_option(d["command"], "--sandbox", codex_sandbox)
             d["enabled"] = shutil.which(spec.command[0], path=effective_path) is not None
+            if codex_ssh_active:
+                host_d = _copy.deepcopy(d)
+                host_d["key"] = "codex-host"
+                host_d["display_name"] = "Codex (Host)"
+                host_d["prompt_via"] = "stdin"
+                host_d["stream_format"] = "codex"
+                host_d["env"] = {}        # set on the remote side instead
+                host_d["unset_env"] = []  # ssh client, not a python venv to sanitise
+                host_d["command"] = _ssh_argv(
+                    user=codex_ssh_user,
+                    host=codex_ssh_host,
+                    port=codex_ssh_port,
+                    keyfile=codex_ssh_key,
+                    known_hosts=known_hosts,
+                    remote_shell=_codex_ssh_task_remote(),
+                )
+                host_d["session_command"] = _ssh_argv(
+                    user=codex_ssh_user,
+                    host=codex_ssh_host,
+                    port=codex_ssh_port,
+                    keyfile=codex_ssh_key,
+                    known_hosts=known_hosts,
+                    remote_shell=_codex_ssh_session_remote(),
+                    force_tty=True,
+                )
+                # Codex-on-host cannot see the dashboard's data volume, so
+                # it runs in a host_staging copy of the project — same
+                # plumbing as Claude-on-host and Hermes-on-host.
+                host_d["host_staging"] = True
+                host_d["enabled"] = True
+                # Drop ``--output-last-message {last_message_file}``: the
+                # placeholder resolves to a tempfile inside the container,
+                # which the host SSH process can't write to. Without the
+                # placeholder ``run_agent`` skips creating the temp file
+                # entirely and the parser's ``summary()`` is used instead.
+                host_d["command"] = [
+                    tok for tok in host_d["command"]
+                    if not (tok == "--output-last-message"
+                            or tok.startswith("{last_message_file}"))
+                ]
+                # Re-attach the model/effort argv flags. Codex uses
+                # ``-c model_reasoning_effort=...`` rather than a
+                # ``--effort`` CLI flag, so splice the model_args + the
+                # effort pair through ``_set_cli_option`` so a future
+                # ``model_args`` change here doesn't silently drop effort.
+                host_d["command"] = _set_cli_option(
+                    host_d["command"], "--model", "{model}"
+                )
+                host_d["command"] = _set_cli_option(
+                    host_d["command"], "-c", "model_reasoning_effort={effort}"
+                )
+                agents["codex-host"] = host_d
         elif key == "claude":
             # Container-side ``claude`` stays enabled iff its CLI is on
             # PATH — same default the loop applies for every other
