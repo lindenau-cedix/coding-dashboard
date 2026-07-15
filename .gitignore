@@ -38,3 +38,5 @@ frontend/ios/
 # --- Claude ---
 .claude/
 .claude/*
+
+.config-backups/*

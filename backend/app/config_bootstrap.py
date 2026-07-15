@@ -93,14 +93,25 @@ def _ssh_argv(
     ]
 
 
-def _hermes_ssh_task_remote() -> str:
-    """Hermes ``-q`` task-mode remote shell string (stdin prompt)."""
-    remote_path = (
+def _ssh_remote_path_export() -> str:
+    """PATH extension every host-side SSH remote shell prepends.
+
+    SSH login shells do not inherit the operator's interactive shell PATH,
+    so a ``claude`` / ``hermes`` installed under ``~/.local/bin``,
+    ``~/.npm-global/bin`` or ``~/.cargo/bin`` is invisible without this.
+    Mirror this same chain on every remote-shell string so the agent CLIs
+    are findable regardless of how the operator installed them on the host.
+    """
+    return (
         'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:'
         '$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
     )
+
+
+def _hermes_ssh_task_remote() -> str:
+    """Hermes ``-q`` task-mode remote shell string (stdin prompt)."""
     return (
-        f'cd "{{project_dir}}" && {remote_path} && '
+        f'cd "{{project_dir}}" && {_ssh_remote_path_export()} && '
         'exec env HERMES_ACCEPT_HOOKS=1 NO_COLOR=1 '
         f'hermes chat -q "$(cat)" --yolo --accept-hooks -t {HERMES_NON_INTERACTIVE_TOOLSETS_CSV}'
     )
@@ -108,17 +119,17 @@ def _hermes_ssh_task_remote() -> str:
 
 def _hermes_ssh_session_remote() -> str:
     """Hermes interactive TUI session-mode remote shell string."""
-    remote_path = (
-        'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:'
-        '$HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"'
+    return (
+        f'cd "{{project_dir}}" && {_ssh_remote_path_export()} && '
+        'exec hermes chat'
     )
-    return f'cd "{{project_dir}}" && {remote_path} && exec hermes chat'
 
 
 def _claude_ssh_task_remote() -> str:
     """Claude Code ``-p`` task-mode remote shell string (stdin prompt)."""
     return (
-        'cd "{project_dir}" && exec env -u ANTHROPIC_API_KEY claude '
+        f'cd "{{project_dir}}" && {_ssh_remote_path_export()} && '
+        'exec env -u ANTHROPIC_API_KEY claude '
         '-p "$(cat)" --output-format stream-json --verbose '
         '--dangerously-skip-permissions'
     )
@@ -126,7 +137,10 @@ def _claude_ssh_task_remote() -> str:
 
 def _claude_ssh_session_remote() -> str:
     """Claude Code interactive TUI session-mode remote shell string."""
-    return 'cd "{project_dir}" && exec env -u ANTHROPIC_API_KEY claude'
+    return (
+        f'cd "{{project_dir}}" && {_ssh_remote_path_export()} && '
+        'exec env -u ANTHROPIC_API_KEY claude'
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -190,8 +204,47 @@ def generate_initial_agents_config(
     hermes_ssh_active = bool(hermes_ssh_user)
     claude_ssh_active = bool(claude_ssh_user)
 
-    hermes_ssh_key = "/home/app/.ssh/id_hermes"
-    claude_ssh_key = "/home/app/.ssh/id_claude"
+    # --- SSH private-key resolution (shared-wiring, mirrors user/host/port) --
+    # Each sibling defaults to its own key path, but:
+    #   * an explicit ``CD_{HERMES,CLAUDE}_SSH_KEY`` env override wins;
+    #   * when a sibling inherited the OTHER agent's SSH user (only one
+    #     ``CD_*_SSH_USER`` set), it also inherits that agent's key path — a
+    #     Hermes-only setup should drive claude-host with the Hermes key
+    #     instead of pointing at a non-existent ``id_claude``;
+    #   * finally, if the resolved key file does not exist but the other
+    #     agent's key does, fall back to that one (unless pinned by env).
+    # The file-existence check honours the caller-supplied HOME so the smoke
+    # tests and the container agree on where the keys live.
+    default_hermes_key = os.path.join(home, ".ssh", "id_hermes")
+    default_claude_key = os.path.join(home, ".ssh", "id_claude")
+    hermes_key_env = (env.get("CD_HERMES_SSH_KEY") or "").strip()
+    claude_key_env = (env.get("CD_CLAUDE_SSH_KEY") or "").strip()
+
+    # Step 1: env override, else inherit the effective user's own key.
+    hermes_ssh_key = hermes_key_env or (
+        default_hermes_key if hermes_user else default_claude_key
+    )
+    claude_ssh_key = claude_key_env or (
+        default_claude_key if claude_user else default_hermes_key
+    )
+
+    # Step 2: existence fallback — a configured key that isn't on disk yet is
+    # useless; prefer the other agent's key if THAT one exists. Skipped when
+    # the operator pinned the path explicitly via env.
+    def _resolve_key(chosen: str, other: str, pinned: bool) -> str:
+        if pinned:
+            return chosen
+        if not os.path.exists(chosen) and os.path.exists(other):
+            return other
+        return chosen
+
+    hermes_ssh_key = _resolve_key(
+        hermes_ssh_key, default_claude_key, bool(hermes_key_env)
+    )
+    claude_ssh_key = _resolve_key(
+        claude_ssh_key, default_hermes_key, bool(claude_key_env)
+    )
+
     known_hosts = os.path.join(home, ".ssh_known_hosts")
     codex_sandbox = (env.get("CD_CODEX_SANDBOX") or "").strip()
 
@@ -214,6 +267,14 @@ def generate_initial_agents_config(
         # The loader re-derives the key from the mapping; strip it from
         # the per-spec dump to avoid spurious noise in the generated YAML.
         d.pop("key", None)
+
+        # Emit the base agent FIRST so it precedes any ``<base>-host``
+        # sibling we inject below. ``/api/agents`` preserves this dict
+        # order, and the frontend picks the first enabled entry as its
+        # default — if a ``-host`` sibling came first, the default agent
+        # would silently be the SSH runner (publickey failures on the very
+        # first submit even though the UI shows "Container").
+        agents[key] = d
 
         if key == "codex" and codex_sandbox:
             d["command"] = _set_cli_option(d["command"], "--sandbox", codex_sandbox)
@@ -302,7 +363,9 @@ def generate_initial_agents_config(
             # Generic built-in (codex, others): enable iff the CLI is on
             # PATH at first boot.
             d["enabled"] = shutil.which(spec.command[0], path=effective_path) is not None
-
-        agents[key] = d
+        # NOTE: ``agents[key] = d`` was done at the top of the loop so the
+        # base agent precedes its ``-host`` sibling. ``d`` is stored by
+        # reference, so the ``d["enabled"] = ...`` mutations above still
+        # take effect on the emitted entry.
 
     return {"context_instruction": DEFAULT_CONTEXT_INSTRUCTION, "agents": agents}

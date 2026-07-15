@@ -110,13 +110,20 @@ async def create_task(
     # This is the operator-facing guard for the toggle on the start form;
     # the runner also defensively checks at start time.
     if body.runner == "host":
-        host_key = f"{body.agent}-host"
+        # Strip an already-present ``-host`` suffix so a stale/explicit
+        # ``claude-host`` selection combined with runner="host" does not
+        # build ``claude-host-host`` (mirrors the runner shim in
+        # TaskManager._run_inner, which guards with ``endswith("-host")``).
+        base_agent = (
+            body.agent[:-5] if body.agent.endswith("-host") else body.agent
+        )
+        host_key = f"{base_agent}-host"
         host_spec = cfg.agents.get(host_key)
         if host_spec is None or not host_spec.enabled:
             raise HTTPException(
                 400,
-                f"Host-Runner fuer Agent '{body.agent}' nicht aktiviert. "
-                f"Setze CD_{body.agent.upper()}_SSH_USER in der Env-Datei "
+                f"Host-Runner fuer Agent '{base_agent}' nicht aktiviert. "
+                f"Setze CD_{base_agent.upper()}_SSH_USER in der Env-Datei "
                 f"und starte das Backend neu.",
             )
     # Env-profile must exist when set. ``EnvProfile.key`` is unique so we
