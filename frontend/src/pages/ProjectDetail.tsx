@@ -273,8 +273,19 @@ export default function ProjectDetail() {
         ctx.setAgents(ag);
         setTasks(ts);
         setProfiles(profs);
-        const firstEnabled = ag.find((a) => a.enabled);
-        if (firstEnabled) setAgent(firstEnabled.key);
+        // Pick the default agent from the SAME choice list the dropdown
+        // renders, not the raw agent array: buildAgentChoices never yields
+        // a bare ``-host`` key as its agentKey (it folds host siblings into
+        // a "Container"/"Host via SSH" pair on the base agent). Using
+        // ``ag.find(a => a.enabled)`` here would default to whatever entry
+        // comes first — which can be ``claude-host`` — silently starting an
+        // SSH run on the very first submit even though the UI reads
+        // "Container". mode is still "task" at initial load.
+        const firstChoice = buildAgentChoices(ag, "task").find((c) => !c.disabled);
+        if (firstChoice) {
+          setAgent(firstChoice.agentKey);
+          setRunner(firstChoice.runner);
+        }
         const live = ts
           .filter((t) => !t.is_session && (t.status === "running" || t.status === "queued"))
           .map((t) => t.id);

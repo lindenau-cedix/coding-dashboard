@@ -45,17 +45,24 @@ FROM node:20-bookworm-slim AS runtime
 # Claude + Codex are installed here via npm (-> /usr/local/bin, on PATH). Each
 # step is skipped when its arg is empty and is overridable to pin/swap versions.
 #
-# Hermes is NOT installed into the image by default. The default deployment runs
-# the HOST's Hermes OVER SSH (see docker-compose.yml + entrypoint.sh): the
-# container `ssh`es into the host and runs the host's `hermes` there, so there is
-# exactly one Hermes (no duplicate cronjobs / double channel replies). Set
-# HERMES_INSTALL_CMD / HERMES_NPM_PKG only if you want a SELF-CONTAINED in-image
-# Hermes instead (and leave CD_HERMES_SSH_USER empty):
-#   docker compose build --build-arg HERMES_NPM_PKG=@your-scope/hermes-cli
+# Hermes IS installed into the image by default (upstream one-liner). The
+# installer drops a wrapper at /home/app/.local/bin/hermes which is already
+# on PATH inside the container (see the $PATH line below), so the dashboard
+# can spawn the in-image `hermes` directly. Operators who prefer to run the
+# HOST's Hermes over SSH (one Hermes process tree for cronjobs / paired
+# channels like WhatsApp + Telegram) override the build arg to empty and
+# set CD_HERMES_SSH_USER instead — see docker-compose.yml + entrypoint.sh:
+#   docker compose build --build-arg HERMES_INSTALL_CMD=""
 ARG CLAUDE_NPM_PKG="@anthropic-ai/claude-code"
 ARG CODEX_NPM_PKG="@openai/codex"
 ARG HERMES_NPM_PKG=""
-ARG HERMES_INSTALL_CMD=""
+# Upstream installer (https://hermes-agent.nousresearch.com/install.sh):
+# bootstraps uv + a Python venv + the hermes CLI into $HOME. Must run AS
+# the `app` user with HOME=/home/app (set on the RUN line below) so the
+# resulting venv's interpreter paths point inside the container — a venv
+# is not relocatable. The HOME-based install is intentional: npm-pkg
+# installation (HERMES_NPM_PKG) is supported as an alternative override.
+ARG HERMES_INSTALL_CMD="curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
 
 # --- OS packages: Python runtime + git + ssh client + tini (PID 1 reaping) ---
 # openssh-client is what drives the host's Hermes over SSH.
@@ -136,10 +143,25 @@ ENV HOME=/home/app \
 # Hermes instead (and leave CD_HERMES_SSH_USER empty); the HOME-based installer
 # must run as `app` with the final HOME so its venv's interpreter paths point
 # inside this container (a venv is not relocatable) and its ~/.local/bin shim is
-# on PATH. It seeds into cd-home on first boot.
+# on PATH.
+#
+# After the install we also copy the resulting tree into /usr/local/share/hermes
+# (a non-HOME dir that's NEVER overlaid by the cd-home volume mount in
+# docker-compose.yml). The entrypoint copies from there into $HOME on first
+# boot so the install survives the cd-home shadow — see deploy/docker/entrypoint.sh.
 RUN set -eux; \
     if [ -n "$HERMES_INSTALL_CMD" ]; then \
-      runuser -u app -- env HOME=/home/app sh -c "$HERMES_INSTALL_CMD"; \
+      runuser -u app -- env HOME=/home/app sh -c "$HERMES_INSTALL_CMD" && \
+      mkdir -p /usr/local/share/hermes && \
+      if [ -d /home/app/.hermes ]; then \
+        cp -a /home/app/.hermes/. /usr/local/share/hermes/.hermes/ && \
+        chmod -R a+rX /usr/local/share/hermes/.hermes; \
+      fi && \
+      if [ -d /home/app/.local/bin ]; then \
+        mkdir -p /usr/local/share/hermes/.local/bin && \
+        cp -a /home/app/.local/bin/. /usr/local/share/hermes/.local/bin/ && \
+        chmod -R a+rX /usr/local/share/hermes/.local; \
+      fi; \
     fi
 
 WORKDIR /app/backend

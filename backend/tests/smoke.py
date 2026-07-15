@@ -4377,6 +4377,98 @@ def test_runner_fallback_when_ssh_not_configured() -> None:
         db.query(Project).filter(Project.id == "runnerfb-1").delete()
 
 
+def test_runner_guard_strips_existing_host_suffix() -> None:
+    """Regression: selecting an explicit ``<agent>-host`` key AND
+    runner='host' must not build ``<agent>-host-host`` in the route guard.
+
+    Before the fix, ``host_key = f"{body.agent}-host"`` produced
+    ``fake-host-host`` (never registered) and rejected the request with a
+    bogus ``CD_FAKE-HOST_SSH_USER`` message. The guard now strips an
+    existing ``-host`` suffix first, so the enabled ``fake-host`` sibling
+    is found and the request is accepted.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.config import AgentSpec, get_agents_config
+    from app.database import session_scope
+    from app.main import app
+    from app.models import Project, Task
+
+    _clean_env_profiles()
+    cfg = get_agents_config()
+    cfg.agents["fake-host"] = AgentSpec(
+        key="fake-host",
+        display_name="Fake Host",
+        command=[PY, "-c", FAKE_SCRIPT],
+        session_command=[PY, "-c", "pass"],
+        prompt_via="arg",
+        stream_format="raw",
+        enabled=True,
+        host_staging=True,
+    )
+
+    with session_scope() as db:
+        p = Project(
+            id="runnerdh-1",
+            name="runner-doublehost",
+            slug="runner-doublehost",
+            local_path=str(TMP / "runnerdh-1"),
+        )
+        Path(p.local_path).mkdir(parents=True, exist_ok=True)
+        db.add(p)
+
+    try:
+        with TestClient(app) as client:
+            ok = client.post(
+                "/api/auth/login",
+                json={"username": "admin", "password": "secret-pw"},
+            )
+            H = {"Authorization": f"Bearer {ok.json()['access_token']}"}
+
+            r = client.post(
+                "/api/projects/runnerdh-1/tasks",
+                headers=H,
+                json={
+                    "agent": "fake-host",
+                    "prompt": "x",
+                    "mode": "task",
+                    "runner": "host",
+                },
+            )
+            # Must NOT be rejected by the host-runner guard: the point is the
+            # guard finds ``fake-host`` (not ``fake-host-host``). 201 expected.
+            check(
+                "double_host: POST tasks agent=fake-host + runner=host not 400",
+                r.status_code != 400,
+                f"got {r.status_code}: {r.text[:200]}",
+            )
+            check(
+                "double_host: no bogus CD_FAKE-HOST_SSH_USER message",
+                "FAKE-HOST_SSH_USER" not in r.text,
+                r.text[:200],
+            )
+
+            r_sess = client.post(
+                "/api/sessions",
+                headers=H,
+                json={
+                    "project_id": "runnerdh-1",
+                    "agent": "fake-host",
+                    "runner": "host",
+                },
+            )
+            check(
+                "double_host: POST sessions agent=fake-host + runner=host not guard-400",
+                "FAKE-HOST_SSH_USER" not in r_sess.text,
+                f"got {r_sess.status_code}: {r_sess.text[:200]}",
+            )
+    finally:
+        cfg.agents.pop("fake-host", None)
+        with session_scope() as db:
+            db.query(Task).filter(Task.project_id == "runnerdh-1").delete()
+            db.query(Project).filter(Project.id == "runnerdh-1").delete()
+
+
 def test_session_runner_shim() -> None:
     """Unit-test the SessionManager.start spec-resolution path.
 
@@ -4679,6 +4771,34 @@ def test_claude_host_reuses_hermes_ssh() -> None:
         "2222" in cmd_a,
         str(cmd_a),
     )
+    # Ordering: the base ``claude`` entry MUST precede its ``claude-host``
+    # sibling. /api/agents preserves dict order and the frontend defaults to
+    # the first enabled entry — a ``-host`` key coming first would silently
+    # make the SSH runner the default (publickey failure on first submit).
+    keys_a = list(doc_a)
+    check(
+        "claude_reuse: base claude precedes claude-host sibling",
+        "claude" in keys_a
+        and "claude-host" in keys_a
+        and keys_a.index("claude") < keys_a.index("claude-host"),
+        keys_a,
+    )
+    # Every ``<base>-host`` sibling must come AFTER its base entry, so that
+    # /api/agents order never puts an SSH sibling first (the frontend
+    # defaults to the first suitable entry). This is the environment-
+    # independent form of the invariant — the container CLIs may or may not
+    # be installed in a given test/deploy env, but the ordering holds
+    # regardless.
+    host_after_base = all(
+        base in keys_a and keys_a.index(base) < keys_a.index(k)
+        for k in keys_a
+        if k.endswith("-host") and (base := k[:-5])
+    )
+    check(
+        "claude_reuse: every -host sibling follows its base entry",
+        host_after_base,
+        keys_a,
+    )
 
     # case B: Claude-only -> hermes-host reuses Claude ssh values
     doc_b = generate_initial_agents_config(
@@ -4735,6 +4855,127 @@ def test_claude_host_reuses_hermes_ssh() -> None:
     )["agents"]
     check("neither_set: hermes-host absent", "hermes-host" not in doc_d, list(doc_d))
     check("neither_set: claude-host absent", "claude-host" not in doc_d, list(doc_d))
+
+
+def test_ssh_key_shared_wiring() -> None:
+    """The SSH private-key path follows the same shared-wiring rule as
+    user/host/port, plus an on-disk existence fallback:
+
+      * Hermes-only user -> claude-host inherits the Hermes key path.
+      * If the resolved key file is absent but the other agent's key
+        exists on disk, fall back to the existing one (a Hermes-only
+        deploy has only ``id_hermes``, so claude-host must use it rather
+        than a non-existent ``id_claude``).
+      * An explicit ``CD_{HERMES,CLAUDE}_SSH_KEY`` env override always wins
+        and is never second-guessed by the existence check.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    def _keyof(cmd: list) -> str:
+        return cmd[cmd.index("-i") + 1] if "-i" in cmd else ""
+
+    # A HOME where ONLY id_hermes exists (mirrors the real container).
+    home = TMP / "ssh-key-home"
+    (home / ".ssh").mkdir(parents=True, exist_ok=True)
+    (home / ".ssh" / "id_hermes").write_text("k", encoding="utf-8")
+
+    # Hermes-only + only id_hermes on disk -> claude-host uses id_hermes.
+    doc = generate_initial_agents_config(
+        {
+            "CD_HERMES_SSH_USER": "huser",
+            "HOME": str(home),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    expect = str(home / ".ssh" / "id_hermes")
+    check(
+        "ssh_key: claude-host inherits Hermes key when id_claude absent",
+        _keyof(doc["claude-host"]["command"]) == expect,
+        _keyof(doc["claude-host"]["command"]),
+    )
+    check(
+        "ssh_key: claude-host session_command key matches too",
+        _keyof(doc["claude-host"]["session_command"]) == expect,
+        _keyof(doc["claude-host"]["session_command"]),
+    )
+
+    # Explicit CD_CLAUDE_SSH_KEY override wins even if the file is absent.
+    doc2 = generate_initial_agents_config(
+        {
+            "CD_HERMES_SSH_USER": "huser",
+            "CD_CLAUDE_SSH_KEY": "/custom/id_claude_pinned",
+            "HOME": str(home),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "ssh_key: explicit CD_CLAUDE_SSH_KEY override is honoured verbatim",
+        _keyof(doc2["claude-host"]["command"]) == "/custom/id_claude_pinned",
+        _keyof(doc2["claude-host"]["command"]),
+    )
+
+    # Both keys present -> each sibling uses its own default key.
+    (home / ".ssh" / "id_claude").write_text("k", encoding="utf-8")
+    doc3 = generate_initial_agents_config(
+        {
+            "CD_HERMES_SSH_USER": "huser",
+            "CD_CLAUDE_SSH_USER": "cuser",
+            "HOME": str(home),
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+    check(
+        "ssh_key: claude-host uses id_claude when both users+keys present",
+        _keyof(doc3["claude-host"]["command"]) == str(home / ".ssh" / "id_claude"),
+        _keyof(doc3["claude-host"]["command"]),
+    )
+    check(
+        "ssh_key: hermes-host uses id_hermes when both users+keys present",
+        _keyof(doc3["hermes-host"]["command"]) == str(home / ".ssh" / "id_hermes"),
+        _keyof(doc3["hermes-host"]["command"]),
+    )
+
+
+def test_ssh_remote_path_export() -> None:
+    """Both ``claude-host`` and ``hermes-host`` SSH remote shells must
+    extend PATH before invoking the agent CLI. SSH login shells do not
+    inherit the operator's interactive PATH, so a CLI installed under
+    ``~/.local/bin`` / ``~/.npm-global/bin`` / ``~/.cargo/bin`` is
+    invisible without this. The user reported
+    ``env: 'claude': No such file or directory`` on the very first
+    Claude-host session start — that came from the previous
+    ``cd ... && exec env -u ANTHROPIC_API_KEY claude`` which skipped
+    the PATH export that Hermes already used.
+    """
+    from app.config_bootstrap import generate_initial_agents_config
+
+    doc = generate_initial_agents_config(
+        {
+            "CD_HERMES_SSH_USER": "huser",
+            "CD_HERMES_SSH_HOST": "host",
+            "CD_HERMES_SSH_PORT": "22",
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+        }
+    )["agents"]
+
+    # Both command + session_command of claude-host must include the
+    # shared PATH-export chain (mirroring Hermes).
+    expected_chain = "$HOME/.local/bin"
+    for variant in ("command", "session_command"):
+        joined = " ".join(doc["claude-host"][variant])
+        check(
+            f"ssh_remote_path: claude-host.{variant} extends PATH before claude CLI",
+            expected_chain in joined and "claude" in joined,
+            joined,
+        )
+        # Hermes must still extend PATH too — this test guards both ends
+        # of the symmetry so future refactors don't strip one side.
+        joined_h = " ".join(doc["hermes-host"][variant])
+        check(
+            f"ssh_remote_path: hermes-host.{variant} still extends PATH",
+            expected_chain in joined_h,
+            joined_h,
+        )
 
 
 def test_hermes_container_in_image_only() -> None:
@@ -5590,10 +5831,13 @@ def main() -> int:
         test_task_runner_env_profile_injection()
         test_runner_toggle_persistence()
         test_runner_fallback_when_ssh_not_configured()
+        test_runner_guard_strips_existing_host_suffix()
         test_session_runner_shim()
         test_runner_picks_host_sibling_by_key()
         test_hermes_host_sibling_registers()
         test_claude_host_reuses_hermes_ssh()
+        test_ssh_key_shared_wiring()
+        test_ssh_remote_path_export()
         test_hermes_container_in_image_only()
         test_create_task_persists_env_profile_key()
         test_heartbeat_env_profile_resolution()

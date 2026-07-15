@@ -68,11 +68,12 @@ services:
         # Same-origin SPA (the backend serves it). For a separately-hosted
         # frontend, bake a public API base instead.
         VITE_API_BASE: ""
-        # Hermes is NOT baked into the image — it runs on the host over SSH (see
-        # the header + entrypoint). Set these only if you want a SELF-CONTAINED
-        # in-image Hermes instead (then also leave CD_HERMES_SSH_USER empty).
+        # Hermes is built into the image by the Dockerfile's HERMES_INSTALL_CMD
+        # default (upstream one-liner). Override per-build to disable:
+        #   HERMES_INSTALL_CMD="" docker compose build
+        # which keeps the in-image Hermes uninstalled; pair it with
+        # CD_HERMES_SSH_USER below to run the host's Hermes over SSH.
         HERMES_NPM_PKG: "${HERMES_NPM_PKG:-}"
-        HERMES_INSTALL_CMD: "${HERMES_INSTALL_CMD:-}"
         # UID/GID of the non-root 'app' user. Match the host user that runs Hermes
         # and owns the shared staging dir (CD_HERMES_STAGING_HOST_DIR), so the host's
         # Hermes and the container agree on file ownership in the staged copy. Keep
