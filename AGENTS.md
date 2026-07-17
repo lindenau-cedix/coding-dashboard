@@ -117,6 +117,16 @@ the in-memory buffer / DB row for late or repeated joins. After run: result
 → DB row → auto-commit + push. Commit hash, push status, merge state all
 land back on the row.
 
+**Auto-generated commit messages** — all three modes (`task`, `goal`,
+`session`) auto-generate the commit subject when the user doesn't supply one,
+via `task_runner._auto_commit_subject(task_id)`. Task/goal use the first
+line of `Task.prompt`; session mode uses `Task.result_summary` (since
+`Task.prompt` there holds `start_args` like `--resume` — low signal). The
+session-mode end-screen input is therefore an optional override rather than
+a required field. A blank commit subject is only persisted on the Task row
+when no commit was actually created (`commit_created=False`) so callers can
+distinguish "nothing changed" from "commit happened with subject X".
+
 **Model / effort per task** — agents with `model_choices` / `effort_choices`
 (`claude`, `codex`) get dropdowns in the UI. Validation 400 on invalid.
 CLI argv injection via `model_args` / `effort_args`. In addition to argv,

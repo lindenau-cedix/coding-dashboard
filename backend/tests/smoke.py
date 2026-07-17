@@ -996,6 +996,7 @@ def test_session_end_flow() -> None:
             db.add(proj_row)
             db.commit()
         pid = proj_row.id
+        work_path = Path(proj_row.local_path)
 
     task = Task(project_id=pid, agent="fake", prompt="", mode="session",
                 is_session=True, status="running", chat_history="[]")
@@ -1009,6 +1010,7 @@ def test_session_end_flow() -> None:
     with session_scope() as db:
         t = db.get(Task, tid)
         t.output = "hello from terminal\r\nagent prompt> "
+        t.result_summary = "implemented retries on the auth path"
         db.commit()
 
     # end_session should succeed (process already dead → catch path).
@@ -1025,6 +1027,39 @@ def test_session_end_flow() -> None:
             return
         check("task marked finished after end_session", t.finished_at is not None, str(t.finished_at))
         check("task terminal output preserved", "hello from terminal" in (t.output or ""), t.output or "")
+        # Explicit commit_message echoes verbatim.
+        check(
+            "explicit commit_message preserved on task",
+            t.commit_message == "test commit",
+            t.commit_message,
+        )
+
+    # And with an empty commit_message the auto-generated subject from
+    # result_summary is used (mirrors task/goal mode where Task.prompt
+    # is the source). Need an actual uncommitted change in the repo so
+    # ``commit_created`` becomes True and the subject lands on the row
+    # (no-op commits deliberately keep commit_message empty so callers
+    # can tell "nothing changed" from "commit happened with subject X").
+    (work_path / "session_change.txt").write_text("from session\n", encoding="utf-8")
+    with session_scope() as db:
+        t2 = Task(
+            project_id=pid, agent="fake", prompt="--resume", mode="session",
+            is_session=True, status="running", chat_history="[]",
+            result_summary="implemented retries on the auth path",
+        )
+        db.add(t2); db.commit(); db.refresh(t2)
+        tid2 = t2.id
+        t2.output = "tail of session\r\n"
+        db.commit()
+
+    asyncio.run(session_manager.end_session(tid2, pid, commit_message=""))
+    with session_scope() as db:
+        t2_after = db.get(Task, tid2)
+        check(
+            "empty commit_message falls back to auto-generated subject",
+            t2_after.commit_message == "Session: implemented retries on the auth path",
+            t2_after.commit_message,
+        )
         # Issue #5: when a session is ended (whether via the popup's
         # "Session beenden" button, by the agent self-quitting, or by the
         # server noticing the pump loop exited), the dashboard's /running
@@ -1037,6 +1072,117 @@ def test_session_end_flow() -> None:
             t.status not in ("running", "queued"),
             str(t.status),
         )
+
+
+def test_auto_commit_subject() -> None:
+    """Auto-generated commit subjects across all 3 modes.
+
+    Task/goal mode uses ``Task.prompt``; session mode uses
+    ``Task.result_summary`` (since ``Task.prompt`` there holds
+    ``start_args`` like ``--resume`` which is low signal).  When neither
+    is set, the helper falls back to a stable placeholder.
+    """
+    from app.database import init_db, session_scope
+    from app.models import Project, Task
+    from app.task_runner import _auto_commit_subject
+
+    init_db()
+    # Re-use the project created by the session_end test when present;
+    # otherwise create a minimal local repo so the FK on tasks is happy.
+    with session_scope() as db:
+        proj = db.query(Project).first()
+        if proj is None:
+            remote = TMP / "subject-remote.git"
+            work = TMP / "subject-work"
+            run(["git", "init", "--bare", str(remote)])
+            git_ops.clone(str(remote), work, token="")
+            git_ops.ensure_identity(work, "Tester", "t@example.com")
+            (work / "README.md").write_text("# subject\n", encoding="utf-8")
+            git_ops.commit_all(work, "init", "Tester", "t@example.com")
+            git_ops.push(work, "main", token="")
+            proj = Project(
+                name="SubjectProj",
+                slug="subject-proj",
+                local_path=str(work),
+                default_branch="main",
+                clone_url=str(remote),
+            )
+            db.add(proj)
+            db.commit()
+            db.refresh(proj)
+            pid = proj.id
+        else:
+            pid = proj.id
+
+    # 1. task mode — first line of prompt becomes the subject.
+    task_task = Task(
+        project_id=pid, agent="fake", prompt="add caching layer\n\nbody",
+        mode="task", status="queued",
+    )
+    with session_scope() as db:
+        db.add(task_task); db.commit(); db.refresh(task_task)
+    check(
+        "task mode subject from prompt first line",
+        _auto_commit_subject(task_task.id) == "add caching layer",
+        _auto_commit_subject(task_task.id),
+    )
+
+    # 2. goal mode — same path as task mode (the user's prompt is the input).
+    goal_task = Task(
+        project_id=pid, agent="fake", prompt="ship the v2 release",
+        mode="goal", status="queued",
+    )
+    with session_scope() as db:
+        db.add(goal_task); db.commit(); db.refresh(goal_task)
+    check(
+        "goal mode subject from prompt",
+        _auto_commit_subject(goal_task.id) == "ship the v2 release",
+        _auto_commit_subject(goal_task.id),
+    )
+
+    # 3. session mode — start_args (low signal) ignored in favour of
+    #    result_summary, so the auto-generated subject reads like the
+    #    agent's final outcome.
+    sess_task = Task(
+        project_id=pid, agent="fake", prompt="--resume",
+        mode="session", is_session=True, status="running",
+        result_summary="implemented retries on the auth path",
+        chat_history="[]",
+    )
+    with session_scope() as db:
+        db.add(sess_task); db.commit(); db.refresh(sess_task)
+    check(
+        "session mode subject from result_summary",
+        _auto_commit_subject(sess_task.id) == "implemented retries on the auth path",
+        _auto_commit_subject(sess_task.id),
+    )
+
+    # 4. session mode falls back to a stable placeholder when both fields
+    #    are blank — mirrors the task-mode "update" fallback.
+    blank_sess = Task(
+        project_id=pid, agent="fake", prompt="",
+        mode="session", is_session=True, status="running",
+        chat_history="[]",
+    )
+    with session_scope() as db:
+        db.add(blank_sess); db.commit(); db.refresh(blank_sess)
+    check(
+        "session mode falls back to 'Session' placeholder",
+        _auto_commit_subject(blank_sess.id) == "Session",
+        _auto_commit_subject(blank_sess.id),
+    )
+
+    # 5. Long subjects are truncated to 72 chars.
+    long_prompt = "x" * 200
+    long_task = Task(
+        project_id=pid, agent="fake", prompt=long_prompt,
+        mode="task", status="queued",
+    )
+    with session_scope() as db:
+        db.add(long_task); db.commit(); db.refresh(long_task)
+    subj = _auto_commit_subject(long_task.id)
+    check("long subject truncated to 72 chars", len(subj) == 72, f"len={len(subj)}")
+    check("long subject ends with ellipsis", subj.endswith("..."), subj)
 
 
 def test_worktrees() -> None:
@@ -6400,6 +6546,7 @@ def main() -> int:
         test_api_and_task()
         test_session_api_and_manager()
         test_session_end_flow()
+        test_auto_commit_subject()
         test_worktrees()
         test_session_dirs()
         test_session_workdir_resolution()
