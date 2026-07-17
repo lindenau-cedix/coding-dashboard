@@ -166,6 +166,29 @@ def _pull_ff_only(repo_dir: str | Path, branch: str, token: str) -> str:
     return proc.stdout.strip()
 
 
+def _auto_commit_subject(task_id: str) -> str:
+    """Build the first line of an auto-generated commit message for a task.
+
+    Used by TaskManager for task/goal mode (where ``Task.prompt`` is the
+    user's prompt) and by SessionManager for session mode (where
+    ``Task.prompt`` holds the ``start_args`` — usually ``--resume`` or
+    similar — so we fall back to ``result_summary`` instead).  Returns
+    ``"update"`` when the row is missing or both fields are blank, and
+    ``"Session"`` for sessions missing both.  Truncated to 72 chars
+    total so the commit subject line stays readable.
+    """
+    with session_scope() as db:
+        task = db.get(Task, task_id)
+        if task is None:
+            return "update"
+        if task.is_session:
+            text = (task.result_summary or task.prompt or "Session").strip()
+        else:
+            text = (task.prompt or task.result_summary or "update").strip()
+    first = text.splitlines()[0] if text.splitlines() else "update"
+    return first[:69] + "..." if len(first) > 72 else first
+
+
 class TaskChannel:
     """In-memory pub/sub buffer for one task's live output."""
 
@@ -868,13 +891,7 @@ class TaskManager:
             agents_path.write_text(content, encoding="utf-8")
 
     def _summary_line(self, task_id: str) -> str:
-        with session_scope() as db:
-            task = db.get(Task, task_id)
-            if task is None:
-                return "update"
-            text = (task.prompt or task.result_summary or "update").strip()
-        first = text.splitlines()[0] if text.splitlines() else "update"
-        return first[:69] + "..." if len(first) > 72 else first
+        return _auto_commit_subject(task_id)
 
     def _mark(
         self,
@@ -1581,7 +1598,11 @@ class SessionManager:
             task = db.get(Task, task_id)
             if task:
                 task.output = output_text
-                task.result_summary = summary or "Session beendet"
+                # Preserve any agent-written result_summary so the auto-generated
+                # commit subject (and the UI history list) reflect the agent's
+                # final outcome. Only fall back to the generic German summary
+                # when the agent never wrote one.
+                task.result_summary = task.result_summary or summary or "Session beendet"
                 task.status = status
                 task.exit_code = exit_code
                 task.finished_at = _now()
@@ -1608,8 +1629,15 @@ class SessionManager:
 
         if git_dir and Path(git_dir).exists() and lock:
             async with lock:
-                msg_full = commit_message.strip() or f"Session: {summary}"
-                first_line = msg_full.splitlines()[0] if msg_full else summary
+                # Auto-generate a commit subject when the user didn't type one
+                # — mirrors task/goal mode (where ``Task.prompt`` becomes the
+                # subject) so sessions behave the same as the other modes.
+                # The full body keeps the operator's trailer context.
+                first_line = _auto_commit_subject(task_id)
+                msg_full = (
+                    commit_message.strip()
+                    or f"Session: {first_line}"
+                )
                 if host_staging.is_staging_dir(git_dir):
                     # Off-host (host-staging) session: integrate the host copy back
                     # into the canonical repo (commit -> merge -> push; conflict
@@ -1667,7 +1695,8 @@ class SessionManager:
             if task:
                 task.commit_hash = commit_hash or ""
                 task.commit_message = (
-                    commit_message.strip() or (f"Session: {summary}" if commit_created else "")
+                    commit_message.strip()
+                    or (f"Session: {_auto_commit_subject(task_id)}" if commit_created else "")
                 )
                 task.commit_created = commit_created
                 task.pushed = pushed
