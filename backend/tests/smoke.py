@@ -1314,7 +1314,6 @@ def test_interactive_session() -> None:
     check("interactive session started", started is True, str(started))
     check("initial prompt auto-typed into the PTY", marker in out, (out[-200:] or "(empty)"))
 
-
 def test_worktrees() -> None:
     """Isolated worktrees let parallel sessions work without clobbering files."""
     # Distinct remote/repo names from test_worktree_merge: both run in the same
