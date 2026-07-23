@@ -45,6 +45,21 @@ FAKE_SCRIPT = (
     "pathlib.Path('agent_out.txt').write_text('result', encoding='utf-8')"
 )
 
+# A minimal interactive "TUI": echo whatever is typed back to stdout so the
+# interactive-session injection test can observe the auto-typed prompt land in
+# the PTY transcript. Runs until stdin closes / it is terminated by end_session.
+FAKE_SESSION_SCRIPT = (
+    "import os,sys\n"
+    "while True:\n"
+    "    try:\n"
+    "        b=os.read(0,4096)\n"
+    "    except OSError:\n"
+    "        break\n"
+    "    if not b:\n"
+    "        break\n"
+    "    os.write(1,b)\n"
+)
+
 import yaml  # noqa: E402
 
 CONFIG.write_text(
@@ -57,7 +72,18 @@ CONFIG.write_text(
                     "command": [PY, "-c", FAKE_SCRIPT],
                     "prompt_via": "arg",
                     "stream_format": "raw",
-                }
+                },
+                # Session-capable echo agent (goal_command set so the
+                # interactive-goal path is exercisable). ``command`` is unused
+                # in session mode but required on the spec.
+                "fakesession": {
+                    "display_name": "Fake Session",
+                    "command": [PY, "-c", "print('noop')"],
+                    "prompt_via": "arg",
+                    "stream_format": "raw",
+                    "goal_command": "/goal {prompt}",
+                    "session_command": [PY, "-c", FAKE_SESSION_SCRIPT],
+                },
             },
         }
     ),
@@ -1183,6 +1209,110 @@ def test_auto_commit_subject() -> None:
     subj = _auto_commit_subject(long_task.id)
     check("long subject truncated to 72 chars", len(subj) == 72, f"len={len(subj)}")
     check("long subject ends with ellipsis", subj.endswith("..."), subj)
+
+    # 6. INTERACTIVE session (the "Interaktiv" checkbox: is_session=True but
+    #    mode stays "task"/"goal") — Task.prompt IS the real prompt, so it wins
+    #    over the generic "Interaktive TUI-Session beendet" summary that
+    #    end_session writes. This is the opposite preference from a plain
+    #    session (#3) and matches task/goal mode.
+    interactive_sess = Task(
+        project_id=pid, agent="fake", prompt="wire up the websocket reconnect",
+        mode="task", is_session=True, status="running",
+        result_summary="Interaktive TUI-Session beendet", chat_history="[]",
+    )
+    with session_scope() as db:
+        db.add(interactive_sess); db.commit(); db.refresh(interactive_sess)
+    check(
+        "interactive session subject prefers prompt over generic summary",
+        _auto_commit_subject(interactive_sess.id) == "wire up the websocket reconnect",
+        _auto_commit_subject(interactive_sess.id),
+    )
+
+
+def test_interactive_session() -> None:
+    """The 'Interaktiv' checkbox on Task/Goal: the initial prompt is composed
+    (goal-wrapped + session context that ALLOWS questions) and auto-typed into
+    the PTY once the TUI is ready — after which the session is fully interactive.
+    """
+    from app.config import AgentSpec
+    from app.database import init_db, session_scope
+    from app.models import Project, Task
+    from app.task_runner import build_session_initial_prompt, session_manager
+    import asyncio
+
+    # --- prompt composition --------------------------------------------- #
+    goal_spec = AgentSpec(
+        key="c", display_name="C", command=["c"], goal_command="/goal {prompt}"
+    )
+    p_task = build_session_initial_prompt(goal_spec, "fix the auth bug", goal=False)
+    check("session prompt keeps the user text", "fix the auth bug" in p_task, p_task[:80])
+    check(
+        "session prompt appends context that permits questions",
+        "AGENTS.md" in p_task and "INTERAKTIVE" in p_task,
+        p_task[-160:],
+    )
+    p_goal = build_session_initial_prompt(goal_spec, "make CI green", goal=True)
+    check("session goal wraps with goal_command", "/goal make CI green" in p_goal, p_goal[:80])
+    plain_spec = AgentSpec(key="d", display_name="D", command=["d"])
+    p_nogoal = build_session_initial_prompt(plain_spec, "do the thing", goal=True)
+    check(
+        "session goal without goal_command uses the raw prompt",
+        p_nogoal.startswith("do the thing"),
+        p_nogoal[:40],
+    )
+
+    # --- end-to-end PTY injection --------------------------------------- #
+    init_db()
+    with session_scope() as db:
+        proj = db.query(Project).first()
+        if proj is None:
+            remote = TMP / "interactive-remote.git"
+            work = TMP / "interactive-work"
+            run(["git", "init", "--bare", str(remote)])
+            git_ops.clone(str(remote), work, token="")
+            git_ops.ensure_identity(work, "Tester", "t@example.com")
+            (work / "README.md").write_text("# interactive\n", encoding="utf-8")
+            git_ops.commit_all(work, "init", "Tester", "t@example.com")
+            git_ops.push(work, "main", token="")
+            proj = Project(
+                name="InteractiveProj", slug="interactive-proj",
+                local_path=str(work), default_branch="main", clone_url=str(remote),
+            )
+            db.add(proj); db.commit(); db.refresh(proj)
+        pid = proj.id
+
+    # Shrink the injection timing so the test stays fast + deterministic. The
+    # echo agent emits nothing until it receives input, so the ready-wait falls
+    # through to the timeout — keep it short.
+    session_manager.INITIAL_PROMPT_READY_TIMEOUT = 1.0
+    session_manager.INITIAL_PROMPT_SETTLE_SECONDS = 0.1
+    session_manager.INITIAL_PROMPT_SUBMIT_DELAY = 0.05
+
+    marker = "PING-MARKER-4242"
+    with session_scope() as db:
+        t = Task(project_id=pid, agent="fakesession", prompt=marker,
+                 mode="task", is_session=True, status="queued", chat_history="[]")
+        db.add(t); db.commit(); db.refresh(t)
+        tid = t.id
+
+    async def drive() -> tuple[bool, str]:
+        started = await session_manager.start(
+            tid, pid, "fakesession", "", "",
+            initial_prompt=marker, initial_goal=False,
+        )
+        out = ""
+        for _ in range(60):  # up to ~6s for the echoed paste to arrive
+            await asyncio.sleep(0.1)
+            with session_scope() as db:
+                out = db.get(Task, tid).output or ""
+            if marker in out:
+                break
+        await session_manager.end_session(tid, pid, commit_message="")
+        return started, out
+
+    started, out = asyncio.run(drive())
+    check("interactive session started", started is True, str(started))
+    check("initial prompt auto-typed into the PTY", marker in out, (out[-200:] or "(empty)"))
 
 
 def test_worktrees() -> None:
@@ -6547,6 +6677,7 @@ def main() -> int:
         test_session_api_and_manager()
         test_session_end_flow()
         test_auto_commit_subject()
+        test_interactive_session()
         test_worktrees()
         test_session_dirs()
         test_session_workdir_resolution()

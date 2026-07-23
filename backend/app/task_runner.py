@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import env_crypto, git_ops, host_lock, host_staging, session_dirs, uploads
 from .agents import run_agent
-from .config import get_agents_config, get_settings
+from .config import SESSION_CONTEXT_INSTRUCTION, get_agents_config, get_settings
 from .database import session_scope
 from .models import EnvProfile, Project, Task
 from .schemas import TaskOut
@@ -142,6 +142,23 @@ def build_agent_prompt(
     return f"{base}\n\n---\n{context_instruction}"
 
 
+def build_session_initial_prompt(
+    spec, prompt: str, goal: bool, context_instruction: str = SESSION_CONTEXT_INSTRUCTION
+) -> str:
+    """Compose the initial prompt auto-typed into an interactive session's TUI.
+
+    Mirrors :func:`build_agent_prompt` (goal wrapping via the agent's
+    ``goal_command``) but appends the SESSION context instruction, which keeps
+    the no-self-commit / AGENTS.md rules while allowing the agent to ask the
+    user questions — the point of an interactive session.
+    """
+    if goal and getattr(spec, "goal_command", None):
+        base = spec.goal_command.replace("{prompt}", prompt)
+    else:
+        base = prompt
+    return f"{base}\n\n---\n{context_instruction}"
+
+
 def _pull_ff_only(repo_dir: str | Path, branch: str, token: str) -> str:
     """``git pull --ff-only`` — refuse to merge or rebase, just fast-forward.
 
@@ -170,18 +187,23 @@ def _auto_commit_subject(task_id: str) -> str:
     """Build the first line of an auto-generated commit message for a task.
 
     Used by TaskManager for task/goal mode (where ``Task.prompt`` is the
-    user's prompt) and by SessionManager for session mode (where
-    ``Task.prompt`` holds the ``start_args`` — usually ``--resume`` or
-    similar — so we fall back to ``result_summary`` instead).  Returns
-    ``"update"`` when the row is missing or both fields are blank, and
-    ``"Session"`` for sessions missing both.  Truncated to 72 chars
-    total so the commit subject line stays readable.
+    user's prompt) and by SessionManager for session mode.  For a PLAIN
+    session (``mode == "session"``) ``Task.prompt`` holds the ``start_args``
+    — usually ``--resume`` or similar, low signal — so we fall back to
+    ``result_summary`` instead.  For an INTERACTIVE session (the "Interaktiv"
+    checkbox on Task/Goal → ``mode`` stays ``"task"``/``"goal"``)
+    ``Task.prompt`` IS the user's real prompt, so we prefer it exactly like
+    task/goal mode (the generic "Interaktive TUI-Session beendet" summary is
+    written before this runs and must not win).  Returns ``"update"`` when the
+    row is missing or both fields are blank, and ``"Session"`` for plain
+    sessions missing both.  Truncated to 72 chars total so the commit subject
+    line stays readable.
     """
     with session_scope() as db:
         task = db.get(Task, task_id)
         if task is None:
             return "update"
-        if task.is_session:
+        if task.is_session and task.mode == "session":
             text = (task.result_summary or task.prompt or "Session").strip()
         else:
             text = (task.prompt or task.result_summary or "update").strip()
@@ -986,6 +1008,14 @@ class SessionManager:
     the browser only closes the WebSocket, not the process.
     """
 
+    # Timing for the initial-prompt auto-injection (interactive Task/Goal).
+    # After fork we wait for the TUI to draw its first output (bounded by the
+    # ready-timeout), then a short settle delay before pasting, then a brief
+    # delay before pressing Enter. Class attributes so tests can shrink them.
+    INITIAL_PROMPT_READY_TIMEOUT = 6.0
+    INITIAL_PROMPT_SETTLE_SECONDS = 1.2
+    INITIAL_PROMPT_SUBMIT_DELAY = 0.35
+
     def __init__(self) -> None:
         self._channels: dict[str, SessionChannel] = {}
         # In PTY mode we store {"pid": int, "master_fd": int}.
@@ -1019,13 +1049,23 @@ class SessionManager:
         *,
         runner: str = "",
         env_profile_key: str = "",
+        initial_prompt: str = "",
+        initial_goal: bool = False,
     ) -> bool:
         """Launch the subprocess for an interactive session using a PTY.
 
         The agent runs in a true interactive shell so keyboard input (Enter,
-        arrow keys, Ctrl-C, etc.) is forwarded faithfully. No prompt is
-        injected; the configured session_command is only extended with the
-        user-supplied start_args parsed as argv.
+        arrow keys, Ctrl-C, etc.) is forwarded faithfully. The configured
+        session_command is extended with the user-supplied start_args parsed
+        as argv.
+
+        ``initial_prompt`` (the "Interaktiv" checkbox on Task/Goal) is the one
+        exception to "no prompt is injected": when set, it is composed with the
+        session context instruction (goal-wrapped when ``initial_goal``) and
+        auto-typed into the TUI once it is ready (see ``_inject_initial_prompt``
+        + the ``model``/``effort`` selection is applied like task mode). The
+        session then behaves like any other — the user answers questions,
+        interrupts, and sends follow-ups.
 
         ``runner`` and ``env_profile_key`` mirror the same fields on
         ``TaskCreate``: ``runner="host"`` swaps in the ``<agent>-host``
@@ -1136,16 +1176,41 @@ class SessionManager:
         self._locks[task_id] = lock
         self._task_projects[task_id] = project_id
 
-        # Build the interactive TUI command. Session mode intentionally does not
-        # inject prompt/model/effort args; explicit start parameters are the
-        # single source of argv additions and are still executed without a shell.
-        # ``{project_dir}`` resolves to the chosen working directory so a session
-        # in an isolated worktree references that worktree, not the shared repo.
+        # Build the interactive TUI command. A PLAIN session injects no
+        # prompt/model/effort args — the user-supplied start parameters are the
+        # only argv additions. An INTERACTIVE Task/Goal additionally applies the
+        # model/effort selection (block below) and auto-types the prompt after
+        # start. Everything runs without a shell. ``{project_dir}`` resolves to
+        # the chosen working directory so a session in an isolated worktree
+        # references that worktree, not the shared repo.
         cmd = []
         for tok in spec.session_command:
             cmd.append(tok.replace("{project_dir}", workdir))
         if argv_extra:
             cmd += [tok.replace("{project_dir}", workdir) for tok in argv_extra]
+
+        # Interactive Task/Goal: honour the user's model/effort selection the
+        # same way task mode does. The dotfile writers are the authoritative
+        # channel for the built-in container agents (Claude effort →
+        # ~/.claude/settings.json; Codex model+effort → ~/.codex/config.toml);
+        # the argv tokens (``--model`` etc.) are appended for flat commands
+        # only. Host siblings wrap their argv in an opaque SSH remote-shell
+        # string (and their dotfiles live on the host, unreachable here), so we
+        # skip argv injection for them — matching plain sessions' host
+        # behaviour. No-op for plain sessions (no initial_prompt).
+        if initial_prompt and (model or effort):
+            from .agents import (
+                _model_effort_extra,
+                _write_claude_settings,
+                _write_codex_config,
+            )
+
+            if effort and spec.key == "claude":
+                _write_claude_settings(effort)
+            if (model or effort) and spec.key in ("codex", "codex-host"):
+                _write_codex_config(model, effort)
+            if not getattr(spec, "host_staging", False):
+                cmd += _model_effort_extra(spec, model, effort)
 
         env = _build_env(spec)
         env.setdefault("TERM", "xterm-256color")
@@ -1237,6 +1302,11 @@ class SessionManager:
         except OSError:
             pass
 
+        # Set the first time the TUI produces any output — the injector waits
+        # on this (bounded by INITIAL_PROMPT_READY_TIMEOUT) so it doesn't type
+        # before the process is up and drawing its input box.
+        first_output = asyncio.Event()
+
         async def pump() -> None:
             """Pump raw PTY output -> channel, forever until process closes."""
             master = master_fd
@@ -1255,6 +1325,8 @@ class SessionManager:
                     display = raw.decode("utf-8", errors="replace")
                     offset = self._append_terminal_output(task_id, display)
                     ch_local.publish({"type": "output", "data": display, "offset": offset})
+                    if not first_output.is_set():
+                        first_output.set()
             except asyncio.CancelledError:
                 pass
             finally:
@@ -1262,7 +1334,46 @@ class SessionManager:
                     await self.end_session(task_id, project_id, terminate=False)
 
         asyncio.create_task(pump())
+
+        # Interactive Task/Goal: auto-type the composed initial prompt into the
+        # TUI once it is ready. Fire-and-forget so ``start`` returns promptly
+        # (the frontend connects its WS immediately after this POST returns).
+        if initial_prompt:
+            composed = build_session_initial_prompt(spec, initial_prompt, initial_goal)
+            asyncio.create_task(
+                self._inject_initial_prompt(task_id, composed, first_output)
+            )
         return True
+
+    async def _inject_initial_prompt(
+        self, task_id: str, text: str, ready: asyncio.Event
+    ) -> None:
+        """Type the initial prompt into a freshly-started session's PTY.
+
+        Waits for the TUI's first output (a proxy for "ready for input"), then a
+        short settle delay, then writes the prompt as a DEC bracketed paste
+        (``\\x1b[200~ … \\x1b[201~``) so a MULTI-line prompt is delivered as one
+        block instead of submitting line-by-line — the PTY is put into
+        ``?2004h`` on start. A brief pause later it presses Enter (``\\r``) to
+        submit. Best-effort: the session is fully usable even if injection
+        races the process exit.
+        """
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=self.INITIAL_PROMPT_READY_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        await asyncio.sleep(self.INITIAL_PROMPT_SETTLE_SECONDS)
+        if task_id not in self._procs:
+            return
+        try:
+            await self.send_message(task_id, f"\x1b[200~{text}\x1b[201~")
+            await asyncio.sleep(self.INITIAL_PROMPT_SUBMIT_DELAY)
+            if task_id in self._procs:
+                await self.send_message(task_id, "\r")
+        except Exception:  # noqa: BLE001
+            # A dead PTY / closed fd just means the user or agent ended the
+            # session during startup; nothing to recover.
+            pass
 
     def _fail_start(self, task_id: str, ch: SessionChannel, message: str) -> None:
         chunk = message + "\n"
@@ -1540,6 +1651,14 @@ class SessionManager:
         """Original end_session body, kept verbatim but isolated so the host
         lock removal in the outer ``end_session`` finally runs in every case.
         """
+        # ``signal`` must be in this scope: the outer ``end_session`` imports it
+        # locally, but that binding does NOT reach here. When a session still
+        # has a live process (terminate=True) we ``signal.SIGTERM`` it below —
+        # without this import that path raises NameError (``os`` is a module
+        # global, so only ``signal`` was missing).
+        import os
+        import signal
+
         proc_info = self._procs.pop(task_id, None)
         ch = self._channels.get(task_id)
         lock = self._locks.pop(task_id, None)
@@ -1613,6 +1732,10 @@ class SessionManager:
         git_dir = ""
         project_local_path = ""
         branch = settings.default_branch
+        # Plain sessions (mode == "session") prefix the auto subject with
+        # "Session: "; interactive Task/Goal sessions get the raw prompt subject
+        # like the non-interactive modes.
+        session_mode = "session"
         with session_scope() as db:
             proj = db.get(Project, project_id)
             if proj:
@@ -1621,11 +1744,13 @@ class SessionManager:
             t = db.get(Task, task_id)
             if t:
                 t.branch = branch
+                session_mode = t.mode
                 # Commit/push from the directory the session actually ran in
                 # (an isolated worktree for parallel sessions, else local_path).
                 git_dir = t.workdir or project_local_path
             elif proj:
                 git_dir = project_local_path
+        subject_prefix = "Session: " if session_mode == "session" else ""
 
         if git_dir and Path(git_dir).exists() and lock:
             async with lock:
@@ -1636,7 +1761,7 @@ class SessionManager:
                 first_line = _auto_commit_subject(task_id)
                 msg_full = (
                     commit_message.strip()
-                    or f"Session: {first_line}"
+                    or f"{subject_prefix}{first_line}"
                 )
                 if host_staging.is_staging_dir(git_dir):
                     # Off-host (host-staging) session: integrate the host copy back
@@ -1696,7 +1821,11 @@ class SessionManager:
                 task.commit_hash = commit_hash or ""
                 task.commit_message = (
                     commit_message.strip()
-                    or (f"Session: {_auto_commit_subject(task_id)}" if commit_created else "")
+                    or (
+                        f"{subject_prefix}{_auto_commit_subject(task_id)}"
+                        if commit_created
+                        else ""
+                    )
                 )
                 task.commit_created = commit_created
                 task.pushed = pushed

@@ -143,6 +143,10 @@ export default function ProjectDetail() {
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<TaskImagePayload[]>([]);
   const [sessionStartArgs, setSessionStartArgs] = useState("");
+  // "Interaktiv" checkbox (Task/Goal only): run the prompt inside a live PTY
+  // session — auto-typed once, then interactive (answer questions, interrupt,
+  // follow-up prompts). Requires the selected agent to support session mode.
+  const [interactive, setInteractive] = useState(false);
   // Per-task execution target selected through the Agent dropdown. Claude Code
   // and Hermes expose explicit container/SSH choices there; the backend still
   // receives the existing base-agent + runner payload for compatibility.
@@ -373,6 +377,17 @@ export default function ProjectDetail() {
     }
   }, [currentAgent, agents, mode, runner]);
 
+  // The "Interaktiv" toggle only applies to Task/Goal with a session-capable
+  // agent. Clear it when the agent can't do sessions (or we're in session
+  // mode, where it's redundant) so a stale check can't route a submit into a
+  // session that would immediately 400.
+  useEffect(() => {
+    if (!interactive) return;
+    if (mode === "session" || !currentAgent?.supports_session) {
+      setInteractive(false);
+    }
+  }, [interactive, mode, currentAgent]);
+
   /** Resolve the actual agent key for the selected choice. The UI exposes
    *  Container and Host via SSH through separate controls, but the backend
    *  stores the underlying AgentSpec key (e.g. ``claude`` vs ``claude-host``)
@@ -391,6 +406,12 @@ export default function ProjectDetail() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!agent || !prompt.trim()) return;
+    // "Interaktiv" runs the same prompt/goal inside a live PTY session instead
+    // of the one-shot console — seeded once, then interactive.
+    if (interactive && mode !== "session") {
+      await startInteractive();
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
@@ -480,6 +501,72 @@ export default function ProjectDetail() {
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Session konnte nicht gestartet werden");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /** Interactive Task/Goal: start a PTY session seeded with the prompt and
+   *  open its terminal window. Mirrors ``startSession`` but carries the
+   *  Task/Goal mode + prompt so the backend auto-types it once. */
+  async function startInteractive() {
+    if (!agent || !prompt.trim()) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const submitAgent = resolveSubmitAgentKey();
+      const seededPrompt = prompt.trim();
+      const { task_id } = await api.createSession(
+        id,
+        submitAgent,
+        model,
+        effort,
+        "",
+        runner,
+        envProfileKey,
+        mode,
+        seededPrompt,
+      );
+      setPrompt("");
+      setImages([]);
+      await refreshTasks();
+      const sessTask: Task = {
+        id: task_id,
+        project_id: id,
+        agent: submitAgent,
+        prompt: seededPrompt,
+        mode,
+        model,
+        effort,
+        images: [],
+        is_session: true,
+        chat_history: [],
+        status: "running",
+        exit_code: null,
+        result_summary: "",
+        error: "",
+        branch: "",
+        merge_state: "",
+        commit_hash: "",
+        commit_message: "",
+        commit_created: false,
+        pushed: false,
+        heartbeat_spawned: false,
+        heartbeat_issue_number: null,
+        heartbeat_commented_at: null,
+        heartbeat_closed_at: null,
+        runner,
+        env_profile_key: envProfileKey,
+        created_at: new Date().toISOString(),
+        started_at: null,
+        finished_at: null,
+      };
+      openAgentWindow(
+        toRunningTask(sessTask, project),
+        agentName[submitAgent] ?? submitAgent,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Interaktive Session konnte nicht gestartet werden");
     } finally {
       setSubmitting(false);
     }
@@ -757,6 +844,34 @@ export default function ProjectDetail() {
             </span>
           )}
         </div>
+        {mode !== "session" && (
+          <label
+            className={`flex items-start gap-2 text-sm ${
+              currentAgent?.supports_session
+                ? "text-slate-300"
+                : "cursor-not-allowed text-slate-600"
+            }`}
+            title={
+              currentAgent?.supports_session
+                ? "Führt den Prompt in einer echten TUI-Session aus – der Agent kann Rückfragen stellen, du kannst unterbrechen und weiterschreiben."
+                : "Dieser Agent unterstützt keinen Session-Modus."
+            }
+          >
+            <input
+              type="checkbox"
+              checked={interactive}
+              disabled={!currentAgent?.supports_session}
+              onChange={(e) => setInteractive(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              💬 Interaktiv – als Live-Session ausführen
+              <span className="ml-1 text-xs text-slate-500">
+                (Rückfragen beantworten, unterbrechen, weiter chatten)
+              </span>
+            </span>
+          </label>
+        )}
         {mode === "session" ? (
           <label className="block">
             <span className="mb-1 block text-sm text-slate-400">Startparameter</span>
@@ -786,7 +901,7 @@ export default function ProjectDetail() {
             className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
           />
         )}
-        {mode !== "session" && images.length > 0 && (
+        {mode !== "session" && !interactive && images.length > 0 && (
           <div className="flex flex-wrap gap-2">
             {images.map((img, i) => (
               <div key={`${img.name}-${i}`} className="relative">
@@ -809,7 +924,7 @@ export default function ProjectDetail() {
           </div>
         )}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          {mode !== "session" ? (
+          {mode !== "session" && !interactive ? (
             <div className="flex items-center gap-3">
               <input
                 ref={fileInputRef}
@@ -843,9 +958,11 @@ export default function ProjectDetail() {
             <p className="hidden text-xs text-slate-500 sm:block">
               {mode === "session"
                 ? "Interaktive TUI-Session. Nach dem Beenden werden Änderungen automatisch committet & gepusht."
-                : mode === "goal"
-                  ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
-                  : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
+                : interactive
+                  ? "Öffnet eine Live-Session: der Prompt wird einmal automatisch gesendet, danach kannst du antworten & weiterarbeiten. Beim Beenden wird automatisch committet & gepusht."
+                  : mode === "goal"
+                    ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
+                    : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
             </p>
             {mode === "session" ? (
               <Button
@@ -859,9 +976,13 @@ export default function ProjectDetail() {
               <Button type="submit" disabled={submitting || !agent || !prompt.trim()}>
                 {submitting
                   ? "Startet…"
-                  : mode === "goal"
-                    ? "Ziel starten"
-                    : "Aufgabe starten"}
+                  : interactive
+                    ? mode === "goal"
+                      ? "Ziel interaktiv starten"
+                      : "Interaktiv starten"
+                    : mode === "goal"
+                      ? "Ziel starten"
+                      : "Aufgabe starten"}
               </Button>
             )}
           </div>
@@ -951,6 +1072,14 @@ export default function ProjectDetail() {
                   {t.mode === "session" && (
                     <span className="rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-medium text-purple-300">
                       Session
+                    </span>
+                  )}
+                  {t.is_session && t.mode !== "session" && (
+                    <span
+                      className="rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-medium text-purple-300"
+                      title="Interaktive Live-Session (Prompt einmal automatisch gesendet)"
+                    >
+                      💬 interaktiv
                     </span>
                   )}
                   {t.merge_state === "conflict" && (

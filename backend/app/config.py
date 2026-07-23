@@ -380,6 +380,34 @@ Wichtiger Projekt-Kontext (immer beachten):
 """
 
 
+# Context appended to the INITIAL prompt that the dashboard auto-types into an
+# interactive session (the "Interaktiv" checkbox on Task/Goal). It keeps the two
+# rules that protect the auto-commit pipeline (never self-commit/push; maintain
+# AGENTS.md) but deliberately DROPS rule #6 ("stelle keine Rueckfragen") from
+# ``DEFAULT_CONTEXT_INSTRUCTION`` -- the whole point of this mode is that the
+# user is sitting at a live TUI and CAN answer questions, interrupt, and send
+# follow-up prompts. The dashboard commits + pushes when the user ends the
+# session, so a self-commit here would still break the pipeline exactly like in
+# task/goal mode.
+SESSION_CONTEXT_INSTRUCTION = """\
+Wichtiger Projekt-Kontext (immer beachten):
+1. Lies zuerst die Datei `AGENTS.md` im Projekt-Wurzelverzeichnis, falls vorhanden,
+   um Struktur, Tech-Stack, bisherige Entscheidungen und den aktuellen Stand zu verstehen.
+2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
+3. Aktualisiere danach `AGENTS.md` (lege sie an, falls nicht vorhanden): beschreibe knapp
+   und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
+   Stand und offene Punkte / Next Steps. Pflege ganz am Anfang einen kurzen, fuer Menschen
+   lesbaren "Letzter Durchlauf"-Block mit dem, was du in dieser Session getan hast.
+4. Committe oder pushe NICHT selbst (kein `git add` / `git commit` / `git push` /
+   `git checkout -b`) -- das Dashboard committet und pusht AUTOMATISCH, sobald du die
+   Session beendest. Ein eigener Commit wuerde die automatische Uebernahme aushebeln
+   (das Dashboard saehe eine saubere Working Tree und wuerde die Aenderungen verlieren).
+5. Dies ist eine INTERAKTIVE Session: Du DARFST dem User Rueckfragen stellen und auf
+   Antworten warten. Der User kann dich jederzeit unterbrechen und weitere Anweisungen
+   geben. Frag lieber einmal nach, statt eine riskante Annahme zu treffen.
+"""
+
+
 def default_agents() -> dict[str, AgentSpec]:
     """Built-in defaults used when config.yaml is missing or has no agents."""
     return {

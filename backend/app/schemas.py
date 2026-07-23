@@ -219,14 +219,29 @@ class SessionMessage(BaseModel):
 
 
 class SessionCreate(BaseModel):
-    """POST /sessions — start a new interactive session."""
+    """POST /sessions — start a new interactive session.
+
+    A plain session (``mode == "session"``) starts a bare TUI the user types
+    into. An INTERACTIVE Task/Goal (``mode`` is ``"task"``/``"goal"`` with a
+    non-empty ``initial_prompt`` — the "Interaktiv" checkbox on the start form)
+    is the same PTY session, but the dashboard auto-types ``initial_prompt``
+    into the TUI once and then hands control to the user (answer questions,
+    interrupt, follow-up prompts). ``mode == "goal"`` wraps the prompt in the
+    agent's ``goal_command``.
+    """
 
     project_id: str
     agent: str
     model: str = ""
     effort: str = ""
+    # "session" = plain TUI; "task"/"goal" = interactive Task/Goal (needs
+    # ``initial_prompt``; "goal" additionally requires the agent's goal_command).
+    mode: Literal["task", "goal", "session"] = "session"
+    # The prompt auto-typed into the TUI on start (interactive Task/Goal only).
+    initial_prompt: str = Field(default="", max_length=20000)
     # Shell-like argv string. It is parsed with shlex.split and appended to the
-    # configured session_command; no shell is invoked.
+    # configured session_command; no shell is invoked. Not used together with
+    # ``initial_prompt`` (interactive sessions start fresh, not via --resume).
     start_args: str = Field(default="", max_length=1000)
     # Same semantics as ``TaskCreate.runner`` / ``TaskCreate.env_profile_key``
     # — sessions can also be SSH'd into the host and/or run with an

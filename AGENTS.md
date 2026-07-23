@@ -157,6 +157,23 @@ over WS `/api/ws/sessions/{id}`. Bracketed paste (`?2004h` +
 Ctrl+Shift+V on purpose — the browser default paste event fires, which is
 what TUI image-paste shortcuts need.
 
+**Interactive Task/Goal (the "Interaktiv" checkbox)** — a Task/Goal run
+*as a session* so the user can answer the agent's questions, interrupt
+it, and send follow-up prompts. It is a normal `POST /api/sessions` with
+`mode="task"|"goal"` + `initial_prompt` (not a `TaskManager` run). Server
+side: `SessionManager.start()` gets `initial_prompt`/`initial_goal`, and
+after the TUI draws its first output (`first_output` event, bounded by
+`INITIAL_PROMPT_READY_TIMEOUT`) plus a settle delay, `_inject_initial_prompt`
+types the composed prompt as one bracketed paste + Enter. The prompt is
+built by `build_session_initial_prompt` = goal-wrap + `SESSION_CONTEXT_
+INSTRUCTION` (keeps "never self-commit / maintain AGENTS.md" but DROPS the
+"never ask questions" rule — the whole point). Model/effort are applied
+like task mode (dotfiles for built-in container agents; argv only for
+flat, non-`host_staging` commands). The row keeps `is_session=True` with
+`mode` staying `"task"`/`"goal"`, and `Task.prompt` holds the real prompt
+(so `_auto_commit_subject` uses it — plain sessions still prefer
+`result_summary`). Auto-commit/push on end is unchanged.
+
 **Env profiles** — `env_profiles` table + `/api/env-profiles` CRUD router.
 Stores `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` (Fernet-encrypted via
 `CD_SECRET_KEY`). `Task.env_profile_key` (and the session / heartbeat-spawn

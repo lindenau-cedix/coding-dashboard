@@ -253,7 +253,9 @@ export const api = {
       `/projects/${projectId}/file?path=${encodeURIComponent(path)}`,
     ),
 
-  // Session mode
+  // Session mode. ``mode``/``initialPrompt`` drive the interactive Task/Goal
+  // flow (the "Interaktiv" checkbox): mode "task"/"goal" + a prompt starts a
+  // PTY session that auto-types the prompt once, then stays interactive.
   createSession: (
     projectId: string,
     agent: string,
@@ -262,12 +264,16 @@ export const api = {
     startArgs = "",
     runner: Runner = "",
     envProfileKey = "",
+    mode: TaskMode = "session",
+    initialPrompt = "",
   ) =>
     request<{ task_id: string; status: string }>("POST", "/sessions", {
       project_id: projectId,
       agent,
       model,
       effort,
+      mode,
+      initial_prompt: initialPrompt,
       start_args: startArgs,
       runner,
       env_profile_key: envProfileKey,
@@ -279,6 +285,7 @@ export const api = {
       agent: string;
       model: string;
       effort: string;
+      mode: string;
       start_args: string;
       workdir?: string;
       chat_history: SessionMessage[];

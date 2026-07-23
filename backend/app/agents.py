@@ -136,6 +136,22 @@ def _write_codex_config(model: str, effort: str) -> None:
     config_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
+def _model_effort_extra(spec: AgentSpec, model: str, effort: str) -> list[str]:
+    """The argv tokens injected for the user's model/effort selection.
+
+    ``{model}`` / ``{effort}`` in the spec's ``model_args`` / ``effort_args``
+    are substituted with the chosen values.  Shared by ``_build_command``
+    (task/goal mode) and the interactive-session builder in ``task_runner`` so
+    both apply the selection the same way.
+    """
+    extra: list[str] = []
+    if model and spec.model_args:
+        extra += [t.replace("{model}", model) for t in spec.model_args]
+    if effort and spec.effort_args:
+        extra += [t.replace("{effort}", effort) for t in spec.effort_args]
+    return extra
+
+
 def _build_command(
     spec: AgentSpec,
     prompt: str,
@@ -155,11 +171,7 @@ def _build_command(
     # Inject the user's model/effort selection. Inserted before a trailing "-"
     # (stdin marker, e.g. codex) so the prompt positional stays last; appended
     # otherwise. This keeps explicit `command` lists in config.yaml working.
-    extra: list[str] = []
-    if model and spec.model_args:
-        extra += [t.replace("{model}", model) for t in spec.model_args]
-    if effort and spec.effort_args:
-        extra += [t.replace("{effort}", effort) for t in spec.effort_args]
+    extra = _model_effort_extra(spec, model, effort)
     if extra:
         if out and out[-1] == "-":
             out = out[:-1] + extra + ["-"]

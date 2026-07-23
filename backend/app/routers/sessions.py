@@ -54,6 +54,16 @@ async def create_session(
         raise HTTPException(400, f"Model '{body.model}' not supported by {spec.display_name}.")
     if body.effort and body.effort not in (spec.effort_choices or []):
         raise HTTPException(400, f"Effort '{body.effort}' not supported.")
+    # Interactive Task/Goal: needs an initial prompt; goal additionally needs
+    # the agent's goal_command. Plain sessions (mode="session") ignore both.
+    is_interactive = body.mode in ("task", "goal")
+    initial_prompt = body.initial_prompt.strip()
+    if is_interactive and not initial_prompt:
+        raise HTTPException(400, "Interaktive Session benötigt einen Prompt.")
+    if body.mode == "goal" and not spec.goal_command:
+        raise HTTPException(
+            400, f"Agent {spec.display_name} unterstützt keinen Goal-Modus."
+        )
     # Per-session "host" runner guard — same semantics as ``create_task``.
     if body.runner == "host":
         # Strip an already-present ``-host`` suffix so a stale/explicit
@@ -90,11 +100,14 @@ async def create_session(
     except ValueError as exc:
         raise HTTPException(400, f"Startparameter können nicht geparst werden: {exc}")
 
+    # For an interactive Task/Goal, ``Task.prompt`` holds the real prompt (good
+    # commit subject + history text) and ``mode`` records task/goal; start_args
+    # is unused. A plain session keeps ``Task.prompt`` = start_args, mode="session".
     task = Task(
         project_id=body.project_id,
         agent=body.agent,
-        prompt=start_args,
-        mode="session",
+        prompt=initial_prompt if is_interactive else start_args,
+        mode=body.mode,
         model=body.model,
         effort=body.effort,
         runner=body.runner,
@@ -114,9 +127,11 @@ async def create_session(
             body.agent,
             body.model,
             body.effort,
-            start_args=start_args,
+            start_args="" if is_interactive else start_args,
             runner=body.runner,
             env_profile_key=body.env_profile_key,
+            initial_prompt=initial_prompt if is_interactive else "",
+            initial_goal=body.mode == "goal",
         )
     except ValueError as exc:
         with session_scope() as sdb:
@@ -150,6 +165,9 @@ async def get_session(
         "agent": task.agent,
         "model": task.model,
         "effort": task.effort,
+        # For interactive Task/Goal ``prompt`` is the seeded prompt; for a plain
+        # session it is the start_args. ``mode`` lets the client tell them apart.
+        "mode": task.mode,
         "start_args": task.prompt or "",
         "workdir": task.workdir or "",
         "chat_history": json.loads(task.chat_history or "[]"),
