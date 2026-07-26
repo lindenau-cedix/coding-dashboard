@@ -429,7 +429,7 @@ def default_agents() -> dict[str, AgentSpec]:
             session_command=["claude"],
             model_choices=["opus", "sonnet", "haiku", "fable"],
             model_args=["--model", "{model}"],
-            effort_choices=["low", "medium", "high", "xhigh", "max"],
+            effort_choices=["low", "medium", "high", "xhigh", "max", "ultracode"],
             effort_args=["--effort", "{effort}"],
         ),
         "hermes": AgentSpec(

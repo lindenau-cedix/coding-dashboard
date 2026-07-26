@@ -232,13 +232,30 @@ def test_codex_parser() -> None:
 
 
 def test_command_building() -> None:
+    from app.config import default_agents
+
+    defaults = default_agents()
+    claude_default = defaults["claude"]
+    check(
+        "claude default exposes ultracode effort",
+        "ultracode" in claude_default.effort_choices,
+        str(claude_default.effort_choices),
+    )
+    codex_default = defaults["codex"]
+    check(
+        "codex effort choices stay separate",
+        "ultracode" not in codex_default.effort_choices
+        and codex_default.effort_args == ["-c", "model_reasoning_effort={effort}"],
+        f"choices={codex_default.effort_choices}, args={codex_default.effort_args}",
+    )
+
     spec = AgentSpec(
         key="c",
         display_name="C",
         command=["claude", "-p", "{prompt}"],
         model_choices=["opus"],
         model_args=["--model", "{model}"],
-        effort_choices=["high"],
+        effort_choices=["high", "ultracode"],
         effort_args=["--effort", "{effort}"],
     )
     cmd = _build_command(spec, "hi", "/proj", model="opus", effort="high")
@@ -246,6 +263,12 @@ def test_command_building() -> None:
         "model/effort args appended",
         cmd == ["claude", "-p", "hi", "--model", "opus", "--effort", "high"],
         str(cmd),
+    )
+    ultra_cmd = _build_command(spec, "hi", "/proj", effort="ultracode")
+    check(
+        "ultracode effort arg substituted",
+        ultra_cmd == ["claude", "-p", "hi", "--effort", "ultracode"],
+        str(ultra_cmd),
     )
     cmd0 = _build_command(spec, "hi", "/proj")
     check("no selection -> command unchanged", cmd0 == ["claude", "-p", "hi"], str(cmd0))
@@ -479,6 +502,7 @@ def test_config_backfill() -> None:
     check("backfill: codex prompt via stdin", codex.prompt_via == "stdin", codex.prompt_via)
     check("backfill: codex session command", codex.session_command == ["codex"], str(codex.session_command))
     check("backfill: claude model choices", "opus" in claude.model_choices, str(claude.model_choices))
+    check("backfill: claude ultracode effort", "ultracode" in claude.effort_choices, str(claude.effort_choices))
     check("backfill: claude effort args", claude.effort_args == ["--effort", "{effort}"], str(claude.effort_args))
     check(
         "backfill: codex writes last message file",

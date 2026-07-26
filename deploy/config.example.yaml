@@ -58,7 +58,7 @@ agents:
     # Pro Task wählbares Modell / Effort-Level (leer lassen = kein Dropdown).
     model_choices: ["opus", "sonnet", "haiku"]
     model_args: ["--model", "{model}"]
-    effort_choices: ["low", "medium", "high", "xhigh", "max"]
+    effort_choices: ["low", "medium", "high", "xhigh", "max", "ultracode"]
     effort_args: ["--effort", "{effort}"]
     enabled: true
     # timeout_seconds: 3600
