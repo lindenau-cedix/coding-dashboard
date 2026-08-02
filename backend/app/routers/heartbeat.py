@@ -191,7 +191,7 @@ def set_heartbeat_env_profile(
         )
         if exists is None:
             raise HTTPException(
-                404, f"Env-Profil '{key}' nicht gefunden."
+                404, f"Env profile '{key}' not found."
             )
     heartbeat.set_env_profile_key(key)
     return {"env_profile_key": heartbeat.env_profile_key}
@@ -221,7 +221,7 @@ def set_heartbeat_agent_key(
         if spec is None or not spec.enabled:
             raise HTTPException(
                 400,
-                f"Agent '{key}' ist nicht aktiviert. Verfügbar: "
+                f"Agent '{key}' is not enabled. Available: "
                 + ", ".join(sorted(agents.agents))
                 or "(keine)",
             )
@@ -244,7 +244,7 @@ def enable_project_heartbeat(
 ) -> dict:
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     p.heartbeat_enabled = True
     db.commit()
     return {"id": project_id, "heartbeat_enabled": True}
@@ -258,7 +258,7 @@ def disable_project_heartbeat(
 ) -> dict:
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     p.heartbeat_enabled = False
     db.commit()
     return {"id": project_id, "heartbeat_enabled": False}
@@ -283,7 +283,7 @@ def set_project_heartbeat_env_profile(
     """
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if body.env_profile_key:
         exists = (
             db.query(EnvProfile.id)
@@ -293,7 +293,7 @@ def set_project_heartbeat_env_profile(
         if exists is None:
             raise HTTPException(
                 404,
-                f"Env-Profil '{body.env_profile_key}' nicht gefunden.",
+                f"Env profile '{body.env_profile_key}' not found.",
             )
     p.heartbeat_env_profile_key = body.env_profile_key
     db.commit()
@@ -317,7 +317,7 @@ def list_seen_issues(
     whole story in one fetch.
     """
     if db.get(Project, project_id) is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     rows = (
         db.query(HeartbeatSeen)
         .filter(HeartbeatSeen.project_id == project_id)
@@ -379,7 +379,7 @@ async def list_open_issues(
     the ProjectDetail "GitHub Issues" expandable section."""
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if not p.github_full_name:
         return {"issues": [], "note": "no_github_full_name"}
     try:
@@ -428,9 +428,9 @@ async def heartbeat_comment_again(
 
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if not p.github_full_name:
-        raise HTTPException(400, "Projekt hat kein GitHub-Repo.")
+        raise HTTPException(400, "Project has no GitHub repo.")
     # The body is optional. ``force_new=False`` => PATCH existing comment.
     # We default to True so the operator's intent is explicit; we don't
     # currently read the body but mirror the pattern for future-proofing.
@@ -455,9 +455,9 @@ async def heartbeat_close_issue(
     """
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if not p.github_full_name:
-        raise HTTPException(400, "Projekt hat kein GitHub-Repo.")
+        raise HTTPException(400, "Project has no GitHub repo.")
     result = await heartbeat_followup.set_issue_state(
         p, int(issue_number), "closed"
     )
@@ -478,9 +478,9 @@ async def heartbeat_reopen_issue(
     """
     p = db.get(Project, project_id)
     if p is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if not p.github_full_name:
-        raise HTTPException(400, "Projekt hat kein GitHub-Repo.")
+        raise HTTPException(400, "Project has no GitHub repo.")
     result = await heartbeat_followup.set_issue_state(
         p, int(issue_number), "open"
     )

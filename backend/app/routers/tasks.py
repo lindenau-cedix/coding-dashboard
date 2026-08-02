@@ -71,7 +71,7 @@ def list_agents() -> list[AgentInfo]:
 @router.get("/projects/{project_id}/tasks", response_model=list[TaskOut])
 def list_tasks(project_id: str, db: Session = Depends(get_db)) -> list[Task]:
     if db.get(Project, project_id) is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     return (
         db.query(Task)
         .filter(Task.project_id == project_id)
@@ -89,22 +89,22 @@ async def create_task(
     project_id: str, body: TaskCreate, db: Session = Depends(get_db)
 ) -> Task:
     if db.get(Project, project_id) is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     cfg = get_agents_config()
     spec = cfg.agents.get(body.agent)
     if spec is None or not spec.enabled:
-        raise HTTPException(400, f"Unbekannter oder deaktivierter Agent: {body.agent}")
+        raise HTTPException(400, f"Unknown or disabled agent: {body.agent}")
     if body.mode == "goal" and not spec.goal_command:
         raise HTTPException(
-            400, f"Agent {spec.display_name} unterstützt keinen Goal-Modus."
+            400, f"Agent {spec.display_name} does not support goal mode."
         )
     if body.model and body.model not in spec.model_choices:
         raise HTTPException(
-            400, f"Agent {spec.display_name} unterstützt das Modell '{body.model}' nicht."
+            400, f"Agent {spec.display_name} does not support model '{body.model}'."
         )
     if body.effort and body.effort not in spec.effort_choices:
         raise HTTPException(
-            400, f"Agent {spec.display_name} unterstützt Effort '{body.effort}' nicht."
+            400, f"Agent {spec.display_name} does not support effort '{body.effort}'."
         )
     # Per-task "host" runner: must have an enabled "<agent>-host" sibling.
     # This is the operator-facing guard for the toggle on the start form;
@@ -122,9 +122,9 @@ async def create_task(
         if host_spec is None or not host_spec.enabled:
             raise HTTPException(
                 400,
-                f"Host-Runner fuer Agent '{base_agent}' nicht aktiviert. "
-                f"Setze CD_{base_agent.upper()}_SSH_USER in der Env-Datei "
-                f"und starte das Backend neu.",
+                f"Host runner for agent '{base_agent}' is not enabled. "
+                f"Set CD_{base_agent.upper()}_SSH_USER in the env file "
+                f"and restart the backend.",
             )
     # Env-profile must exist when set. ``EnvProfile.key`` is unique so we
     # look up directly — no SELECT roundtrip needed. An empty token in the
@@ -139,7 +139,7 @@ async def create_task(
         if exists is None:
             raise HTTPException(
                 404,
-                f"Env-Profil '{body.env_profile_key}' nicht gefunden.",
+                f"Env profile '{body.env_profile_key}' not found.",
             )
     # Decode/validate the attachments BEFORE creating the task row so a bad
     # upload rejects the whole request without leaving artifacts behind.
@@ -175,7 +175,7 @@ async def create_task(
 def get_task(task_id: str, db: Session = Depends(get_db)) -> Task:
     task = db.get(Task, task_id)
     if task is None:
-        raise HTTPException(404, "Task nicht gefunden.")
+        raise HTTPException(404, "Task not found.")
     return task
 
 
@@ -183,20 +183,20 @@ def get_task(task_id: str, db: Session = Depends(get_db)) -> Task:
 def get_task_image(task_id: str, name: str, db: Session = Depends(get_db)) -> FileResponse:
     task = db.get(Task, task_id)
     if task is None:
-        raise HTTPException(404, "Task nicht gefunden.")
+        raise HTTPException(404, "Task not found.")
     # Only names recorded on the task are served — no path traversal possible.
     names = json.loads(task.images) if task.images else []
     if name not in names:
-        raise HTTPException(404, "Bild nicht gefunden.")
+        raise HTTPException(404, "Image not found.")
     path = uploads.task_image_dir(task_id) / name
     if not path.exists():
-        raise HTTPException(404, "Bilddatei nicht (mehr) vorhanden.")
+        raise HTTPException(404, "Image file no longer available.")
     return FileResponse(path, media_type=uploads.media_type(name))
 
 
 @router.post("/tasks/{task_id}/stop")
 async def stop_task(task_id: str, db: Session = Depends(get_db)) -> dict:
     if db.get(Task, task_id) is None:
-        raise HTTPException(404, "Task nicht gefunden.")
+        raise HTTPException(404, "Task not found.")
     stopped = await manager.stop(task_id)
     return {"stopped": stopped}

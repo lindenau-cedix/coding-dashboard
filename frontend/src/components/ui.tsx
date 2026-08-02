@@ -1,6 +1,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation } from "react-i18next";
 import type { TaskStatus } from "../types";
 
 type Variant = "primary" | "ghost" | "danger" | "subtle";
@@ -49,17 +50,8 @@ const STATUS_STYLES: Record<string, string> = {
   cancelled: "bg-slate-600 text-slate-200",
 };
 
-const STATUS_LABELS: Record<string, string> = {
-  queued: "Wartet",
-  running: "Läuft",
-  success: "Erfolg",
-  failed: "Fehlgeschlagen",
-  error: "Fehler",
-  interrupted: "Unterbrochen",
-  cancelled: "Abgebrochen",
-};
-
 export function StatusBadge({ status }: { status: TaskStatus }) {
+  const { t } = useTranslation();
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${
@@ -67,7 +59,7 @@ export function StatusBadge({ status }: { status: TaskStatus }) {
       }`}
     >
       {status === "running" && <Spinner className="h-3 w-3" />}
-      {STATUS_LABELS[status] ?? status}
+      {t(`status.${status}`, status)}
     </span>
   );
 }
@@ -143,6 +135,7 @@ export function FullscreenShell({
   children: ReactNode;
   headerRight?: ReactNode;
 }) {
+  const { t } = useTranslation();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -161,7 +154,7 @@ export function FullscreenShell({
             onClick={onClose}
             className="rounded-lg border border-slate-700 px-3 py-1 text-sm text-slate-300 hover:bg-slate-800"
           >
-            Schließen ✕
+            {t("common.close")} ✕
           </button>
         </div>
       </div>
@@ -191,7 +184,8 @@ export function ErrorText({
 export function formatDate(iso: string | null): string {
   if (!iso) return "–";
   const d = parseApiDate(iso);
-  return d.toLocaleString("de-DE", {
+  // English locale keeps the dashboard consistent regardless of the UI language.
+  return d.toLocaleString("en-GB", {
     dateStyle: "medium",
     timeStyle: "short",
   });

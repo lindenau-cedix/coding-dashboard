@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 import SessionTerminalModal from "../components/SessionTerminalModal";
@@ -25,6 +26,7 @@ export default function AgentWindowPage({
 }: {
   kind: "task" | "session";
 }) {
+  const { t } = useTranslation();
   const { taskId = "" } = useParams();
   const [task, setTask] = useState<Task | null>(null);
   const [project, setProject] = useState<Project | null>(null);
@@ -53,7 +55,7 @@ export default function AgentWindowPage({
       } catch (err) {
         if (active) {
           setError(
-            err instanceof Error ? err.message : "Agent-Fenster konnte nicht geladen werden",
+            err instanceof Error ? err.message : t("agentWindow.unavailable"),
           );
         }
       } finally {
@@ -63,7 +65,7 @@ export default function AgentWindowPage({
     return () => {
       active = false;
     };
-  }, [taskId]);
+  }, [taskId, t]);
 
   const agentName = useMemo(() => {
     const m: Record<string, string> = {};
@@ -77,9 +79,9 @@ export default function AgentWindowPage({
     if (kind === "session") {
       return `${who} · Session${task.prompt ? ` — ${task.prompt.slice(0, 60)}` : ""}`;
     }
-    const modeLabel = task.mode === "goal" ? "Ziel" : "Aufgabe";
+    const modeLabel = task.mode === "goal" ? t("running.goal") : t("running.task");
     return `${who} · ${modeLabel}${task.prompt ? ` — ${task.prompt.slice(0, 80)}` : ""}`;
-  }, [agentName, kind, task]);
+  }, [agentName, kind, task, t]);
 
   function close() {
     // Closing the popup tab is the natural "I'm done watching" gesture. We
@@ -106,20 +108,20 @@ export default function AgentWindowPage({
   if (error || !task || !project) {
     return (
       <div className="flex h-screen flex-col items-center justify-center gap-4 bg-slate-950 p-6 text-center">
-        <ErrorText>{error || "Agent-Fenster nicht verfügbar."}</ErrorText>
+        <ErrorText>{error || t("agentWindow.unavailable")}</ErrorText>
         <a
           href="#/"
           className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
         >
-          ← Zurück zum Dashboard
+          {t("session.backToDashboard")}
         </a>
       </div>
     );
   }
 
   // For sessions the SessionTerminalModal brings its own dark backdrop +
-  // title bar with Schließen / Vollbild / Session beenden. We just wire
-  // its onClose to close() so a single click on "Schließen" closes the
+  // title bar with Close / Fullscreen / End session. We just wire
+  // its onClose to close() so a single click on "Close" closes the
   // popup tab — fixing the old "double-click to close" behaviour.
   if (kind === "session") {
     return (
@@ -134,8 +136,8 @@ export default function AgentWindowPage({
   }
 
   // For tasks / goals we render TaskConsole inside a minimal shell with a
-  // single "Schließen" button. The user can use the console's own Vollbild
-  // toggle; "Schließen" only closes this popup tab, not the agent run.
+  // single "Close" button. The user can use the console's own Fullscreen
+  // toggle; "Close" only closes this popup tab, not the agent run.
   return (
     <div className="flex h-screen flex-col bg-slate-950">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-800 bg-slate-900 px-4 py-2">
@@ -143,9 +145,9 @@ export default function AgentWindowPage({
         <button
           onClick={close}
           className="rounded-lg border border-slate-700 px-2.5 py-1 text-xs text-slate-200 hover:bg-slate-800"
-          title="Fenster schließen (läuft im Hintergrund weiter)"
+          title={t("session.closeWindow")}
         >
-          ✕ Schließen
+          ✕ {t("session.close")}
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">

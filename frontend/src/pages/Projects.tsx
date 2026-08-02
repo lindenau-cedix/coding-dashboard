@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 import NewProjectModal from "../components/NewProjectModal";
@@ -10,6 +11,7 @@ import type { Project } from "../types";
 type ArchiveFilter = "active" | "archived";
 
 export default function Projects() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [archiveFilter, setArchiveFilter] = useState<ArchiveFilter>("active");
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -22,7 +24,7 @@ export default function Projects() {
       const archived = archiveFilter === "archived" ? "true" : "false";
       setProjects(await api.listProjects(archived));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Laden fehlgeschlagen");
+      setError(err instanceof Error ? err.message : "Load failed");
     }
   }, [archiveFilter]);
 
@@ -33,7 +35,7 @@ export default function Projects() {
   async function remove(p: Project) {
     if (
       !confirm(
-        `Projekt "${p.name}" lokal entfernen?\n(Das GitHub-Repository bleibt bestehen.)`,
+        `Remove project "${p.name}" locally?\n(The GitHub repository stays.)`,
       )
     )
       return;
@@ -41,7 +43,7 @@ export default function Projects() {
       await api.deleteProject(p.id, false);
       setProjects((prev) => prev?.filter((x) => x.id !== p.id) ?? null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Löschen fehlgeschlagen");
+      setError(err instanceof Error ? err.message : t("projects.deleteFailed"));
     }
   }
 
@@ -50,9 +52,7 @@ export default function Projects() {
     if (wasArchived) {
       // Restoring is reversible; no confirm needed.
     } else if (
-      !confirm(
-        `Projekt "${p.name}" archivieren?\n\nEs verschwindet aus der Standardansicht, bleibt aber auf der Festplatte und in der Historie erhalten. Über "Archiv anzeigen" kannst du es jederzeit zurückholen.`,
-      )
+      !confirm(t("projects.archiveConfirm", { name: p.name }))
     ) {
       return;
     }
@@ -69,10 +69,9 @@ export default function Projects() {
       void load();
       setError("");
     } catch (err) {
+      const verb = wasArchived ? "Restore" : "Archive";
       setError(
-        `${wasArchived ? "Wiederherstellen" : "Archivieren"} fehlgeschlagen: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `${verb} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -80,20 +79,19 @@ export default function Projects() {
   const emptyHint =
     archiveFilter === "active"
       ? {
-          title: "Noch keine aktiven Projekte.",
+          title: "No active projects yet.",
           body: (
             <>
-              Lege ein neues an, importiere ein bestehendes GitHub-Repo oder
-              klone alle Repos auf einmal über <em>Sync von GitHub</em>.
+              Create a new one, import an existing GitHub repo, or clone all
+              your repos at once via <em>{t("projects.syncFromGithub")}</em>.
             </>
           ),
         }
       : {
-          title: "Keine archivierten Projekte.",
+          title: t("projects.noArchived"),
           body: (
             <>
-              Über das <em>📦</em>-Symbol auf einer Projektkarte kannst du
-              ein nicht mehr aktiv benötigtes Projekt hierher auslagern.
+              {t("projects.emptyArchivedHint", { icon: "📦" })}
             </>
           ),
         };
@@ -101,12 +99,12 @@ export default function Projects() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-2xl font-semibold text-slate-100">Projekte</h1>
+        <h1 className="text-2xl font-semibold text-slate-100">{t("projects.title")}</h1>
         <div className="flex items-center gap-2">
           {/* Archive toggle: two pills, mutually exclusive. */}
           <div
             role="tablist"
-            aria-label="Projektfilter"
+            aria-label="Project filter"
             className="inline-flex overflow-hidden rounded-lg border border-slate-700"
           >
             <button
@@ -119,7 +117,7 @@ export default function Projects() {
                   : "bg-slate-800 text-slate-300 hover:bg-slate-700"
               }`}
             >
-              Aktiv
+              {t("projects.active")}
             </button>
             <button
               role="tab"
@@ -131,13 +129,13 @@ export default function Projects() {
                   : "bg-slate-800 text-slate-300 hover:bg-slate-700"
               }`}
             >
-              📦 Archiv
+              📦 {t("projects.archived")}
             </button>
           </div>
           <Button variant="ghost" onClick={() => setShowSync(true)}>
-            ⇣ Sync von GitHub
+            ⇣ {t("projects.syncFromGithub")}
           </Button>
-          <Button onClick={() => setShowModal(true)}>+ Neues Projekt</Button>
+          <Button onClick={() => setShowModal(true)}>+ {t("projects.newProject")}</Button>
         </div>
       </div>
 
@@ -173,7 +171,7 @@ export default function Projects() {
                   </Link>
                   {p.archived && (
                     <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300">
-                      Archiviert
+                      {t("projects.archived")}
                     </span>
                   )}
                   <HeartbeatChip p={p} />
@@ -181,16 +179,16 @@ export default function Projects() {
                 <div className="flex items-center gap-1">
                   <button
                     onClick={() => toggleArchive(p)}
-                    title={p.archived ? "Aus Archiv zurückholen" : "Archivieren"}
-                    aria-label={p.archived ? "Aus Archiv zurückholen" : "Archivieren"}
+                    title={p.archived ? t("projects.unarchive") : t("projects.archive")}
+                    aria-label={p.archived ? t("projects.unarchive") : t("projects.archive")}
                     className="rounded-lg px-2 py-1 text-slate-600 opacity-0 transition-opacity hover:bg-slate-800 hover:text-cyan-400 group-hover:opacity-100"
                   >
                     {p.archived ? "↩" : "📦"}
                   </button>
                   <button
                     onClick={() => remove(p)}
-                    title="Projekt entfernen"
-                    aria-label="Projekt entfernen"
+                    title="Remove project"
+                    aria-label="Remove project"
                     className="rounded-lg px-2 py-1 text-slate-600 opacity-0 transition-opacity hover:bg-slate-800 hover:text-red-400 group-hover:opacity-100"
                   >
                     🗑
@@ -214,8 +212,8 @@ export default function Projects() {
                 )}
                 <span>•</span>
                 {p.archived && p.archived_at ? (
-                  <span title={`Archiviert: ${formatDate(p.archived_at)}`}>
-                    Archiviert {formatDate(p.archived_at)}
+                  <span title={`Archived: ${formatDate(p.archived_at)}`}>
+                    Archived {formatDate(p.archived_at)}
                   </span>
                 ) : (
                   <span>{formatDate(p.updated_at)}</span>
@@ -223,7 +221,7 @@ export default function Projects() {
               </div>
               <div className="mt-4">
                 <Button variant="subtle" onClick={() => navigate(`/projects/${p.id}`)}>
-                  Öffnen →
+                  {t("projects.open")} →
                 </Button>
               </div>
             </div>
@@ -256,14 +254,15 @@ export default function Projects() {
  *  GitHub repo, or recently errored). Tap = nothing — full controls live
  *  on the /heartbeat page (linked from the global nav). */
 function HeartbeatChip({ p }: { p: Project }) {
+  const { t } = useTranslation();
   if (p.archived) return null;
   if (!p.heartbeat_enabled) {
     return (
       <span
         className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-xs font-medium text-slate-500"
-        title="Heartbeat für dieses Projekt deaktiviert"
+        title={t("projects.heartbeatOffTooltip")}
       >
-        🤖 aus
+        🤖 off
       </span>
     );
   }
@@ -272,9 +271,9 @@ function HeartbeatChip({ p }: { p: Project }) {
     return (
       <span
         className="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-xs font-medium text-red-300"
-        title={p.last_heartbeat_error || "Heartbeat-Fehler"}
+        title={p.last_heartbeat_error || "Heartbeat error"}
       >
-        🤖 Fehler
+        🤖 {t("heartbeat.error")}
       </span>
     );
   }
@@ -286,11 +285,11 @@ function HeartbeatChip({ p }: { p: Project }) {
         : "bg-cyan-500/15 text-cyan-300";
   const lastTick = p.last_heartbeat_at
     ? relativeTime(parseApiDate(p.last_heartbeat_at))
-    : "noch nie";
+    : "never";
   return (
     <span
       className={`shrink-0 rounded px-1.5 py-0.5 text-xs font-medium ${tone}`}
-      title={`Heartbeat aktiv · letzte Prüfung ${lastTick}`}
+      title={t("projects.heartbeatActiveTooltip", { time: lastTick })}
     >
       🤖 {lastTick}
     </span>
@@ -299,8 +298,8 @@ function HeartbeatChip({ p }: { p: Project }) {
 
 function relativeTime(d: Date): string {
   const diff = Date.now() - d.getTime();
-  if (diff < 60_000) return "gerade eben";
-  if (diff < 3_600_000) return `vor ${Math.round(diff / 60_000)} Min`;
-  if (diff < 86_400_000) return `vor ${Math.round(diff / 3_600_000)} Std`;
+  if (diff < 60_000) return "just now";
+  if (diff < 3_600_000) return `${Math.round(diff / 60_000)} min ago`;
+  if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)} h ago`;
   return formatDate(d.toISOString());
 }

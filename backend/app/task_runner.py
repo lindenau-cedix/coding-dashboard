@@ -72,8 +72,8 @@ def _build_env_overlay(env_profile_key: str, ch) -> dict[str, str]:
                 {
                     "type": "output",
                     "data": (
-                        f"[warn] Env-Profil '{env_profile_key}' nicht gefunden – "
-                        f"ueberspringe env-overlay\n"
+                        f"[warn] Env profile '{env_profile_key}' not found – "
+                        f"skipping env-overlay\n"
                     ),
                 }
             )
@@ -94,9 +94,9 @@ def _build_env_overlay(env_profile_key: str, ch) -> dict[str, str]:
                     {
                         "type": "output",
                         "data": (
-                            f"[warn] Env-Profil '{env_profile_key}': Token konnte "
-                            f"nicht entschluesselt werden (CD_SECRET_KEY rotiert?); "
-                            f"ueberspringe ANTHROPIC_AUTH_TOKEN\n"
+                            f"[warn] Env profile '{env_profile_key}': token could "
+                            f"not be decrypted (CD_SECRET_KEY rotated?); "
+                            f"skipping ANTHROPIC_AUTH_TOKEN\n"
                         ),
                     }
                 )
@@ -134,10 +134,9 @@ def build_agent_prompt(
     if image_paths:
         listing = "\n".join(f"- {p}" for p in image_paths)
         base += (
-            "\n\nAngehängte Bilder (lokale Dateien — öffne sie mit deinem"
-            " Datei-/Bild-Lese-Tool und beziehe ihren Inhalt in die Aufgabe ein;"
-            " sie liegen außerhalb des Repos und dürfen nicht hineinkopiert"
-            " werden):\n" + listing
+            "\n\nAttached images (local files — open them with your"
+            " file/image-reading tool and incorporate their content into the task;"
+            " they live outside the repo and must not be copied into it):\n" + listing
         )
     return f"{base}\n\n---\n{context_instruction}"
 
@@ -193,7 +192,7 @@ def _auto_commit_subject(task_id: str) -> str:
     ``result_summary`` instead.  For an INTERACTIVE session (the "Interaktiv"
     checkbox on Task/Goal → ``mode`` stays ``"task"``/``"goal"``)
     ``Task.prompt`` IS the user's real prompt, so we prefer it exactly like
-    task/goal mode (the generic "Interaktive TUI-Session beendet" summary is
+    task/goal mode (the generic "Interactive TUI session ended" summary is
     written before this runs and must not win).  Returns ``"update"`` when the
     row is missing or both fields are blank, and ``"Session"`` for plain
     sessions missing both.  Truncated to 72 chars total so the commit subject
@@ -286,7 +285,7 @@ def _merge_worktree_branch(
                 commit_created = True
                 messages.append(f"[git] commit {commit_hash[:8]}: {first_line}\n")
         else:
-            messages.append("[git] keine Aenderungen zu committen\n")
+            messages.append("[git] no changes to commit\n")
 
         merged, _out = git_ops.merge_branch(
             project_dir, branch, f"Merge {branch} (Coding Dashboard)"
@@ -301,19 +300,19 @@ def _merge_worktree_branch(
                 if not commit_hash:
                     commit_hash = git_ops.head_commit(project_dir)
             except Exception as exc:  # noqa: BLE001
-                messages.append(f"[git] push fehlgeschlagen: {exc}\n")
+                messages.append(f"[git] push failed: {exc}\n")
         else:
             merge_state = "conflict"
             messages.append(
-                f"[git] Merge-Konflikt: {branch} bleibt erhalten (manueller Merge nötig)\n"
+                f"[git] Merge conflict: {branch} kept (manual merge required)\n"
             )
             try:
                 git_ops.push_ref(project_dir, branch, branch, token)
-                messages.append(f"[git] Branch {branch} -> origin gepusht\n")
+                messages.append(f"[git] Branch {branch} -> origin pushed\n")
             except Exception as exc:  # noqa: BLE001
-                messages.append(f"[git] Branch-Push fehlgeschlagen: {exc}\n")
+                messages.append(f"[git] Branch-Push failed: {exc}\n")
     except Exception as exc:  # noqa: BLE001
-        messages.append(f"[git] Fehler: {exc}\n")
+        messages.append(f"[git] Error: {exc}\n")
     finally:
         git_ops.remove_worktree(project_dir, worktree_dir)
         shutil.rmtree(worktree_dir, ignore_errors=True)
@@ -402,7 +401,7 @@ class TaskManager:
             self._cleanup_staging(task_id)
             tb = traceback.format_exc()
             self._mark(task_id, status="error", error=f"{exc}\n{tb}", finished=True)
-            ch.publish({"type": "output", "data": f"\n[interner Fehler] {exc}\n"})
+            ch.publish({"type": "output", "data": f"\n[internal error] {exc}\n"})
             ch.publish({"type": "status", "status": "error"})
             self._publish_done(ch, task_id)
         finally:
@@ -437,7 +436,7 @@ class TaskManager:
             task = db.get(Task, task_id)
             project = db.get(Project, project_id)
             if task is None or project is None:
-                raise RuntimeError("Task oder Projekt nicht gefunden")
+                raise RuntimeError("Task or project not found")
             agent_key = task.agent
             prompt = task.prompt
             mode = task.mode
@@ -458,10 +457,10 @@ class TaskManager:
             self._mark(
                 task_id,
                 status="error",
-                error=f"Unbekannter oder deaktivierter Agent: {agent_key}",
+                error=f"Unknown or disabled agent: {agent_key}",
                 finished=True,
             )
-            ch.publish({"type": "output", "data": f"[Fehler] Unbekannter Agent: {agent_key}\n"})
+            ch.publish({"type": "output", "data": f"[Error] Unknown agent: {agent_key}\n"})
             ch.publish({"type": "status", "status": "error"})
             self._publish_done(ch, task_id)
             return
@@ -477,9 +476,9 @@ class TaskManager:
             sibling = agents.agents.get(sibling_key)
             if sibling is None or not sibling.enabled:
                 msg = (
-                    f"Host-Runner fuer Agent '{agent_key}' nicht aktiviert. "
-                    f"Setze CD_{agent_key.upper()}_SSH_USER in der Env-Datei "
-                    f"und starte das Backend neu."
+                    f"Host runner for agent '{agent_key}' is not enabled. "
+                    f"Set CD_{agent_key.upper()}_SSH_USER in the env file "
+                    f"and restart the backend."
                 )
                 self._mark(
                     task_id,
@@ -487,7 +486,7 @@ class TaskManager:
                     error=msg,
                     finished=True,
                 )
-                ch.publish({"type": "output", "data": f"[Fehler] {msg}\n"})
+                ch.publish({"type": "output", "data": f"[Error] {msg}\n"})
                 ch.publish({"type": "status", "status": "error"})
                 self._publish_done(ch, task_id)
                 return
@@ -540,8 +539,8 @@ class TaskManager:
                 ch.publish(
                     {
                         "type": "git",
-                        "data": f"[git] Host-Arbeitskopie fehlgeschlagen ({exc}); "
-                        f"nutze Hauptverzeichnis\n",
+                        "data": f"[git] host working copy failed ({exc}); "
+                        f"using main directory\n",
                     }
                 )
                 run_dir, run_branch = project_dir, branch
@@ -555,7 +554,7 @@ class TaskManager:
                 ch.publish(
                     {
                         "type": "git",
-                        "data": f"[git] Worktree fehlgeschlagen ({exc}); nutze Hauptverzeichnis\n",
+                        "data": f"[git] Worktree failed ({exc}); using main directory\n",
                     }
                 )
                 run_dir, run_branch = project_dir, branch
@@ -567,7 +566,7 @@ class TaskManager:
         image_paths = uploads.image_paths(task_id, image_names)
         if image_paths:
             ch.publish(
-                {"type": "output", "data": f"[bilder] {len(image_paths)} Bild(er) angehängt\n"}
+                {"type": "output", "data": f"[images] {len(image_paths)} image(s) attached\n"}
             )
         full_prompt = build_agent_prompt(
             spec, prompt, mode, agents.context_instruction, image_paths=image_paths
@@ -658,7 +657,7 @@ class TaskManager:
                     ch.publish({"type": "git", "data": f"[git] fetch: {fetch_out}\n"})
             except Exception as exc:  # noqa: BLE001
                 ch.publish(
-                    {"type": "git", "data": f"[git] auto-pull: fetch fehlgeschlagen ({exc}); nutze lokales HEAD\n"}
+                    {"type": "git", "data": f"[git] auto-pull: fetch failed ({exc}); using lokales HEAD\n"}
                 )
                 return
 
@@ -686,8 +685,8 @@ class TaskManager:
                     {
                         "type": "git",
                         "data": (
-                            f"[git] auto-pull: fast-forward nicht möglich ({exc}); "
-                            "fahre mit lokalem HEAD fort\n"
+                            f"[git] auto-pull: fast-forward not possible ({exc}); "
+                            "continuing with local HEAD\n"
                         ),
                     }
                 )
@@ -792,7 +791,7 @@ class TaskManager:
         ch.publish(
             {
                 "type": "git",
-                "data": f"[git] Host-Arbeitskopie {staging_dir} "
+                "data": f"[git] host working copy {staging_dir} "
                 f"(Merge als Branch {branch})\n",
             }
         )
@@ -849,7 +848,7 @@ class TaskManager:
         ch: TaskChannel,
     ) -> None:
         if not project_dir or not Path(project_dir).exists():
-            ch.publish({"type": "git", "data": "[git] uebersprungen (kein lokales Repo)\n"})
+            ch.publish({"type": "git", "data": "[git] skipped (no local repo)\n"})
             return
         token = settings.github_token
         try:
@@ -880,7 +879,7 @@ class TaskManager:
                         task.commit_message = first_line
                         task.commit_created = bool(commit)
             else:
-                ch.publish({"type": "git", "data": "[git] keine Aenderungen zu committen\n"})
+                ch.publish({"type": "git", "data": "[git] no changes to commit\n"})
 
             try:
                 await asyncio.to_thread(git_ops.push, project_dir, branch, token)
@@ -893,9 +892,9 @@ class TaskManager:
                         if not task.commit_hash:
                             task.commit_hash = head
             except Exception as exc:  # noqa: BLE001
-                ch.publish({"type": "git", "data": f"[git] push fehlgeschlagen: {exc}\n"})
+                ch.publish({"type": "git", "data": f"[git] push failed: {exc}\n"})
         except Exception as exc:  # noqa: BLE001
-            ch.publish({"type": "git", "data": f"[git] Fehler: {exc}\n"})
+            ch.publish({"type": "git", "data": f"[git] Error: {exc}\n"})
 
     _LETZTE_TASKS_RE = re.compile(r"(?m)^##\s*Letzte Tasks\s*$.*", re.DOTALL)
 
@@ -1097,9 +1096,9 @@ class SessionManager:
             sibling = agents.agents.get(sibling_key)
             if sibling is None or not sibling.enabled:
                 raise ValueError(
-                    f"Host-Runner fuer Agent {agent_key!r} nicht aktiviert. "
-                    f"Setze CD_{agent_key.upper()}_SSH_USER in der Env-Datei "
-                    f"und starte das Backend neu."
+                    f"Host runner for agent {agent_key!r} is not enabled. "
+                    f"Set CD_{agent_key.upper()}_SSH_USER in the env file "
+                    f"and restart the backend."
                 )
             if not sibling.session_command:
                 raise ValueError(
@@ -1224,7 +1223,7 @@ class SessionManager:
         try:
             master_fd, slave_fd = os.openpty()
         except OSError as exc:
-            msg = f"[Fehler] PTY konnte nicht erstellt werden: {exc}"
+            msg = f"[Error] PTY could not be created: {exc}"
             self._fail_start(task_id, ch, msg)
             return False
 
@@ -1238,7 +1237,7 @@ class SessionManager:
         except OSError as exc:
             os.close(master_fd)
             os.close(slave_fd)
-            msg = f"[Fehler] fork() fehlgeschlagen: {exc}"
+            msg = f"[Error] fork() failed: {exc}"
             self._fail_start(task_id, ch, msg)
             return False
 
@@ -1262,7 +1261,7 @@ class SessionManager:
                 signal.signal(signal.SIGINT, signal.SIG_DFL)
                 os.execvpe(cmd[0], cmd, env)
             except Exception as exc:  # noqa: BLE001
-                print(f"[Fehler] Session-Kommando konnte nicht gestartet werden: {exc}", flush=True)
+                print(f"[Error] Session command could not be started: {exc}", flush=True)
                 os._exit(127)
         else:
             # Parent: close slave, keep master.
@@ -1451,7 +1450,7 @@ class SessionManager:
                 self._make_session_worktree, project_id, task_id, project_dir
             )
             if worktree:
-                return worktree, f"[parallel] Isolierte Arbeitskopie: {worktree}\n"
+                return worktree, f"[parallel] Isolated working copy: {worktree}\n"
 
         return project_dir, ""
 
@@ -1472,9 +1471,9 @@ class SessionManager:
             host_staging.ensure_session_copy, project_dir, staging, resume
         )
         if resume:
-            note = f"[resume] Host-Arbeitskopie: {staging}\n"
+            note = f"[resume] host working copy: {staging}\n"
         else:
-            note = f"[host] Arbeitskopie auf dem Host: {staging}\n"
+            note = f"[host] host working copy: {staging}\n"
         return staging, note
 
     def _primary_busy(self, project_id: str, project_dir: str) -> bool:
@@ -1522,7 +1521,7 @@ class SessionManager:
             )
             if ch:
                 ch.publish(
-                    {"type": "git", "data": "[git] Isolierte Arbeitskopie aufgeraeumt\n"}
+                    {"type": "git", "data": "[git] Isolated working copy aufgeraeumt\n"}
                 )
         except Exception:  # noqa: BLE001
             pass
@@ -1710,7 +1709,7 @@ class SessionManager:
                 status = "failed"
 
         output_text = self._get_terminal_output(task_id)
-        summary = "Interaktive TUI-Session beendet"
+        summary = "Interactive TUI session ended"
 
         settings = get_settings()
         with session_scope() as db:
@@ -1719,9 +1718,9 @@ class SessionManager:
                 task.output = output_text
                 # Preserve any agent-written result_summary so the auto-generated
                 # commit subject (and the UI history list) reflect the agent's
-                # final outcome. Only fall back to the generic German summary
+                # final outcome. Only fall back to the generic English summary
                 # when the agent never wrote one.
-                task.result_summary = task.result_summary or summary or "Session beendet"
+                task.result_summary = task.result_summary or summary or "Session ended"
                 task.status = status
                 task.exit_code = exit_code
                 task.finished_at = _now()
@@ -1876,7 +1875,7 @@ class SessionManager:
                         f"[git] commit {commit_hash[:8]}: {commit_message.splitlines()[0]}\n"
                     )
             else:
-                messages.append("[git] keine Aenderungen zu committen\n")
+                messages.append("[git] no changes to commit\n")
             try:
                 git_ops.push(project_dir, branch, token)
                 pushed = True
@@ -1884,9 +1883,9 @@ class SessionManager:
                     commit_hash = git_ops.head_commit(project_dir)
                 messages.append(f"[git] push -> origin/{branch} OK\n")
             except Exception as exc:  # noqa: BLE001
-                messages.append(f"[git] push fehlgeschlagen: {exc}\n")
+                messages.append(f"[git] push failed: {exc}\n")
         except Exception as exc:  # noqa: BLE001
-            messages.append(f"[git] Fehler: {exc}\n")
+            messages.append(f"[git] Error: {exc}\n")
             commit_hash = ""
             commit_created = False
             pushed = False

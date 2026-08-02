@@ -225,7 +225,7 @@ def _final_output(text: str, max_chars: int = 2000) -> str:
             result = result[: max_chars - 200 + cut]
         else:
             result = result[:max_chars]
-        result = result.strip() + "\n[... gekürzt ...]"
+        result = result.strip() + "\n[... truncated ...]"
     return result
 
 
@@ -266,7 +266,7 @@ class _ClaudeJSONParser:
         if t == "system":
             if evt.get("subtype") == "init":
                 model = evt.get("model", "")
-                return f"[claude] Session gestartet{f' ({model})' if model else ''}\n"
+                return f"[claude] Session started{f' ({model})' if model else ''}\n"
             return ""
         if t == "assistant":
             return self._format_message(evt.get("message", {}))
@@ -477,7 +477,7 @@ async def _run_agent_inner(
     await on_output(f"$ {' '.join(spec.command)}\n")
     if model or effort:
         sel = " ".join(x for x in (model, effort) if x)
-        await on_output(f"[auswahl] {sel}\n")
+        await on_output(f"[selection] {sel}\n")
     await on_output(f"[cwd] {cwd}\n\n")
 
     # For Claude Code, write effort to ~/.claude/settings.json so it is honoured
@@ -507,11 +507,11 @@ async def _run_agent_inner(
         )
     except FileNotFoundError as exc:
         msg = (
-            f"[Fehler] Agent-Binary nicht gefunden: {cmd[0]!r}. "
-            f"Pruefe 'command' in config.yaml und den PATH des Service-Users.\n({exc})\n"
+            f"[Error] Agent binary not found: {cmd[0]!r}. "
+            f"Check 'command' in config.yaml and the PATH of the service user.\n({exc})\n"
         )
         await on_output(msg)
-        return AgentResult(127, msg, "Binary nicht gefunden", is_error=True)
+        return AgentResult(127, msg, "Binary not found", is_error=True)
 
     if spec.prompt_via == "stdin" and proc.stdin is not None:
         proc.stdin.write(prompt.encode("utf-8"))
@@ -553,7 +553,7 @@ async def _run_agent_inner(
         await proc.wait()
     except asyncio.TimeoutError:
         proc.kill()
-        msg = f"\n[Timeout nach {spec.timeout_seconds}s -- Agent abgebrochen]\n"
+        msg = f"\n[Timeout after {spec.timeout_seconds}s -- agent cancelled]\n"
         transcript.append(msg)
         await on_output(msg)
         return AgentResult(124, "".join(transcript), "Timeout", is_error=True)

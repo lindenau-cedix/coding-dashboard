@@ -125,10 +125,10 @@ def integrate(
             if commit_hash:
                 commit_created = True
                 messages.append(
-                    f"[git] commit {commit_hash[:8]} (Host-Arbeitskopie): {first_line}\n"
+                    f"[git] commit {commit_hash[:8]} (host working copy): {first_line}\n"
                 )
         else:
-            messages.append("[git] keine Aenderungen zu committen\n")
+            messages.append("[git] no changes to commit\n")
 
         # Pull the staging copy's HEAD into the canonical repo as a feature branch,
         # then reuse the normal merge-into-default-branch path.
@@ -146,22 +146,22 @@ def integrate(
                 if not commit_hash:
                     commit_hash = git_ops.head_commit(project_dir)
             except Exception as exc:  # noqa: BLE001
-                messages.append(f"[git] push fehlgeschlagen: {exc}\n")
+                messages.append(f"[git] push failed: {exc}\n")
         else:
             merge_state = "conflict"
             messages.append(
-                f"[git] Merge-Konflikt: {feature_branch} bleibt erhalten "
-                f"(bitte manuell mergen, dann 'Pull')\n"
+                f"[git] Merge conflict: {feature_branch} is kept "
+                f"(please merge manually, then 'Pull')\n"
             )
             try:
                 git_ops.push_ref(project_dir, feature_branch, feature_branch, token)
-                messages.append(f"[git] Branch {feature_branch} -> origin gepusht\n")
+                messages.append(f"[git] Branch {feature_branch} -> origin pushed\n")
                 if not commit_hash:
                     commit_hash = git_ops.head_commit(staging_dir)
             except Exception as exc:  # noqa: BLE001
-                messages.append(f"[git] Branch-Push fehlgeschlagen: {exc}\n")
+                messages.append(f"[git] Branch-Push failed: {exc}\n")
     except Exception as exc:  # noqa: BLE001
-        messages.append(f"[git] Fehler: {exc}\n")
+        messages.append(f"[git] Error: {exc}\n")
     finally:
         if merge_state == "merged":
             git_ops.delete_branch(project_dir, feature_branch, force=True)

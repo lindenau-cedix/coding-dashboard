@@ -24,7 +24,7 @@ export default function Heartbeat() {
   // in that case.
   const [profiles, setProfiles] = useState<EnvProfile[]>([]);
   // Per-(project,issue) dashboard comment + close state, keyed so the
-  // recent-tasks list can show "💬 vor 12 Min" / "✓ geschlossen"
+  // recent-tasks list can show "💬 vor 12 Min" / "✓ closed"
   // without a second fetch per row.
   const [issueStatus, setIssueStatus] = useState<
     Record<string, HeartbeatIssueSeen>
@@ -187,13 +187,12 @@ export default function Heartbeat() {
           🤖 Heartbeat
         </h1>
         <p className="text-sm text-slate-400">
-          Prüft regelmäßig die offenen GitHub-Issues der aktiven Projekte und
-          startet für jedes neue Issue automatisch einen {status.agent_key}-Task,
-          der das Problem untersucht und als PR mit dem Titel
+          Periodically checks the open GitHub issues of active projects and
+          automatically starts a {status.agent_key} task for each new issue,
+          which investigates the problem and returns it as a PR titled
           <code className="ml-1 rounded bg-slate-800 px-1 py-0.5 text-xs">
             Fix #N: …
-          </code>{" "}
-          zurückgibt.
+          </code>.
         </p>
       </header>
 
@@ -211,18 +210,18 @@ export default function Heartbeat() {
               aria-hidden
             />
             <span className="text-base font-medium text-slate-100">
-              {status.enabled ? "Heartbeat aktiv" : "Heartbeat pausiert"}
+              {status.enabled ? "Heartbeat active" : "Heartbeat paused"}
             </span>
             <span className="text-xs text-slate-400">
-              · Intervall alle {Math.round(status.interval_seconds / 60)} Min
-              · Cooldown {status.cooldown_minutes} Min pro Projekt
+              · Interval every {Math.round(status.interval_seconds / 60)} Min
+              · Cooldown {status.cooldown_minutes} Min pro Project
             </span>
             {status.assignee_logins.length > 0 && (
               <span
                 className="text-xs text-slate-400"
-                title="Heartbeat fixiert nur Issues, die einer dieser Logins zugewiesen sind"
+                title="Heartbeat only fixes issues assigned to one of these logins"
               >
-                · Filtert auf:{" "}
+                · Filtered to:{" "}
                 {status.assignee_logins.map((a, i) => (
                   <span key={a}>
                     <span className="font-mono text-slate-200">@{a}</span>
@@ -237,7 +236,7 @@ export default function Heartbeat() {
               variant="ghost"
               disabled={busy}
               onClick={triggerNow}
-              title="Einmal sofort einen Tick ausführen (fire-and-forget)"
+              title="Run a tick immediately (fire-and-forget)"
             >
               ▶ Run now
             </Button>
@@ -247,7 +246,7 @@ export default function Heartbeat() {
                 disabled={busy}
                 onClick={() => flipGlobal(false)}
               >
-                Pausieren
+                Pause
               </Button>
             ) : (
               <Button
@@ -255,7 +254,7 @@ export default function Heartbeat() {
                 disabled={busy}
                 onClick={() => flipGlobal(true)}
               >
-                Aktivieren
+                Activate
               </Button>
             )}
           </div>
@@ -272,8 +271,8 @@ export default function Heartbeat() {
               className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100 outline-none focus:border-cyan-500 disabled:opacity-60"
               title={
                 status.available_agent_keys.length <= 1
-                  ? "Kein <agent>-host Sibling aktiviert (setze CD_<AGENT>_SSH_USER und starte neu)."
-                  : "Bestimmt, welcher Agent der Heartbeat pro Issue startet. In-Memory; resettet beim Neustart."
+                  ? "No <agent>-host sibling enabled (set CD_<AGENT>_SSH_USER and restart)."
+                  : "Determines which agent the heartbeat starts per issue. In-memory; resets on restart."
               }
             >
               {status.available_agent_keys.length === 0 ? (
@@ -290,7 +289,7 @@ export default function Heartbeat() {
             {status.agent_key.endsWith("-host") && (
               <span
                 className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
-                title="Per SSH auf dem Host (CD_<AGENT>_SSH_USER)"
+                title="Via SSH on the host (CD_<AGENT>_SSH_USER)"
               >
                 🖥 host
               </span>
@@ -298,7 +297,7 @@ export default function Heartbeat() {
           </span>
           <span className="flex items-center gap-2">
             <label className="text-xs uppercase tracking-wide text-slate-400">
-              Default Env-Profil
+              Default env profile
             </label>
             <select
               value={status.env_profile_key}
@@ -307,11 +306,11 @@ export default function Heartbeat() {
               className="rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100 outline-none focus:border-cyan-500 disabled:opacity-60"
               title={
                 profiles.length === 0
-                  ? "Keine Env-Profile angelegt (lege welche unter /settings/env-profiles an)."
-                  : "Globaler Default für auto-gestartete Tasks. Pro-Projekt-Override (rechts) schlägt diesen."
+                  ? "No env profiles created (create one under /settings/env-profiles)."
+                  : "Global default for auto-started tasks. Per-project override (right) takes precedence."
               }
             >
-              <option value="">Standard (CD_HEARTBEAT_ENV_PROFILE_KEY)</option>
+              <option value="">Default (CD_HEARTBEAT_ENV_PROFILE_KEY)</option>
               {profiles.map((pr) => (
                 <option key={pr.key} value={pr.key}>
                   {pr.name}
@@ -321,34 +320,33 @@ export default function Heartbeat() {
           </span>
         </div>
         <p className="mt-3 text-xs text-slate-500">
-          Der globale Schalter gilt nur im laufenden Prozess. Für einen
-          dauerhaften Default setze{" "}
+          The global toggle only applies in the running process. For a permanent default set{" "}
           <code className="rounded bg-slate-800 px-1 py-0.5">
             CD_HEARTBEAT_ENABLED=true
           </code>{" "}
-          in der Service-Konfiguration und starte neu.
+          in the service configuration and restart.
         </p>
       </section>
 
       <section className="space-y-3">
-        <h2 className="text-lg font-medium text-slate-100">Projekte</h2>
+        <h2 className="text-lg font-medium text-slate-100">Projects</h2>
         {status.projects.length === 0 ? (
           <p className="rounded-2xl border border-slate-800 bg-slate-900/40 p-6 text-sm text-slate-400">
-            Keine aktiven Projekte mit GitHub-Verknüpfung. Importiere ein
-            Repo auf der Startseite, um es hier zu sehen.
+            No active projects with a GitHub link. Import a repo on the home
+            page to see it here.
           </p>
         ) : (
           <div className="overflow-hidden rounded-2xl border border-slate-800">
             <table className="w-full text-left text-sm">
               <thead className="bg-slate-900/70 text-xs uppercase tracking-wide text-slate-400">
                 <tr>
-                  <th className="px-4 py-2.5">Projekt</th>
+                  <th className="px-4 py-2.5">Project</th>
                   <th className="px-4 py-2.5">Repo</th>
-                  <th className="px-4 py-2.5">Letzter Tick</th>
+                  <th className="px-4 py-2.5">Last tick</th>
                   <th className="px-4 py-2.5">Status</th>
-                  <th className="px-4 py-2.5">Offen</th>
-                  <th className="px-4 py-2.5">Env-Profil</th>
-                  <th className="px-4 py-2.5 text-right">Aktion</th>
+                  <th className="px-4 py-2.5">Open</th>
+                  <th className="px-4 py-2.5">Env profile</th>
+                  <th className="px-4 py-2.5 text-right">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -370,12 +368,11 @@ export default function Heartbeat() {
 
       <section className="space-y-3">
         <h2 className="text-lg font-medium text-slate-100">
-          Zuletzt automatisch gestartete Tasks
+          Recently auto-started tasks
         </h2>
         {recent.length === 0 ? (
           <p className="rounded-2xl border border-slate-800 bg-slate-900/40 p-6 text-sm text-slate-400">
-            Noch keine Heartbeat-Tasks. Sobald ein neues Issue auftaucht,
-            taucht hier der zugehörige Fix-Versuch auf.
+            No heartbeat tasks yet. As soon as a new issue appears, the corresponding fix attempt shows up here.
           </p>
         ) : (
           <ul className="divide-y divide-slate-800 overflow-hidden rounded-2xl border border-slate-800">
@@ -436,7 +433,7 @@ function ProjectRow({
       </td>
       <td className="px-4 py-3 text-xs text-slate-400">
         {p.github_full_name || (
-          <span className="italic text-slate-600">kein GitHub</span>
+          <span className="italic text-slate-600">no GitHub</span>
         )}
       </td>
       <td className="px-4 py-3 text-xs text-slate-400">
@@ -458,7 +455,7 @@ function ProjectRow({
       <td className="px-4 py-3 text-xs text-slate-400">
         {p.inflight_task_ids.length > 0 ? (
           <span className="font-mono text-amber-300">
-            {p.inflight_task_ids.length} laufend
+            {p.inflight_task_ids.length} running
           </span>
         ) : (
           <span className="text-slate-600">–</span>
@@ -472,11 +469,11 @@ function ProjectRow({
           className="w-full max-w-[10rem] rounded-lg border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-100 outline-none focus:border-cyan-500 disabled:opacity-60"
           title={
             profiles.length === 0
-              ? "Keine Env-Profile angelegt (lege welche unter /settings/env-profiles an)."
-              : "Leer = Standard (CD_HEARTBEAT_ENV_PROFILE_KEY / kein Env-Overlay)"
+              ? "No env profiles created (create one under /settings/env-profiles)."
+              : "Empty = default (CD_HEARTBEAT_ENV_PROFILE_KEY / no env overlay)"
           }
         >
-          <option value="">Standard (global / leer)</option>
+          <option value="">Default (global / empty)</option>
           {profiles.map((pr) => (
             <option key={pr.key} value={pr.key}>
               {pr.name}
@@ -493,7 +490,7 @@ function ProjectRow({
             p.enabled ? "bg-cyan-500" : "bg-slate-700"
           } ${busy ? "opacity-50" : ""}`}
           aria-pressed={p.enabled}
-          title={p.enabled ? "Heartbeat für dieses Projekt deaktivieren" : "Heartbeat für dieses Projekt aktivieren"}
+          title={p.enabled ? "Deactivate heartbeat for this project" : "Activate heartbeat for this project"}
         >
           <span
             className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
@@ -507,17 +504,17 @@ function ProjectRow({
 }
 
 function heartbeatStatusLabel(p: HeartbeatProjectStatus): string {
-  if (!p.enabled) return "Aus";
-  if (!p.github_full_name) return "Kein Repo";
-  if (!p.last_heartbeat_status) return "Noch nicht geprüft";
+  if (!p.enabled) return "Off";
+  if (!p.github_full_name) return "No repo";
+  if (!p.last_heartbeat_status) return "Not yet checked";
   const map: Record<string, string> = {
-    success: "Erfolg",
-    no_issues: "Keine neuen Issues",
+    success: "Success",
+    no_issues: "No new issues",
     cooldown: "Cooldown",
-    disabled: "Aus",
-    error: "Fehler",
-    skipped: "Übersprungen",
-    no_github: "Kein Repo",
+    disabled: "Off",
+    error: "Error",
+    skipped: "Skipped",
+    no_github: "No repo",
   };
   return map[p.last_heartbeat_status] ?? p.last_heartbeat_status;
 }
@@ -632,22 +629,22 @@ function RecentTaskRow({
               className="inline-flex items-center gap-1 rounded-full bg-cyan-500/20 px-2 py-0.5 text-cyan-200 hover:bg-cyan-500/30"
               title={seen?.last_comment_url || undefined}
             >
-              💬 Kommentar · {formatDate(commentedAt)}
+              💬 Comment · {formatDate(commentedAt)}
             </a>
           )}
           {issueState === "closed" && (
             <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-emerald-300">
-              ✓ geschlossen{closedAt ? ` · ${formatDate(closedAt)}` : ""}
+              ✓ closed{closedAt ? ` · ${formatDate(closedAt)}` : ""}
             </span>
           )}
           {issueState === "open" && (
             <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-300">
-              ↻ wieder geöffnet{closedAt ? ` · ${formatDate(closedAt)}` : ""}
+              ↻ reopened{closedAt ? ` · ${formatDate(closedAt)}` : ""}
             </span>
           )}
           {!commentedAt && !issueState && seen && (
             <span className="inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-slate-400">
-              noch kein Kommentar
+              no comment yet
             </span>
           )}
           {commentError && (
@@ -655,7 +652,7 @@ function RecentTaskRow({
               className="inline-flex items-center gap-1 rounded-full bg-red-500/20 px-2 py-0.5 text-red-300"
               title={commentError}
             >
-              ⚠ GitHub-Fehler
+              ⚠ GitHub-Error
             </span>
           )}
         </div>
@@ -667,27 +664,27 @@ function RecentTaskRow({
             variant="ghost"
             disabled={issueBusy}
             onClick={onCommentAgain}
-            title="Einen weiteren Dashboard-Kommentar unter dem Issue posten"
+            title="Post another dashboard comment on the issue"
           >
-            💬 Neu kommentieren
+            💬 Comment again
           </Button>
           {issueState === "closed" ? (
             <Button
               variant="ghost"
               disabled={issueBusy}
               onClick={onReopen}
-              title="Issue wieder öffnen, damit der Heartbeat es erneut bearbeitet"
+              title="Reopen the issue so the heartbeat will reprocess it"
             >
-              ↻ Wieder öffnen
+              ↻ Reopen
             </Button>
           ) : (
             <Button
               variant="ghost"
               disabled={issueBusy}
               onClick={onClose}
-              title="Issue manuell schließen"
+              title="Close the issue manually"
             >
-              ✓ Schließen
+              ✓ Close
             </Button>
           )}
         </div>

@@ -30,12 +30,12 @@ def login(body: LoginRequest) -> TokenResponse:
     if not settings.admin_password_hash:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Kein Admin-Passwort konfiguriert (CD_ADMIN_PASSWORD_HASH).",
+            detail="No admin password configured (CD_ADMIN_PASSWORD_HASH).",
         )
     if not authenticate_user(body.username, body.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Falscher Benutzername oder Passwort.",
+            detail="Wrong username or password.",
         )
     token = create_access_token(body.username)
     return TokenResponse(access_token=token, username=body.username)

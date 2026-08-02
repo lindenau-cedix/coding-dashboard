@@ -137,7 +137,7 @@ def _seed_default_env_profile() -> None:
         db.add(
             EnvProfile(
                 key="default-anthropic",
-                name="Standard (Anthropic)",
+                name="Default (Anthropic)",
                 anthropic_base_url="",
                 anthropic_auth_token_encrypted="",
             )

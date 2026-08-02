@@ -1,19 +1,20 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import { subscribe as subscribeCrossTab } from "../crossTab";
 import type { RunningTask } from "../types";
 import { Spinner, StatusBadge } from "./ui";
 import { openAgentWindow } from "./WindowManager";
 
-function modeLabel(t: RunningTask): string {
-  if (t.is_session || t.mode === "session") return "Session";
-  if (t.mode === "goal") return "Ziel";
-  return "Aufgabe";
+function modeLabel(task: RunningTask, tp: (k: string) => string): string {
+  if (task.is_session || task.mode === "session") return tp("running.session");
+  if (task.mode === "goal") return tp("running.goal");
+  return tp("running.task");
 }
 
-function modeChipClass(t: RunningTask): string {
-  if (t.is_session || t.mode === "session") return "bg-purple-500/15 text-purple-300";
-  if (t.mode === "goal") return "bg-cyan-500/15 text-cyan-300";
+function modeChipClass(task: RunningTask): string {
+  if (task.is_session || task.mode === "session") return "bg-purple-500/15 text-purple-300";
+  if (task.mode === "goal") return "bg-cyan-500/15 text-cyan-300";
   return "bg-slate-700/60 text-slate-300";
 }
 
@@ -23,6 +24,7 @@ function modeChipClass(t: RunningTask): string {
  *  TaskConsole. The project itself is NOT navigated to — clicking just opens
  *  the agent's window, exactly as the user requested. */
 export default function RunningAgents() {
+  const { t } = useTranslation();
   const [running, setRunning] = useState<RunningTask[] | null>(null);
   const [names, setNames] = useState<Record<string, string>>({});
 
@@ -52,7 +54,7 @@ export default function RunningAgents() {
 
     // Cross-tab fix: when a sibling tab ends a task / session, the polling
     // cycle above would still show it for up to 3 s. Listen on the
-    // BroadcastChannel and re-poll immediately so the "Laufende Agenten"
+    // BroadcastChannel and re-poll immediately so the "Running agents"
     // panel updates the moment the popup / console reports done (issue #5).
     const unsubscribe = subscribeCrossTab((event) => {
       if (event.type === "task-done" || event.type === "session-done") {
@@ -77,7 +79,7 @@ export default function RunningAgents() {
               <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
             </span>
           )}
-          Laufende Agenten
+          {t("running.title")}
           {running && running.length > 0 && (
             <span className="text-sm text-slate-500">({running.length})</span>
           )}
@@ -86,47 +88,47 @@ export default function RunningAgents() {
       </div>
 
       {running !== null && running.length === 0 && (
-        <p className="px-5 pb-4 text-sm text-slate-500">Aktuell arbeitet kein Agent.</p>
+        <p className="px-5 pb-4 text-sm text-slate-500">{t("running.empty")}</p>
       )}
 
       {running !== null && running.length > 0 && (
         <div className="divide-y divide-slate-800 border-t border-slate-800">
-          {running.map((t) => (
+          {running.map((task) => (
             <button
-              key={t.id}
+              key={task.id}
               type="button"
-              onClick={() => openAgentWindow(t, names[t.agent] ?? t.agent)}
+              onClick={() => openAgentWindow(task, names[task.agent] ?? task.agent)}
               className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-left transition hover:bg-slate-800/50"
-              title="Agent-Fenster öffnen"
+              title={t("running.openWindow")}
             >
-              <StatusBadge status={t.status} />
+              <StatusBadge status={task.status} />
               <span className="text-sm font-medium text-slate-200">
-                {names[t.agent] ?? t.agent}
+                {names[task.agent] ?? task.agent}
               </span>
-              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${modeChipClass(t)}`}>
-                {modeLabel(t)}
+              <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${modeChipClass(task)}`}>
+                {modeLabel(task, (k) => t(k) as string)}
               </span>
-              {t.runner === "host" && (
+              {task.runner === "host" && (
                 <span
                   className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
-                  title="Auf dem Host per SSH ausgefuehrt"
+                  title={t("running.hostTitle")}
                 >
-                  🖥 host
+                  {t("running.hostChip")}
                 </span>
               )}
-              {t.env_profile_key && (
+              {task.env_profile_key && (
                 <span
                   className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300"
-                  title={`Env-Profil: ${t.env_profile_key}`}
+                  title={t("running.envProfileTitle", { key: task.env_profile_key })}
                 >
-                  🔑 {t.env_profile_key}
+                  🔑 {task.env_profile_key}
                 </span>
               )}
-              <span className="text-sm text-cyan-400">{t.project_name || t.project_slug}</span>
+              <span className="text-sm text-cyan-400">{task.project_name || task.project_slug}</span>
               <span className="min-w-0 flex-1 truncate text-sm text-slate-400">
-                {t.prompt || (t.is_session ? "interaktive Session" : "")}
+                {task.prompt || (task.is_session ? t("running.interactiveSession") : "")}
               </span>
-              <span className="text-xs text-slate-600">öffnen →</span>
+              <span className="text-xs text-slate-600">{t("running.openArrow")}</span>
             </button>
           ))}
         </div>

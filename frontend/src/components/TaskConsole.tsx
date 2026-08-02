@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api, ensureCloudflareAccess, getToken, wsUrl } from "../api";
 import { broadcast } from "../crossTab";
 import type { Task, TaskStatus, WsMessage } from "../types";
@@ -15,6 +16,7 @@ export default function TaskConsole({
   onDone?: (task: Task) => void;
   onDismiss?: () => void;
 }) {
+  const { t } = useTranslation();
   const [lines, setLines] = useState("");
   const [status, setStatus] = useState<TaskStatus>("queued");
   const [fullscreen, setFullscreen] = useState(false);
@@ -35,7 +37,7 @@ export default function TaskConsole({
       } catch (err) {
         setLines((prev) =>
           prev +
-          `\n[Fehler] ${err instanceof Error ? err.message : "Cloudflare Access fehlgeschlagen"}\n`,
+          `\n[Error] ${err instanceof Error ? err.message : "Cloudflare Access failed"}\n`,
         );
         return;
       }
@@ -61,18 +63,18 @@ export default function TaskConsole({
         } else if (msg.type === "done") {
           const task = (msg as { task: Task }).task;
           setStatus(task.status);
-          // Cross-tab notification: a sibling tab's "Laufende Agenten" panel
+          // Cross-tab notification: a sibling tab's "Running Agents" panel
           // (or a project-history view) needs to drop this task from its
           // /running view immediately, not on the next 3s poll. See #5.
           broadcast({ type: "task-done", taskId, status: task.status });
           onDoneRef.current?.(task);
         } else if (msg.type === "error") {
           const m = (msg as { message: string }).message;
-          setLines((prev) => prev + `\n[Fehler] ${m}\n`);
+          setLines((prev) => prev + `\n[Error] ${m}\n`);
         }
       };
       ws.onerror = () => {
-        setLines((prev) => prev + "\n[Fehler] WebSocket-Verbindung fehlgeschlagen.\n");
+        setLines((prev) => prev + "\n" + t("common.wsError") + "\n");
       };
     })();
 
@@ -82,7 +84,7 @@ export default function TaskConsole({
         ws.close();
       }
     };
-  }, [taskId]);
+  }, [taskId, t]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -109,20 +111,22 @@ export default function TaskConsole({
         </Button>
       )}
       <IconButton
-        label={fullscreen ? "Vollbild verlassen" : "Vollbild"}
+        label={fullscreen ? t("common.exitFullscreen") : t("common.fullscreen")}
         onClick={() => setFullscreen((v) => !v)}
       >
         {fullscreen ? "🗗" : "⛶"}
       </IconButton>
       {!running && onDismiss && (
-        <IconButton label="Ausblenden" onClick={onDismiss}>
+        <IconButton label={t("common.hide")} onClick={onDismiss}>
           ✕
         </IconButton>
       )}
     </>
   );
 
-  const body = lines || <span className="text-slate-600">Warte auf Ausgabe…</span>;
+  const body = lines || (
+    <span className="text-slate-600">{t("common.waitingForOutput")}</span>
+  );
 
   return (
     <>
@@ -147,7 +151,7 @@ export default function TaskConsole({
           title={
             <span className="flex items-center gap-2">
               <StatusBadge status={status} />
-              {title ?? "Live-Ausgabe"}
+              {title ?? "Live output"}
             </span>
           }
           onClose={() => setFullscreen(false)}

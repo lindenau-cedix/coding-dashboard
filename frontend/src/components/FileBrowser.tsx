@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import type { DirListing, FileContent, FileEntry } from "../types";
 import { FullscreenShell, IconButton, Spinner } from "./ui";
@@ -15,6 +16,7 @@ function fileIcon(entry: FileEntry): string {
 
 /** A small file browser for a project's working tree with a side-by-side viewer. */
 export default function FileBrowser({ projectId }: { projectId: string }) {
+  const { t } = useTranslation();
   const [path, setPath] = useState("");
   const [listing, setListing] = useState<DirListing | null>(null);
   const [loadingDir, setLoadingDir] = useState(false);
@@ -33,7 +35,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
       setListing(res);
       setPath(res.path);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Verzeichnis konnte nicht geladen werden");
+      setError(e instanceof Error ? e.message : t("fileBrowser.loadDirectoryFailed"));
     } finally {
       setLoadingDir(false);
     }
@@ -61,7 +63,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
     } catch (e) {
       if (id === reqId.current) {
         setFile(null);
-        setError(e instanceof Error ? e.message : "Datei konnte nicht geladen werden");
+        setError(e instanceof Error ? e.message : t("fileBrowser.loadFileFailed"));
       }
     } finally {
       if (id === reqId.current) setLoadingFile(false);
@@ -76,7 +78,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
         onClick={() => void loadDir("")}
         className={`rounded px-1.5 py-0.5 hover:bg-slate-800 hover:text-cyan-300 ${path === "" ? "text-slate-200" : ""}`}
       >
-        root
+        {t("common.root")}
       </button>
       {segments.map((seg, i) => {
         const sub = segments.slice(0, i + 1).join("/");
@@ -99,7 +101,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
         {breadcrumb}
-        <IconButton label="Aktualisieren" onClick={() => void loadDir(path)}>
+        <IconButton label={t("common.refresh")} onClick={() => void loadDir(path)}>
           {loadingDir ? <Spinner className="h-3.5 w-3.5" /> : "⟳"}
         </IconButton>
       </div>
@@ -113,7 +115,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
           </button>
         )}
         {listing?.entries.length === 0 && (
-          <p className="px-3 py-2 text-sm text-slate-600">Leeres Verzeichnis.</p>
+          <p className="px-3 py-2 text-sm text-slate-600">{t("common.emptyDirectory")}</p>
         )}
         {listing?.entries.map((entry) => (
           <button
@@ -140,7 +142,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
     if (!selected) {
       return (
         <div className="flex h-full items-center justify-center text-sm text-slate-600">
-          Datei auswählen, um den Inhalt anzuzeigen.
+          {t("common.selectFile")}
         </div>
       );
     }
@@ -154,14 +156,14 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
     if (!file) {
       return (
         <div className="flex h-full items-center justify-center text-sm text-slate-600">
-          (kein Inhalt)
+          {t("common.noContent")}
         </div>
       );
     }
     if (file.is_binary) {
       return (
         <div className="flex h-full items-center justify-center text-sm text-slate-500">
-          Binärdatei – {fmtSize(file.size)}
+          {t("common.binaryFile", { size: fmtSize(file.size) })}
         </div>
       );
     }
@@ -171,7 +173,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
       >
         {file.content}
         {file.truncated && (
-          <span className="mt-2 block text-amber-400">[… Datei gekürzt – nur erste 512 KB …]</span>
+          <span className="mt-2 block text-amber-400">{t("common.truncatedFile")}</span>
         )}
       </pre>
     );
@@ -182,7 +184,7 @@ export default function FileBrowser({ projectId }: { projectId: string }) {
       <div className="flex items-center justify-between gap-2 border-b border-slate-800 px-3 py-2">
         <span className="truncate font-mono text-xs text-slate-400">{selected ?? "—"}</span>
         {selected && file && !file.is_binary && (
-          <IconButton label="Vollbild" onClick={() => setFsFile(true)}>
+          <IconButton label={t("common.fullscreen")} onClick={() => setFsFile(true)}>
             ⛶
           </IconButton>
         )}

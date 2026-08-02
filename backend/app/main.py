@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     init_db()
     reset_interrupted()
     cfg = get_agents_config()
-    log.info("Agents konfiguriert: %s", ", ".join(cfg.agents.keys()) or "(keine)")
+    log.info("Agents configured: %s", ", ".join(cfg.agents.keys()) or "(none)")
     # Start the dashboard heartbeat (auto-poll GitHub issues, auto-spawn
     # Claude Code tasks). Honours CD_HEARTBEAT_ENABLED + a global toggle
     # in /api/heartbeat. Cancellation in the post-yield ``finally``
@@ -93,7 +93,7 @@ def _mount_spa(app: FastAPI, dist: Path) -> None:
     """Serve the built SPA as a fallback (handy without nginx)."""
     base = Path(dist)
     if not base.is_dir():
-        log.info("Frontend-Dist nicht gefunden (%s) -- SPA wird nicht ausgeliefert.", base)
+        log.info("Frontend dist not found (%s) -- SPA will not be served.", base)
         return
     base = base.resolve()
     index = base / "index.html"
@@ -105,7 +105,7 @@ def _mount_spa(app: FastAPI, dist: Path) -> None:
             return FileResponse(target)
         return FileResponse(index)
 
-    log.info("SPA wird ausgeliefert aus %s", base)
+    log.info("Serving SPA from %s", base)
 
 
 app = create_app()

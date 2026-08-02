@@ -105,7 +105,7 @@ export async function ensureCloudflareAccess(): Promise<void> {
         credentials: "include",
       });
     } catch {
-      throw new ApiError(0, "Netzwerkfehler – Backend nicht erreichbar.");
+      throw new ApiError(0, "Network error – backend not reachable.");
     }
   })();
 
@@ -137,13 +137,13 @@ async function request<T>(
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
-    throw new ApiError(0, "Netzwerkfehler – Backend nicht erreichbar.");
+    throw new ApiError(0, "Network error – backend not reachable.");
   }
 
   if (res.status === 401) {
     setToken(null);
     window.dispatchEvent(new Event("cd-unauthorized"));
-    throw new ApiError(401, "Nicht authentifiziert.");
+    throw new ApiError(401, "Not authenticated.");
   }
   if (!res.ok) {
     let detail = res.statusText;
@@ -414,9 +414,9 @@ export async function fetchTaskImage(
       { headers, credentials: "include" },
     );
   } catch {
-    throw new ApiError(0, "Netzwerkfehler – Backend nicht erreichbar.");
+    throw new ApiError(0, "Network error – backend not reachable.");
   }
-  if (!res.ok) throw new ApiError(res.status, "Bild konnte nicht geladen werden.");
+  if (!res.ok) throw new ApiError(res.status, "Image could not be loaded.");
   return URL.createObjectURL(await res.blob());
 }
 

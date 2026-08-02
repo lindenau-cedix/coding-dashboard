@@ -200,8 +200,8 @@ def test_codex_parser() -> None:
         "reasoning effort: medium\n"
         "--------\n"
         "[2026-06-13T20:00:01] User instructions:\n"
-        "Bitte erledige die Aufgabe.\n"
-        "GEHEIMER LANGER KONTEXT der nicht in der Konsole landen soll.\n"
+        "Please complete the task.\n"
+        "SECRET LONG CONTEXT that should not end up in the console.\n"
         "\n"
         "[2026-06-13T20:00:05] thinking\n"
         "Ich schaue mir die Dateien an.\n"
@@ -209,8 +209,8 @@ def test_codex_parser() -> None:
         "[2026-06-13T20:00:07] bash -lc 'ls -la' succeeded in 12ms:\n"
         "total 0\n"
         "[2026-06-13T20:00:20] codex\n"
-        "Fertig: Die Aufgabe wurde erledigt.\n"
-        "model selection wurde angepasst.\n"  # answer line starting with a banner keyword
+        "Done: The task has been completed.\n"
+        "model selection was adjusted.\n"  # answer line starting with a banner keyword
         "[2026-06-13T20:00:21] tokens used: 4321\n"
     )
     p = _CodexParser()
@@ -222,11 +222,11 @@ def test_codex_parser() -> None:
     check("codex drops token footer", "tokens used" not in out, out)
     check("codex keeps thinking text", "schaue mir die Dateien" in out, out)
     check("codex formats exec as shell", "$ ls -la" in out, out)
-    check("codex keeps final answer", "Die Aufgabe wurde erledigt" in out, out)
+    check("codex keeps final answer", "The task has been completed" in out, out)
     check("codex drops bare codex marker", "\ncodex\n" not in out, out)
     check(
         "codex keeps answer line starting with banner keyword",
-        "model selection wurde angepasst" in out,
+        "model selection was adjusted" in out,
         out,
     )
 
@@ -423,9 +423,9 @@ def test_images() -> None:
     spec = AgentSpec(key="x", display_name="X", command=["x"])
     with_imgs = build_agent_prompt(spec, "fix it", "task", "CTX", image_paths=["/tmp/a.png"])
     check("prompt lists image path", "/tmp/a.png" in with_imgs, with_imgs)
-    check("prompt has image instruction", "Angehängte Bilder" in with_imgs, with_imgs)
+    check("prompt has image instruction", "Attached images" in with_imgs, with_imgs)
     without = build_agent_prompt(spec, "fix it", "task", "CTX")
-    check("no image block without images", "Angehängte Bilder" not in without, without)
+    check("no image block without images", "Attached images" not in without, without)
 
     png_b64 = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
@@ -753,7 +753,7 @@ def test_api_and_task() -> None:
     git_ops.push(proj, "main", token="")
     # seed with an AGENTS.md that has the old "Letzte Tasks" block (pre-2026-06-12)
     (proj / "AGENTS.md").write_text(
-        "# AGENTS.md\n\n## Letzter Durchlauf\n\n_Noch kein Durchlauf aufgezeichnet._\n\n## Letzte Tasks\n\n_die letzten 3 laeufe_\n",
+        "# AGENTS.md\n\n## Last Run\n\n_No run recorded yet._\n\n## Letzte Tasks\n\n_die letzten 3 laeufe_\n",
         encoding="utf-8",
     )
     git_ops.commit_all(proj, "add AGENTS.md", "Tester", "t@example.com")
@@ -852,7 +852,7 @@ def test_api_and_task() -> None:
         files = run(["git", "--git-dir", str(remote), "ls-tree", "--name-only", "main"])
         check("committed agent file", "agent_out.txt" in files, files)
 
-        # AGENTS.md: agent writes "Letzter Durchlauf" at top via context_instruction;
+        # AGENTS.md: agent writes "Last Run" at top via context_instruction;
         # Dashboard strips old "Letzte Tasks" block. Both changes land before push.
         agents_md = (proj / "AGENTS.md").read_text(encoding="utf-8")
         check(
@@ -861,8 +861,8 @@ def test_api_and_task() -> None:
             agents_md[:300],
         )
         check(
-            "AGENTS.md has Letzter Durchlauf",
-            "## Letzter Durchlauf" in agents_md,
+            "AGENTS.md has Last Run",
+            "## Last Run" in agents_md,
             agents_md[:300],
         )
         check("AGENTS.md pushed with task", "AGENTS.md" in files, files)
@@ -943,8 +943,8 @@ def test_api_and_task() -> None:
             str(agents_md2.count("## Letzte Tasks")),
         )
         check(
-            "Letzter Durchlauf present after second run",
-            "## Letzter Durchlauf" in agents_md2,
+            "Last Run present after second run",
+            "## Last Run" in agents_md2,
             agents_md2[:300],
         )
 
@@ -1236,13 +1236,13 @@ def test_auto_commit_subject() -> None:
 
     # 6. INTERACTIVE session (the "Interaktiv" checkbox: is_session=True but
     #    mode stays "task"/"goal") — Task.prompt IS the real prompt, so it wins
-    #    over the generic "Interaktive TUI-Session beendet" summary that
+    #    over the generic "Interactive TUI session ended" summary that
     #    end_session writes. This is the opposite preference from a plain
     #    session (#3) and matches task/goal mode.
     interactive_sess = Task(
         project_id=pid, agent="fake", prompt="wire up the websocket reconnect",
         mode="task", is_session=True, status="running",
-        result_summary="Interaktive TUI-Session beendet", chat_history="[]",
+        result_summary="Interactive TUI session ended", chat_history="[]",
     )
     with session_scope() as db:
         db.add(interactive_sess); db.commit(); db.refresh(interactive_sess)
@@ -1272,7 +1272,7 @@ def test_interactive_session() -> None:
     check("session prompt keeps the user text", "fix the auth bug" in p_task, p_task[:80])
     check(
         "session prompt appends context that permits questions",
-        "AGENTS.md" in p_task and "INTERAKTIVE" in p_task,
+        "AGENTS.md" in p_task and "INTERACTIVE" in p_task,
         p_task[-160:],
     )
     p_goal = build_session_initial_prompt(goal_spec, "make CI green", goal=True)
@@ -1491,7 +1491,7 @@ def test_session_workdir_resolution() -> None:
     wd2, note2 = resolve("t2", "claude", None)
     check(
         "busy primary -> isolated worktree",
-        wd2 != str(proj) and Path(wd2).exists() and "Isolierte" in note2,
+        wd2 != str(proj) and Path(wd2).exists() and "Isolated" in note2,
         f"{wd2!r} {note2!r}",
     )
     check("worktree lives under session_worktrees", "session_worktrees" in wd2, wd2)
@@ -2713,9 +2713,9 @@ def test_heartbeat() -> None:
     template = DEFAULT_HEARTBEAT_PROMPT_TEMPLATE
     forbidden_substrings = [
         # The exact patterns the old prompt asked the agent to do.
-        "Committe auf einem Branch",
-        "Pushe den Branch",
-        "oeffne einen PR",
+        "Commit on a branch",
+        "Push the branch",
+        "open a PR",
     ]
     for snippet in forbidden_substrings:
         check(
@@ -2730,7 +2730,7 @@ def test_heartbeat() -> None:
         "`git commit`",
         "`git push`",
         "`gh pr create`",
-        "UNTER KEINEN UMSTAENDEN",
+        "UNDER ANY CIRCUMSTANCES",
         "`git status`",  # the dashboard relies on dirty tree
     ]
     for snippet in must_contain:
@@ -3750,8 +3750,8 @@ def test_heartbeat_comment_on_solve() -> None:
         id="tid2",
     )
     body_conflict = format_comment_body(fake_task2, fake_proj, "https://x/issues/7")
-    check("hb-comment: conflict body shows manueller Merge", "manuellen Merge" in body_conflict, body_conflict)
-    check("hb-comment: conflict body marks not gepusht", "nicht gepusht" in body_conflict, body_conflict)
+    check("hb-comment: conflict body shows manual merge", "manual merge" in body_conflict, body_conflict)
+    check("hb-comment: conflict body marks not pushed", "not pushed" in body_conflict, body_conflict)
 
     # -------- 13.2 direct hook path ------------------------------------- #
     # Set up a Project + heartbeat_seen + heartbeat Task with a "merged
@@ -4471,7 +4471,7 @@ def test_task_runner_env_profile_injection() -> None:
         "env_profile_injection: unknown key publishes a warning",
         any(
             ev.get("type") == "output"
-            and "Env-Profil 'does-not-exist' nicht gefunden" in ev.get("data", "")
+            and "Env profile 'does-not-exist' not found" in ev.get("data", "")
             for ev in ch.events
         ),
     )
@@ -4803,7 +4803,7 @@ def test_session_runner_shim() -> None:
             sibling = cfg.agents.get(sibling_key)
             if sibling is None or not sibling.enabled:
                 raise ValueError(
-                    f"Host-Runner fuer Agent {agent!r} nicht aktiviert."
+                    f"Host runner for agent {agent!r} is not enabled."
                 )
             if not sibling.session_command:
                 raise ValueError(
@@ -4830,7 +4830,7 @@ def test_session_runner_shim() -> None:
     except ValueError as e:
         check(
             "session_runner_shim: missing -host -> ValueError",
-            "Host-Runner fuer Agent" in str(e),
+            "Host runner for agent" in str(e),
         )
 
     # 3. sibling with no session_command -> "session mode" error
@@ -4905,7 +4905,7 @@ def test_runner_picks_host_sibling_by_key() -> None:
             sibling = cfg.agents.get(f"{agent}-host")
             if sibling is None or not sibling.enabled:
                 raise ValueError(
-                    f"Host-Runner fuer Agent {agent!r} nicht aktiviert."
+                    f"Host runner for agent {agent!r} is not enabled."
                 )
             if not sibling.session_command:
                 raise ValueError(

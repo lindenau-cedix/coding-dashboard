@@ -1,48 +1,49 @@
 # =============================================================================
-# Coding Dashboard - Agent-Konfiguration
-# Wird vom Backend gelesen (Pfad via CD_AGENTS_CONFIG_PATH, i.d.R.
+# Coding Dashboard - Agent configuration
+# Read by the backend (path via CD_AGENTS_CONFIG_PATH, usually
 # /etc/coding-dashboard/config.yaml).
 #
-# Platzhalter, die zur Laufzeit ersetzt werden:
-#   {prompt}             -> die Aufgabenbeschreibung (inkl. AGENTS.md-Instruktion)
-#   {project_dir}        -> der lokale Pfad des geklonten Projekt-Repos
-#   {last_message_file}  -> temporäre Datei, in die die CLI ihre LETZTE Nachricht
-#                           schreibt (z.B. codex --output-last-message). Ihr Inhalt
-#                           wird als Endausgabe des Tasks übernommen (exakt, statt
-#                           Transkript-Heuristik) und landet in AGENTS.md.
+# Placeholders substituted at runtime:
+#   {prompt}             -> the task description (incl. AGENTS.md instruction)
+#   {project_dir}        -> the local path of the cloned project repo
+#   {last_message_file}  -> temporary file where the CLI writes its last message
+#                           (e.g. codex --output-last-message). Its content
+#                           is used as the task's final output (exact, instead of
+#                           transcript heuristics) and lands in AGENTS.md.
 #
-# command : argv-Liste (KEINE Shell). Token 0 ist das Binary.
-# prompt_via : "arg"  -> {prompt} wird in die Argumente eingesetzt
-#              "stdin" -> Prompt wird auf stdin geschrieben (kein {prompt} nötig)
+# command : argv list (NO shell). Token 0 is the binary.
+# prompt_via : "arg"  -> {prompt} is inserted into the arguments
+#              "stdin" -> prompt is written to stdin (no {prompt} needed)
 # stream_format : "claude-json" (Claudes --output-format stream-json) | "raw"
-# goal_command : optional. Template für den "Ziel"-Modus (/goal). Ist es gesetzt,
-#                kann man dem Agenten statt einer Aufgabe ein Ziel geben; der
-#                gesamte Verlauf bis zum Ziel zählt als ein Task. {prompt} ist das
-#                Ziel. Fehlt das Feld, bietet der Agent keinen Ziel-Modus an.
-# model_choices / effort_choices : optionale Listen, die das UI als Dropdown
-#                anbietet (leer = kein Dropdown). Auswahl ist pro Task.
-# model_args / effort_args : argv-Tokens, die bei einer Auswahl eingefügt werden
-#                ({model}/{effort} werden ersetzt). Eingefügt vor einem
-#                abschließenden "-" (stdin-Marker), sonst angehängt.
+# goal_command : optional. Template for "goal" mode (/goal). If set,
+#                you can give the agent a goal instead of a task; the
+#                entire history until the goal counts as a single task. {prompt} is the
+#                goal. If the field is missing, the agent does not offer goal mode.
+# model_choices / effort_choices : optional lists exposed by the UI as a dropdown
+#                (empty = no dropdown). The selection is per task.
+# model_args / effort_args : argv tokens inserted when a value is selected
+#                ({model}/{effort} are substituted). Inserted before a trailing
+#                "-" (stdin marker), otherwise appended.
 # =============================================================================
 
-# Instruktion, die JEDER Aufgabe angehängt wird, damit Claude, Hermes und Codex über
-# AGENTS.md einen gemeinsamen Projektkontext pflegen.
+# Instruction appended to EVERY task so Claude, Hermes and Codex know
+# AGENTS.md to maintain a shared project context.
 context_instruction: |
-  Wichtiger Projekt-Kontext (immer beachten):
-  1. Lies zuerst die Datei `AGENTS.md` im Projekt-Wurzelverzeichnis, falls vorhanden,
-     um Struktur, Tech-Stack, bisherige Entscheidungen und den aktuellen Stand zu verstehen.
-  2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
-  3. Aktualisiere danach `AGENTS.md` (lege sie an, falls nicht vorhanden): beschreibe knapp
-     und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
-     Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code,
-     Hermes oder Codex) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
-  4. Committe oder pushe NICHT selbst -- das uebernimmt das Dashboard automatisch nach dem Task.
+  Important project context (always observe):
+  1. First read the `AGENTS.md` file in the project root directory, if it exists,
+     to understand the structure, tech stack, past decisions, and the current state.
+  2. Then complete the task described above thoroughly and cleanly.
+  3. Afterwards update `AGENTS.md` (create it if it doesn't exist): describe
+     concisely and up-to-date the project structure, the tech stack, decisions
+     made, the current state, and open items / next steps -- so that another AI agent
+     (Claude Code, Hermes or Codex) immediately understands the project
+     and can continue seamlessly.
+  4. Do NOT commit or push yourself -- the dashboard handles this automatically after the task.
 
 agents:
   claude:
     display_name: "Claude Code"
-    # __CLAUDE_BIN__ wird vom Installer durch den absoluten Pfad ersetzt.
+    # __CLAUDE_BIN__ is replaced by the installer with the absolute path.
     command:
       - "claude"
       - "-p"
@@ -53,9 +54,9 @@ agents:
       - "--dangerously-skip-permissions"
     prompt_via: arg
     stream_format: claude-json
-    # Aktiviert den "Ziel"-Modus: das Dashboard ruft Claude mit "/goal <Ziel>" auf.
+    # Enables the "goal" mode: the dashboard calls Claude with "/goal <goal>".
     goal_command: "/goal {prompt}"
-    # Pro Task wählbares Modell / Effort-Level (leer lassen = kein Dropdown).
+    # Per-task selectable model / effort level (leave empty = no dropdown).
     model_choices: ["opus", "sonnet", "haiku"]
     model_args: ["--model", "{model}"]
     effort_choices: ["low", "medium", "high", "xhigh", "max", "ultracode"]
@@ -65,15 +66,15 @@ agents:
 
   hermes:
     display_name: "Hermes"
-    # `hermes chat -q "<prompt>"`: einzelne, nicht-interaktive Query, die
-    # Zwischenschritte (Tool-Previews) LIVE streamt. --yolo überspringt Approvals,
-    # --accept-hooks läuft headless. AGENTS.md wird automatisch aus dem CWD geladen.
-    # `-t <csv>` schränkt die Tool-Auswahl auf nicht-interaktive Toolsets ein
-    # (ohne `clarify`, das in dieser Einbahn-Konsole keinen Platform-Callback
-    # hätte und den Run mit "Clarify tool is not available in this execution
-    # context." abbrechen würde). Interaktive TUI-Sessions (`hermes chat` ohne
-    # -q) behalten absichtlich das volle Toolset, damit der User dort antworten
-    # kann. Passende Liste: HERMES_NON_INTERACTIVE_TOOLSETS in backend/app/config.py.
+    # `hermes chat -q "<prompt>"`: single, non-interactive query that
+    # streams intermediate steps (tool previews) LIVE. --yolo skips approvals,
+    # --accept-hooks runs headless. AGENTS.md is auto-loaded from the CWD.
+    # `-t <csv>` restricts the tool selection to non-interactive toolsets
+    # (without `clarify`, which in this one-way console has no platform callback
+    # and ends the run with "Clarify tool is not available in this execution
+    # context."). Interactive TUI sessions (`hermes chat` without
+    # -q) intentionally keep the full toolset so the user can answer there.
+    # Matching list: HERMES_NON_INTERACTIVE_TOOLSETS in backend/app/config.py.
     command:
       - "hermes"
       - "chat"
@@ -87,23 +88,23 @@ agents:
     stream_format: raw
     enabled: true
     env:
-      HERMES_ACCEPT_HOOKS: "1"   # Shell-Hooks headless akzeptieren
-      NO_COLOR: "1"              # Farbcodes unterdrücken (saubere Web-Konsole)
-    # Verhindert, dass PYTHONPATH/PYTHONHOME des Backend-venv die (Python-)Hermes-
-    # CLI stören (entspricht dem hermes-Wrapper, der diese Variablen leert).
+      HERMES_ACCEPT_HOOKS: "1"   # Accept shell hooks headless
+      NO_COLOR: "1"              # suppress color codes (clean web console)
+    # Prevents PYTHONPATH/PYTHONHOME from the backend venv from interfering with
+    # the (Python) Hermes CLI (matches the hermes wrapper, which empties these vars).
     unset_env:
       - "PYTHONPATH"
       - "PYTHONHOME"
-    # Alternative (nur Endergebnis, kein Live-Stream, am leisesten):
+    # Alternative (only the final result, no live stream, quietest):
     #   command: ["hermes", "-z", "{prompt}"]
 
   codex:
     display_name: "Codex"
-    # `codex exec`: einzelne, nicht-interaktive Aufgabe (mit Prompt von sich aus
-    # headless; --ask-for-approval gibt es in aktuellen Versionen nicht mehr).
-    # "-" liest den Prompt von stdin, damit lange Dashboard-Prompts nicht in der
-    # Prozessliste landen. --output-last-message schreibt die LETZTE Nachricht
-    # des Agenten in {last_message_file} -> exakte Endausgabe für AGENTS.md.
+    # `codex exec`: single, non-interactive task (with prompt coming from
+    # stdin, runs headless; --ask-for-approval is no longer in current versions).
+    # "-" reads the prompt from stdin so long dashboard prompts do not land in
+    # the process list. --output-last-message writes the last message
+    # of the agent into {last_message_file} -> exact final output for AGENTS.md.
     command:
       - "codex"
       - "exec"

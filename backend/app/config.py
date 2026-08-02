@@ -41,81 +41,77 @@ HERMES_NON_INTERACTIVE_TOOLSETS = (
 # ``{repo}``, ``{title}``, ``{user}``, ``{labels}``, ``{created_at}``,
 # ``{body}``, ``{html_url}``.
 DEFAULT_HEARTBEAT_PROMPT_TEMPLATE = """\
-Du arbeitest automatisch im Auftrag des Coding Dashboards. Das Dashboard \
-hat auf GitHub Issue #{number} im Repo {repo} aufmerksam gemacht:
+You are working automatically on behalf of the Coding Dashboard. The \
+dashboard flagged GitHub issue #{number} in the repo {repo}:
 
-**Titel:** {title}
-**Autor:** {user}
+**Title:** {title}
+**Author:** {user}
 **Labels:** {labels}
-**Erstellt:** {created_at}
+**Created:** {created_at}
 
-**Beschreibung:**
+**Description:**
 {body}
 
 **URL:** {html_url}
 
-So gehst du vor:
+How to proceed:
 
-1. Lies das Repo, um den Code zu verstehen. clone / pull nur ueber das
-   Dashboard, niemals eigenstaendig.
-2. Reproduziere den Bug (oder implementiere die Anforderung). Wenn
-   moeglich: schreibe zuerst einen Test, der fehlschlaegt.
-3. Implementiere den Fix. Halte dich an die existierenden Patterns und
-   Conventions im Repo.
+1. Read the repo to understand the code. Clone / pull only via the
+   dashboard, never on your own.
+2. Reproduce the bug (or implement the requirement). If possible: write
+   a failing test first.
+3. Implement the fix. Follow the existing patterns and conventions in
+   the repo.
 
-WICHTIG -- was du NICHT tun darfst:
+IMPORTANT -- what you must NOT do:
 
-Du bist NUR fuer den Code zustaendig. Das Dashboard macht am Ende JEDEN
-Commit, Push, PR und Merge SELBST. Fuehre deshalb folgende Befehle
-UNTER KEINEN UMSTAENDEN selbst aus, auch nicht als Teil einer
-"Convenience"-Operation:
+You are ONLY responsible for the code. The dashboard handles every
+commit, push, PR, and merge ITSELF at the end. Therefore, do NOT run
+the following commands UNDER ANY CIRCUMSTANCES, even as part of a
+"convenience" operation:
 
-- `git add` (egal mit welchen Pfaden / `-A`) -- das Dashboard staeted
-  selbst.
-- `git commit` (egal mit welcher Message / `-m` / `-a`) -- das
-  Dashboard macht den Commit mit einer eigenen Message aus deiner
-  Zusammenfassung.
-- `git push` (egal welcher Branch / Remote) -- das Dashboard pusht auf
-  den richtigen Branch.
-- `git checkout -b`, `git switch -c`, `git branch <name>` -- das
-  Dashboard legt den Branch `heartbeat/fix-{number}-<slug>` fuer dich
-  an. Wechsle NICHT selbst auf einen anderen Branch; das Dashboard
-  startet dich bereits auf einer frischen Worktree.
+- `git add` (regardless of paths / `-A`) -- the dashboard stages
+  itself.
+- `git commit` (regardless of message / `-m` / `-a`) -- the dashboard
+  creates the commit with its own message based on your summary.
+- `git push` (regardless of branch / remote) -- the dashboard pushes
+  to the correct branch.
+- `git checkout -b`, `git switch -c`, `git branch <name>` -- the
+  dashboard creates the branch `heartbeat/fix-{number}-<slug>` for you.
+  Do NOT switch to another branch yourself; the dashboard already
+  starts you on a fresh worktree.
 - `gh pr create`, `gh repo view`, `gh issue *`, `hub pull-request`
-  oder jeder andere Aufruf von GitHub-CLIs -- das Dashboard oeffnet
-  den PR selbst und postet die Commit-URL als Kommentar auf den Issue.
-- Jedes andere VCS-Tool (`jj`, `svn`, ...) -- nicht verwendet.
+  or any other GitHub CLI call -- the dashboard opens the PR itself
+  and posts the commit URL as a comment on the issue.
+- Any other VCS tool (`jj`, `svn`, ...) -- not used.
 
-Wenn du commit/push selbst machst, sieht das Dashboard hinterher eine
-**saubere** Working Tree, denkt "nichts zu committen", ueberspringt den
-Auto-Commit und pushed dann leere Diffs. Der Fix verschwindet und es
-oeffnet sich kein PR. Das ist der haeufigste Fehler in dieser
-Pipeline -- lass es bleiben.
+If you commit/push yourself, the dashboard will see a **clean** working
+tree, think "nothing to commit", skip the auto-commit, and then push
+empty diffs. The fix disappears and no PR opens. This is the most
+common mistake in this pipeline -- don't do it.
 
-Konkrekt: AENDERE NUR DATEIEN. Wenn du fertig bist, soll `git status`
-uncommitted Aenderungen zeigen (das ist erwünscht -- das Dashboard
-uebernimmt sie). Wenn du aus Versehen doch einen `git commit` gemacht
-hast, mach `git reset --soft HEAD~1` (oder loesche den letzten Commit
-gleichwertig), damit die Aenderungen wieder uncommitted im Index
-liegen, BEVOR du zurueckmeldest.
+Concretely: ONLY EDIT FILES. When you're done, `git status` should
+show uncommitted changes (this is desired -- the dashboard picks them
+up). If you accidentally ran `git commit`, run `git reset --soft
+HEAD~1` (or equivalent to remove the last commit) so the changes are
+uncommitted in the index again, BEFORE you report back.
 
-4. Verifiziere deine Aenderung lokal (Lint, Tests, was das Repo
-   bietet).
-5. Schreibe am Ende einen kurzen Status (max 200 Woerter) mit: was du
-   gefunden hast, welche Dateien du geaendert hast, ob Tests gruen
-   sind, und ob du den Fix bewusst NICHT committest/pusht/PR-stellst
-   (immer -- das macht das Dashboard).
+4. Verify your change locally (lint, tests, whatever the repo offers).
+5. At the end, write a short status (max 200 words) with: what you
+   found, which files you changed, whether tests are green, and that
+   you deliberately did NOT commit/push/PR (always -- the dashboard
+   handles that).
 
-Sonstiges:
+Other:
 
-- KEINE Rueckfragen an den User -- das Dashboard hat keine UI fuer
-  Rueckfragen.
-- KEINE destruktiven Operationen (force-push, rm -rf, drop tables,
-  Branch-Loeschungen).
-- KEIN eigenstaendiges Branch- oder Worktree-Management.
-- Wenn der Issue unklar ist oder nicht reproduzierbar: dokumentiere das
-  im Status; das Dashboard oeffnet den PR dann mit einem
-  'investigation notes' Body und schliesst den Issue nicht.
+- NO questions back to the user -- the dashboard has no UI for
+  questions.
+- NO destructive operations (force-push, rm -rf, drop tables, branch
+  deletions).
+- NO independent branch or worktree management.
+- If the issue is unclear or cannot be reproduced: document that in
+  the status; the dashboard will open the PR with an 'investigation
+  notes' body and will not close the issue.
 """
 
 
@@ -355,56 +351,60 @@ class AgentSpec(BaseModel):
 
 
 DEFAULT_CONTEXT_INSTRUCTION = """\
-Wichtiger Projekt-Kontext (immer beachten):
-1. Lies zuerst die Datei `AGENTS.md` im Projekt-Wurzelverzeichnis, falls vorhanden,
-   um Struktur, Tech-Stack, bisherige Entscheidungen und den aktuellen Stand zu verstehen.
-2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
-3. Aktualisiere danach `AGENTS.md` (lege sie an, falls nicht vorhanden): beschreibe knapp
-   und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
-   Stand sowie offene Punkte / Next Steps -- so, dass ein anderer KI-Agent (Claude Code,
-   Hermes oder Codex) das Projekt sofort versteht und nahtlos weiterarbeiten kann.
-4. Committe oder pushe NICHT selbst -- das uebernimmt das Dashboard automatisch nach dem Task.
-5. **Pflege den "Letzter Durchlauf"-Block GANZ AM ANFANG der AGENTS.md** (direkt nach dem
-   Titel und dem Zweck-Absatz, noch vor allen anderen Abschnitten): Überschreibe ihn bei
-   jedem Durchlauf mit einer kurzen, fuer Menschen lesbaren Zusammenfassung dessen, was du
-   in diesem Lauf getan hast -- was die Aufgabe war, was du gefunden/gebaut/geantwortet hast,
-   und was die wichtigste Aenderung oder Erkenntnis war. Dieser Block wird vom Dashboard
-   NICHT mehr geschrieben; nur das Dashboard entfernt noch alte "Letzte Tasks"-Bloecke
-   (von Dashboards vor Version 2026-06-12), falls solche noch in der Datei existieren.
-6. **Stelle KEINE Rueckfragen an den User.** Du laeufst nicht-interaktiv: das Dashboard
-   streamt deine Ausgabe nur in den Browser, es gibt keine Moeglichkeit zu antworten.
-   Wenn etwas mehrdeutig ist oder du mehr Informationen brauchst, triff eine
-   vernuenftige Annahme (dokumentiere sie kurz in AGENTS.md / im Latest-Run-Block)
-   und mach weiter. Nur in einem offenen TUI-Session-Modus (`hermes chat`, `claude`,
-   `codex` ohne `-q`) hat der User eine Tastatur -- dort sind Rueckfragen erlaubt.
+Important project context (always observe):
+1. First read the `AGENTS.md` file in the project root directory, if it exists,
+   to understand the structure, tech stack, past decisions, and the current state.
+2. Then complete the task described above thoroughly and cleanly.
+3. Afterwards update `AGENTS.md` (create it if it doesn't exist): describe
+   concisely and up-to-date the project structure, the tech stack, decisions
+   made, the current state, and open items / next steps -- so that another AI
+   agent (Claude Code, Hermes, or Codex) immediately understands the project
+   and can continue seamlessly.
+4. Do NOT commit or push yourself -- the dashboard handles this automatically
+   after the task.
+5. **Maintain the "Last Run" block AT THE VERY TOP of AGENTS.md** (directly
+   after the title and purpose paragraph, before any other sections): Overwrite
+   it on each run with a short, human-readable summary of what you did during
+   this run -- what the task was, what you found/built/answered, and what the
+   most important change or insight was. This block is no longer written by
+   the dashboard; only the dashboard still removes old "Letzte Tasks" blocks
+   (from dashboards before version 2026-06-12), if any still exist in the file.
+6. **Do NOT ask the user any questions.** You run non-interactively: the
+   dashboard only streams your output to the browser, there is no way to
+   reply. If something is ambiguous or you need more information, make a
+   reasonable assumption (document it briefly in AGENTS.md / in the Last Run
+   block) and continue. Only in an open TUI session mode (`hermes chat`,
+   `claude`, `codex` without `-q`) does the user have a keyboard -- questions
+   are allowed there.
 """
 
 
 # Context appended to the INITIAL prompt that the dashboard auto-types into an
-# interactive session (the "Interaktiv" checkbox on Task/Goal). It keeps the two
+# interactive session (the "Interactive" checkbox on Task/Goal). It keeps the two
 # rules that protect the auto-commit pipeline (never self-commit/push; maintain
-# AGENTS.md) but deliberately DROPS rule #6 ("stelle keine Rueckfragen") from
+# AGENTS.md) but deliberately DROPS rule #6 ("do not ask questions") from
 # ``DEFAULT_CONTEXT_INSTRUCTION`` -- the whole point of this mode is that the
 # user is sitting at a live TUI and CAN answer questions, interrupt, and send
 # follow-up prompts. The dashboard commits + pushes when the user ends the
 # session, so a self-commit here would still break the pipeline exactly like in
 # task/goal mode.
 SESSION_CONTEXT_INSTRUCTION = """\
-Wichtiger Projekt-Kontext (immer beachten):
-1. Lies zuerst die Datei `AGENTS.md` im Projekt-Wurzelverzeichnis, falls vorhanden,
-   um Struktur, Tech-Stack, bisherige Entscheidungen und den aktuellen Stand zu verstehen.
-2. Erledige anschliessend die oben beschriebene Aufgabe vollstaendig und sauber.
-3. Aktualisiere danach `AGENTS.md` (lege sie an, falls nicht vorhanden): beschreibe knapp
-   und aktuell die Projektstruktur, den Tech-Stack, getroffene Entscheidungen, den aktuellen
-   Stand und offene Punkte / Next Steps. Pflege ganz am Anfang einen kurzen, fuer Menschen
-   lesbaren "Letzter Durchlauf"-Block mit dem, was du in dieser Session getan hast.
-4. Committe oder pushe NICHT selbst (kein `git add` / `git commit` / `git push` /
-   `git checkout -b`) -- das Dashboard committet und pusht AUTOMATISCH, sobald du die
-   Session beendest. Ein eigener Commit wuerde die automatische Uebernahme aushebeln
-   (das Dashboard saehe eine saubere Working Tree und wuerde die Aenderungen verlieren).
-5. Dies ist eine INTERAKTIVE Session: Du DARFST dem User Rueckfragen stellen und auf
-   Antworten warten. Der User kann dich jederzeit unterbrechen und weitere Anweisungen
-   geben. Frag lieber einmal nach, statt eine riskante Annahme zu treffen.
+Important project context (always observe):
+1. First read the `AGENTS.md` file in the project root directory, if it exists,
+   to understand the structure, tech stack, past decisions, and the current state.
+2. Then complete the task described above thoroughly and cleanly.
+3. Afterwards update `AGENTS.md` (create it if it doesn't exist): describe
+   concisely and up-to-date the project structure, the tech stack, decisions
+   made, the current state, and open items / next steps. Maintain a short,
+   human-readable "Last Run" block at the very top with what you did in this
+   session.
+4. Do NOT commit or push yourself (no `git add` / `git commit` / `git push` /
+   `git checkout -b`) -- the dashboard commits and pushes AUTOMATICALLY as
+   soon as you end the session. A self-commit would break the auto-merge
+   (the dashboard would see a clean working tree and lose the changes).
+5. This is an INTERACTIVE session: You MAY ask the user questions and wait
+   for answers. The user can interrupt you at any time and give further
+   instructions. Ask once rather than making a risky assumption.
 """
 
 

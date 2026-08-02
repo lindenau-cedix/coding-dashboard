@@ -2,7 +2,7 @@
 # =============================================================================
 # Baut die Android-APK aus dem Frontend via Capacitor.
 #
-# Voraussetzungen auf der Build-Maschine (NICHT auf dem Server nötig):
+# Prerequisites on the build machine (NOT required on the server):
 #   - Node.js + npm
 #   - JDK 17+   (java -version)
 #   - Android SDK; ANDROID_SDK_ROOT bzw. ANDROID_HOME gesetzt,
@@ -10,7 +10,7 @@
 #
 # Nutzung:
 #   ./deploy/build-android.sh https://dashboard.example.com
-#   (URL = öffentlich erreichbares Backend; landet als VITE_API_BASE im Build.)
+#   (URL = publicly reachable backend; ends up as VITE_API_BASE in the build.)
 # =============================================================================
 set -euo pipefail
 info() { printf '\033[36m==> %s\033[0m\n' "$*"; }
@@ -48,17 +48,17 @@ fi
 
 JAVA_MAJOR=$(java_major_version)
 if [[ -z ${JAVA_MAJOR:-} ]]; then
-  err "Konnte die Java-Version nicht ermitteln."
+  err "Could not determine Java version."
   exit 1
 fi
 if (( JAVA_MAJOR < 17 )); then
-  err "Java $JAVA_MAJOR ist zu alt. Fuer diesen Android-Build wird mindestens JDK 17 benoetigt."
+  err "Java $JAVA_MAJOR is too old. This Android build requires at least JDK 17."
   exit 1
 fi
 if (( JAVA_MAJOR > 24 )); then
-  err "Java $JAVA_MAJOR wird von diesem Android-Tooling noch nicht unterstuetzt."
-  err "Bitte den Build mit JDK 17 oder JDK 21 starten, z.B.:"
-  err "  JAVA_HOME=/pfad/zu/jdk-21 PATH=/pfad/zu/jdk-21/bin:\$PATH $0 $API_BASE"
+  err "Java $JAVA_MAJOR is not yet supported by this Android tooling."
+  err "Please start the build with JDK 17 or JDK 21, e.g.:"
+  err "  JAVA_HOME=/path/to/jdk-21 PATH=/path/to/jdk-21/bin:\$PATH $0 $API_BASE"
   exit 1
 fi
 
@@ -66,26 +66,26 @@ CF_ACCESS_CLIENT_ID=${CF_ACCESS_CLIENT_ID:-}
 CF_ACCESS_CLIENT_SECRET=${CF_ACCESS_CLIENT_SECRET:-}
 
 if [[ -t 0 && -z $CF_ACCESS_CLIENT_ID && -z $CF_ACCESS_CLIENT_SECRET ]]; then
-  info "Optional: Cloudflare Access Service Token fuer den Android-Build hinterlegen"
-  read -r -p "CF-Access-Client-Id (leer = kein Cloudflare Access im APK-Build): " CF_ACCESS_CLIENT_ID
+  info "Optional: provide a Cloudflare Access Service Token for the Android build"
+  read -r -p "CF-Access-Client-Id (empty = no Cloudflare Access in APK build): " CF_ACCESS_CLIENT_ID
   if [[ -n $CF_ACCESS_CLIENT_ID ]]; then
     CF_ACCESS_CLIENT_SECRET=$(prompt_secret "CF-Access-Client-Secret: ")
   fi
 fi
 
 if [[ -n $CF_ACCESS_CLIENT_ID && -z $CF_ACCESS_CLIENT_SECRET ]]; then
-  err "CF_ACCESS_CLIENT_SECRET fehlt."
+  err "CF_ACCESS_CLIENT_SECRET is missing."
   exit 1
 fi
 if [[ -z $CF_ACCESS_CLIENT_ID && -n $CF_ACCESS_CLIENT_SECRET ]]; then
-  err "CF_ACCESS_CLIENT_ID fehlt."
+  err "CF_ACCESS_CLIENT_ID is missing."
   exit 1
 fi
 
-info "Web-Assets bauen (VITE_API_BASE=$API_BASE)"
+info "Building web assets (VITE_API_BASE=$API_BASE)"
 npm install
 if [[ -n $CF_ACCESS_CLIENT_ID ]]; then
-  info "Cloudflare Access Service Token wird in den Android-Build eingebettet"
+  info "Cloudflare Access Service Token will be embedded into the Android build"
 fi
 VITE_API_BASE="$API_BASE" \
 VITE_CF_ACCESS_CLIENT_ID="$CF_ACCESS_CLIENT_ID" \
@@ -93,32 +93,32 @@ VITE_CF_ACCESS_CLIENT_SECRET="$CF_ACCESS_CLIENT_SECRET" \
 npm run build
 
 if [[ ! -d android ]]; then
-  info "Capacitor-Android-Projekt anlegen"
+  info "Creating Capacitor Android project"
   npx cap add android
 else
-  info "Capacitor synchronisieren"
+  info "Syncing Capacitor"
   npx cap sync android
 fi
 
-# App-Icon/Logo aus frontend/assets/ generieren. Muss NACH 'cap add/sync'
-# laufen, weil android/ nicht eingecheckt wird und dort jedes Mal neu entsteht.
-# Quelle: frontend/assets/icon-only.png, icon-foreground.png, icon-background.png.
+# Generate app icon/logo from frontend/assets/. Must run AFTER 'cap add/sync'
+# because android/ is not checked in and is recreated each time.
+# Source: frontend/assets/icon-only.png, icon-foreground.png, icon-background.png.
 if [[ -f assets/icon-foreground.png ]]; then
-  info "App-Icons aus assets/ generieren"
+  info "Generating app icons from assets/"
   npx @capacitor/assets generate --android
 fi
 
-info "APK bauen (assembleDebug)"
+info "Building APK (assembleDebug)"
 cd android
 chmod +x ./gradlew 2>/dev/null || true
 ./gradlew assembleDebug
 
 APK="$FRONTEND_DIR/android/app/build/outputs/apk/debug/app-debug.apk"
 if [[ -f $APK ]]; then
-  info "Fertig: $APK"
-  echo "Auf ein Android-Gerät übertragen und installieren (Sideload), z.B.:"
+  info "Done: $APK"
+  echo "Transfer to an Android device and install (sideload), e.g.:"
   echo "  adb install -r '$APK'"
 else
-  err "APK nicht gefunden – prüfe die Gradle-Ausgabe oben."
+  err "APK not found – check the Gradle output above."
   exit 1
 fi

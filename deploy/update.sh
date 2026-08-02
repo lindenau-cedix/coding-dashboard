@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Update einer bestehenden Installation: Code synchronisieren, Frontend neu
-# bauen, Backend-Deps aktualisieren, Service neu starten. Env/config bleiben.
+# build, refresh backend deps, restart the service. Env/config stay.
 set -euo pipefail
 info() { printf '\033[36m==> %s\033[0m\n' "$*"; }
 ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
 err()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 
-[[ $EUID -eq 0 ]] || { err "Bitte mit sudo ausführen."; exit 1; }
+[[ $EUID -eq 0 ]] || { err "Please run with sudo."; exit 1; }
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -22,7 +22,7 @@ rsync -a --delete \
   "$REPO_DIR"/ "$APP_DIR"/
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR"
 
-info "Frontend bauen"
+info "Building frontend"
 if sudo -u "$SERVICE_USER" -H bash -lc 'command -v npm >/dev/null 2>&1'; then
   sudo -u "$SERVICE_USER" -H bash -lc "cd '$APP_DIR/frontend' && npm install && VITE_API_BASE='' npm run build"
 elif [[ -d "$REPO_DIR/frontend/dist" ]]; then
@@ -30,7 +30,7 @@ elif [[ -d "$REPO_DIR/frontend/dist" ]]; then
   chown -R "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR/frontend/dist"
 fi
 
-info "Backend-Dependencies aktualisieren"
+info "Updating backend dependencies"
 sudo -u "$SERVICE_USER" -H "$APP_DIR/backend/.venv/bin/pip" install -q --upgrade -r "$APP_DIR/backend/requirements.txt"
 
 info "Service neu starten"

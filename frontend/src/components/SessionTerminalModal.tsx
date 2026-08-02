@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api, commitUrl, ensureCloudflareAccess, wsSessionUrl } from "../api";
 import { broadcast } from "../crossTab";
 import type { Agent, Project, SessionWsMessage, TaskStatus } from "../types";
@@ -255,6 +256,7 @@ export default function SessionTerminalModal({
   onClose: () => void;
   onEnded: () => void;
 }) {
+  const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [agentKey, setAgentKey] = useState("");
@@ -283,20 +285,20 @@ export default function SessionTerminalModal({
     [rawOutput, terminalSize.cols],
   );
   const terminalText = useMemo(() => {
-    if (loading) return "Lädt...";
+    if (loading) return t("session.loading");
     if (screen.trim()) return screen;
     if (rawOutput.trim()) {
-      return plainTerminalFallback(rawOutput) || "Terminalausgabe enthält nur Steuersequenzen.";
+      return plainTerminalFallback(rawOutput) || t("session.onlyEscapes");
     }
-    if (connectionState === "connecting") return "Verbinde mit Terminal...";
-    if (connectionState === "open") return "Verbunden. Warte auf erste Ausgabe...";
-    if (connectionState === "error") return "Terminal-Verbindung fehlgeschlagen.";
+    if (connectionState === "connecting") return t("session.connecting");
+    if (connectionState === "open") return t("session.connected");
+    if (connectionState === "error") return t("session.error");
     if (connectionState === "closed" && !isDone(status)) {
-      return "Terminal-Verbindung geschlossen. Session erneut öffnen.";
+      return t("session.closed");
     }
-    if (isDone(status)) return "Keine Terminalausgabe gespeichert.";
-    return "Terminal wird gestartet...";
-  }, [connectionState, loading, rawOutput, screen, status]);
+    if (isDone(status)) return t("session.noSavedOutput");
+    return t("session.starting");
+  }, [connectionState, loading, rawOutput, screen, status, t]);
 
   function appendOutput(data: string, offset?: number) {
     setRawOutput((prev) => {
@@ -349,7 +351,7 @@ export default function SessionTerminalModal({
         setStatus(sess.status as TaskStatus);
         setSummary(sess.result_summary || "");
       } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : "Session konnte nicht geladen werden");
+        if (active) setError(err instanceof Error ? err.message : t("session.loadFailed"));
       } finally {
         if (active) setLoading(false);
       }
@@ -357,7 +359,7 @@ export default function SessionTerminalModal({
     return () => {
       active = false;
     };
-  }, [taskId]);
+  }, [taskId, t]);
 
   useEffect(() => {
     if (loading || isDone(status)) return;
@@ -370,7 +372,7 @@ export default function SessionTerminalModal({
       } catch (err) {
         if (!closed) {
           setConnectionState("error");
-          setError(err instanceof Error ? err.message : "Terminal-Verbindung konnte nicht vorbereitet werden");
+          setError(err instanceof Error ? err.message : t("session.terminalLoadFailed"));
         }
         return;
       }
@@ -385,7 +387,7 @@ export default function SessionTerminalModal({
       ws.onerror = () => {
         if (!closed) {
           setConnectionState("error");
-          setError("Terminal-WebSocket konnte nicht geöffnet werden.");
+          setError(t("session.wsOpenFailed"));
         }
       };
       ws.onclose = () => {
@@ -477,7 +479,7 @@ export default function SessionTerminalModal({
       broadcast({ type: "session-done", taskId, status: result.status });
       onEndedRef.current();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Session konnte nicht beendet werden");
+      setError(err instanceof Error ? err.message : t("session.endFailed"));
     } finally {
       setEnding(false);
     }
@@ -537,17 +539,17 @@ export default function SessionTerminalModal({
           </div>
           <div className="flex items-center gap-2">
             <IconButton
-              label={expanded ? "Vollbild verlassen" : "Vollbild"}
+              label={expanded ? t("common.exitFullscreen") : t("common.fullscreen")}
               onClick={() => setExpanded((v) => !v)}
             >
               {expanded ? "🗗" : "⛶"}
             </IconButton>
             <Button variant="ghost" onClick={onClose}>
-              Schließen
+              {t("session.close")}
             </Button>
             {live && (
               <Button variant="danger" onClick={() => void endSession()} disabled={ending}>
-                {ending ? <Spinner className="h-4 w-4" /> : "Session beenden"}
+                {ending ? <Spinner className="h-4 w-4" /> : t("session.endButton")}
               </Button>
             )}
           </div>
@@ -574,19 +576,19 @@ export default function SessionTerminalModal({
             <div className="flex flex-wrap items-end gap-2">
               <label className="min-w-0 flex-1">
                 <span className="mb-1 block text-xs text-slate-500">
-                  Commit-Nachricht (optional — wird sonst automatisch erzeugt)
+                  {t("session.commitMessage")}
                 </span>
                 <input
                   value={commitMessage}
                   onChange={(e) => setCommitMessage(e.target.value)}
-                  placeholder="z. B. Session: refactored retry loop"
+                  placeholder={t("session.commitPlaceholder")}
                   className="w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
                 />
               </label>
             </div>
           ) : (
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-3 text-sm text-slate-300">
-              <span>{summary || "Session beendet"}</span>
+              <span>{summary || t("session.ended")}</span>
               {commitHash && (
                 <span className="flex items-center gap-2 text-xs text-slate-400">
                   {commitUrl(project, commitHash) ? (
@@ -601,7 +603,7 @@ export default function SessionTerminalModal({
                   ) : (
                     <span className="font-mono">{commitHash.slice(0, 8)}</span>
                   )}
-                  <span>{pushed ? "gepusht" : "nicht gepusht"}</span>
+                  <span>{pushed ? t("session.pushed") : t("session.notPushed")}</span>
                 </span>
               )}
             </div>

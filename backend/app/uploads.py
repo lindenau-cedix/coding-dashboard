@@ -46,10 +46,10 @@ def _safe_name(name: str, index: int, used: set[str]) -> str:
     ext = Path(base).suffix.lower()
     if ext not in _ALLOWED_EXT:
         raise ImageError(
-            f"Nicht unterstütztes Bildformat: '{name or '(ohne Name)'}' "
-            f"(erlaubt: {', '.join(sorted(e.lstrip('.') for e in _ALLOWED_EXT))})."
+            f"Unsupported image format: '{name or '(no name)'}' "
+            f"(allowed: {', '.join(sorted(e.lstrip('.') for e in _ALLOWED_EXT))})."
         )
-    stem = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(base).stem).strip("._") or f"bild-{index + 1}"
+    stem = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(base).stem).strip("._") or f"image-{index + 1}"
     candidate = f"{stem}{ext}"
     n = 2
     while candidate in used:
@@ -66,7 +66,7 @@ def decode_images(images) -> list[tuple[str, bytes]]:
     on any invalid entry so nothing is persisted for a bad request.
     """
     if len(images) > MAX_IMAGES:
-        raise ImageError(f"Maximal {MAX_IMAGES} Bilder pro Aufgabe.")
+        raise ImageError(f"Maximum of {MAX_IMAGES} images per task.")
     out: list[tuple[str, bytes]] = []
     used: set[str] = set()
     for i, img in enumerate(images):
@@ -74,12 +74,12 @@ def decode_images(images) -> list[tuple[str, bytes]]:
         try:
             raw = base64.b64decode(data, validate=True)
         except ValueError:  # includes binascii.Error
-            raise ImageError(f"Bild '{img.name}' ist kein gültiges Base64.")
+            raise ImageError(f"Image '{img.name}' is not valid base64.")
         if not raw:
-            raise ImageError(f"Bild '{img.name}' ist leer.")
+            raise ImageError(f"Image '{img.name}' is empty.")
         if len(raw) > MAX_IMAGE_BYTES:
             raise ImageError(
-                f"Bild '{img.name}' ist größer als {MAX_IMAGE_BYTES // (1024 * 1024)} MB."
+                f"Image '{img.name}' is larger than {MAX_IMAGE_BYTES // (1024 * 1024)} MB."
             )
         out.append((_safe_name(img.name, i, used), raw))
     return out

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import type { GithubRepo } from "../types";
 import { Button, ErrorText, Modal, Spinner } from "./ui";
@@ -19,6 +20,7 @@ export default function SyncFromGithubModal({
   onClose: () => void;
   onSynced: () => void;
 }) {
+  const { t } = useTranslation();
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [filter, setFilter] = useState("");
   const [includeForks, setIncludeForks] = useState(true);
@@ -36,14 +38,14 @@ export default function SyncFromGithubModal({
         setSelected(new Set(repos.filter((r) => !r.already_imported).map((r) => r.full_name)));
       } catch (err) {
         if (!active) return;
-        const message = err instanceof Error ? err.message : "Laden fehlgeschlagen";
+        const message = err instanceof Error ? err.message : t("syncGithub.loadFailed");
         setPhase({ kind: "preview", repos: [], user: "", error: message });
       }
     })();
     return () => {
       active = false;
     };
-  }, []);
+  }, [t]);
 
   const filtered = useMemo(() => {
     if (phase.kind !== "preview") return [];
@@ -96,23 +98,23 @@ export default function SyncFromGithubModal({
       });
       if (res.imported > 0) onSynced();
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Sync fehlgeschlagen";
+      const message = err instanceof Error ? err.message : t("syncGithub.syncFailed");
       // Return to preview with the error so the user can retry.
       setPhase({ kind: "preview", repos: phase.repos, user: phase.user, error: message });
     }
   }
 
   return (
-    <Modal title="Repos von GitHub synchronisieren" onClose={onClose}>
+    <Modal title={t("syncGithub.title")} onClose={onClose}>
       {phase.kind === "loading" && (
         <div className="flex items-center gap-2 py-8 text-slate-400">
-          <Spinner className="h-5 w-5" /> Lade Repos von GitHub…
+          <Spinner className="h-5 w-5" /> {t("syncGithub.loading")}
         </div>
       )}
 
       {phase.kind === "syncing" && (
         <div className="flex items-center gap-2 py-8 text-slate-400">
-          <Spinner className="h-5 w-5" /> Klone {phase.selected.length} Repos…
+          <Spinner className="h-5 w-5" /> {t("syncGithub.syncing", { count: phase.selected.length })}
         </div>
       )}
 
@@ -121,8 +123,10 @@ export default function SyncFromGithubModal({
           {phase.error && <ErrorText>{phase.error}</ErrorText>}
           {phase.user && (
             <p className="text-xs text-slate-500">
-              Sichtbar für <span className="font-mono text-slate-300">{phase.user}</span>: {phase.repos.length} Repos
-              ({phase.repos.filter((r) => !r.already_imported).length} noch nicht importiert).
+              {t("syncGithub.visibleFor", { user: phase.user, count: phase.repos.length })}
+              {t("syncGithub.notYetImported", {
+                count: phase.repos.filter((r) => !r.already_imported).length,
+              })}
             </p>
           )}
           <div className="flex flex-wrap items-center gap-3">
@@ -130,7 +134,7 @@ export default function SyncFromGithubModal({
               type="search"
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filtern…"
+              placeholder={t("common.filterPlaceholder")}
               className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
             />
             <label className="flex items-center gap-1 text-xs text-slate-400">
@@ -140,7 +144,7 @@ export default function SyncFromGithubModal({
                 onChange={(e) => setIncludeForks(e.target.checked)}
                 className="h-3.5 w-3.5 accent-cyan-500"
               />
-              Forks
+              {t("syncGithub.forks")}
             </label>
             <label className="flex items-center gap-1 text-xs text-slate-400">
               <input
@@ -149,15 +153,15 @@ export default function SyncFromGithubModal({
                 onChange={(e) => setIncludeArchived(e.target.checked)}
                 className="h-3.5 w-3.5 accent-cyan-500"
               />
-              Archiviert
+              {t("syncGithub.archived")}
             </label>
           </div>
           <div className="max-h-80 overflow-y-auto rounded-lg border border-slate-800">
             {filtered.length === 0 ? (
               <p className="p-4 text-sm text-slate-500">
                 {phase.repos.length === 0
-                  ? "Keine Repos gefunden. Prüfe den GitHub-Token und seine Berechtigungen."
-                  : "Keine Repos passen zum Filter."}
+                  ? t("syncGithub.noReposFound")
+                  : t("syncGithub.noReposMatch")}
               </p>
             ) : (
               <ul className="divide-y divide-slate-800">
@@ -182,22 +186,22 @@ export default function SyncFromGithubModal({
                         </span>
                         {r.private && (
                           <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">
-                            privat
+                            {t("syncGithub.private")}
                           </span>
                         )}
                         {r.fork && (
                           <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">
-                            fork
+                            {t("syncGithub.fork")}
                           </span>
                         )}
                         {r.archived && (
                           <span className="rounded bg-amber-900/40 px-1.5 py-0.5 text-[10px] text-amber-300">
-                            archiviert
+                            {t("syncGithub.archivedTag")}
                           </span>
                         )}
                         {r.already_imported && (
                           <span className="rounded bg-emerald-900/40 px-1.5 py-0.5 text-[10px] text-emerald-300">
-                            bereits importiert
+                            {t("syncGithub.alreadyImported")}
                           </span>
                         )}
                       </div>
@@ -211,17 +215,17 @@ export default function SyncFromGithubModal({
             )}
           </div>
           <div className="flex items-center justify-between gap-2 pt-2">
-            <span className="text-xs text-slate-500">{selectedCount} ausgewählt</span>
+            <span className="text-xs text-slate-500">{t("syncGithub.selectedCount", { count: selectedCount })}</span>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={onClose}>
-                Abbrechen
+                {t("syncGithub.cancel")}
               </Button>
               <Button onClick={sync} disabled={selectedCount === 0}>
                 {selectedCount === 0
-                  ? "Nichts ausgewählt"
+                  ? t("syncGithub.nothingSelected")
                   : selectedCount === phase.repos.length
-                    ? `Alle ${selectedCount} klonen`
-                    : `${selectedCount} klonen`}
+                    ? t("syncGithub.cloneAll", { count: selectedCount })
+                    : t("syncGithub.cloneCount", { count: selectedCount })}
               </Button>
             </div>
           </div>
@@ -231,12 +235,12 @@ export default function SyncFromGithubModal({
       {phase.kind === "result" && (
         <div className="space-y-3">
           <p className="text-sm text-slate-300">
-            <span className="text-emerald-400">{phase.summary.imported} importiert</span>
+            <span className="text-emerald-400">{t("syncGithub.resultImported", { count: phase.summary.imported })}</span>
             {phase.summary.skipped > 0 && (
-              <>, <span className="text-slate-400">{phase.summary.skipped} übersprungen</span></>
+              <>, <span className="text-slate-400">{t("syncGithub.resultSkipped", { count: phase.summary.skipped })}</span></>
             )}
             {phase.summary.failed > 0 && (
-              <>, <span className="text-red-400">{phase.summary.failed} fehlgeschlagen</span></>
+              <>, <span className="text-red-400">{t("syncGithub.resultFailed", { count: phase.summary.failed })}</span></>
             )}
             .
           </p>
@@ -265,7 +269,7 @@ export default function SyncFromGithubModal({
             </ul>
           </div>
           <div className="flex justify-end pt-1">
-            <Button onClick={onClose}>Schließen</Button>
+            <Button onClick={onClose}>{t("syncGithub.close")}</Button>
           </div>
         </div>
       )}

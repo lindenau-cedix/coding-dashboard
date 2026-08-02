@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { HashRouter } from "react-router-dom";
 import App from "./App";
 import { AuthProvider } from "./auth";
+import "./i18n";
 import "./index.css";
 
 // HashRouter works everywhere: behind nginx without rewrites and inside the

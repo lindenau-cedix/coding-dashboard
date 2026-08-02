@@ -117,7 +117,7 @@ async def list_from_github(db: Session = Depends(get_db)) -> GithubListResponse:
     """
     settings = get_settings()
     if not settings.github_token:
-        raise HTTPException(503, "GitHub-Token nicht konfiguriert (CD_GITHUB_TOKEN).")
+        raise HTTPException(503, "GitHub token not configured (CD_GITHUB_TOKEN).")
     existing_full_names = {
         (p.github_full_name or "").lower() for p in db.query(Project).all()
     }
@@ -187,7 +187,7 @@ async def sync_from_github(
     """
     settings = get_settings()
     if not settings.github_token:
-        raise HTTPException(503, "GitHub-Token nicht konfiguriert (CD_GITHUB_TOKEN).")
+        raise HTTPException(503, "GitHub token not configured (CD_GITHUB_TOKEN).")
     existing_full_names = {
         (p.github_full_name or "").lower(): p for p in db.query(Project).all()
     }
@@ -275,7 +275,7 @@ async def _import_single_repo(
         default_branch = repo_meta.get("default_branch") or settings.default_branch
         if not clone_url:
             return SyncFromGithubResult(
-                full_name=full_name, status="failed", detail="keine clone_url von GitHub"
+                full_name=full_name, status="failed", detail="no clone_url from GitHub"
             )
         try:
             await asyncio.to_thread(
@@ -319,9 +319,9 @@ async def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> 
     settings = get_settings()
     name = body.name.strip()
     if not name:
-        raise HTTPException(400, "Name darf nicht leer sein.")
+        raise HTTPException(400, "Name must not be empty.")
     if not settings.github_token:
-        raise HTTPException(503, "GitHub-Token nicht konfiguriert (CD_GITHUB_TOKEN).")
+        raise HTTPException(503, "GitHub token not configured (CD_GITHUB_TOKEN).")
 
     slug = _unique_slug(db, _slugify(name))
     local_path = settings.projects_dir / slug
@@ -346,7 +346,7 @@ async def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> 
         else:
             full = _parse_full_name(body.repo)
             if "/" not in full:
-                raise HTTPException(400, "Bitte 'owner/repo' oder eine GitHub-URL angeben.")
+                raise HTTPException(400, "Please provide 'owner/repo' or a GitHub URL.")
             repo = await github_client.get_repo(full)
     except github_client.GitHubError as exc:
         code = exc.status_code if 400 <= exc.status_code < 500 else 502
@@ -354,16 +354,16 @@ async def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> 
         if exc.status_code in (401, 403):
             if body.mode == "create":
                 detail += (
-                    " - Der GitHub-Token darf keine Repositories anlegen. Benoetigt wird "
-                    "'repo'-Scope (klassischer Token) bzw. fein-granular die Berechtigung "
-                    "'Administration: Read and write' fuer den passenden Owner mit Zugriff "
-                    "auf 'All repositories'. Token mit diesen Rechten neu erstellen und "
-                    "CD_GITHUB_TOKEN aktualisieren."
+                    " - The GitHub token is not allowed to create repositories. "
+                    "Required is the 'repo' scope (classic token) or, for fine-grained "
+                    "tokens, the 'Administration: Read and write' permission for the "
+                    "matching owner with access to 'All repositories'. Re-create the "
+                    "token with these rights and update CD_GITHUB_TOKEN."
                 )
             else:
                 detail += (
-                    " - Der GitHub-Token hat keinen Zugriff auf dieses Repository "
-                    "(fein-granular: 'Contents: Read' und Zugriff auf das Repo noetig)."
+                    " - The GitHub token has no access to this repository "
+                    "(fine-grained: 'Contents: Read' and access to the repo required)."
                 )
         raise HTTPException(code, detail)
 
@@ -372,7 +372,7 @@ async def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> 
     html_url = repo.get("html_url", "")
     default_branch = repo.get("default_branch") or settings.default_branch
     if not clone_url:
-        raise HTTPException(502, "GitHub lieferte keine clone_url zurueck.")
+        raise HTTPException(502, "GitHub returned no clone_url.")
 
     try:
         await asyncio.to_thread(
@@ -405,7 +405,7 @@ async def create_project(body: ProjectCreate, db: Session = Depends(get_db)) -> 
 def get_project(project_id: str, db: Session = Depends(get_db)) -> Project:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     return project
 
 
@@ -413,7 +413,7 @@ def get_project(project_id: str, db: Session = Depends(get_db)) -> Project:
 def get_agents_md(project_id: str, db: Session = Depends(get_db)) -> dict:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     path = Path(project.local_path) / "AGENTS.md"
     if not path.exists():
         return {"exists": False, "content": ""}
@@ -433,12 +433,12 @@ _MAX_TEXT_BYTES = 512 * 1024
 def _project_root(db: Session, project_id: str) -> Path:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if not project.local_path:
         raise HTTPException(409, "Kein lokales Repo vorhanden.")
     root = Path(project.local_path).resolve()
     if not root.is_dir():
-        raise HTTPException(409, "Projektverzeichnis nicht gefunden.")
+        raise HTTPException(409, "Project directory not found.")
     return root
 
 
@@ -447,7 +447,7 @@ def _resolve_within(root: Path, rel: str) -> Path:
     rel = (rel or "").strip().lstrip("/")
     target = (root / rel).resolve()
     if target != root and root not in target.parents:
-        raise HTTPException(400, "Pfad liegt außerhalb des Projekts.")
+        raise HTTPException(400, "Path is outside of the project.")
     return target
 
 
@@ -459,14 +459,14 @@ def list_files(
     root = _project_root(db, project_id)
     target = _resolve_within(root, path)
     if not target.is_dir():
-        raise HTTPException(404, "Verzeichnis nicht gefunden.")
+        raise HTTPException(404, "Directory not found.")
     entries: list[FileEntry] = []
     try:
         children = sorted(
             target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())
         )
     except OSError as exc:
-        raise HTTPException(500, f"Verzeichnis nicht lesbar: {exc}")
+        raise HTTPException(500, f"Directory not readable: {exc}")
     for child in children:
         if child.name in _FILE_BROWSER_HIDDEN:
             continue
@@ -494,7 +494,7 @@ def read_file(
     root = _project_root(db, project_id)
     target = _resolve_within(root, path)
     if not target.is_file():
-        raise HTTPException(404, "Datei nicht gefunden.")
+        raise HTTPException(404, "File not found.")
     rel = target.relative_to(root).as_posix()
     try:
         size = target.stat().st_size
@@ -502,7 +502,7 @@ def read_file(
         with target.open("rb") as fh:
             raw = fh.read(_MAX_TEXT_BYTES + 1)
     except OSError as exc:
-        raise HTTPException(403, f"Datei nicht lesbar: {exc}")
+        raise HTTPException(403, f"File not readable: {exc}")
     truncated = size > _MAX_TEXT_BYTES or len(raw) > _MAX_TEXT_BYTES
     chunk = raw[:_MAX_TEXT_BYTES]
     # A NUL byte in the first chunk is a reliable binary signal.
@@ -535,7 +535,7 @@ def archive_project(project_id: str, db: Session = Depends(get_db)) -> Project:
     """
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if project.archived:
         # Idempotent: archiving an already-archived project is a no-op.
         return project
@@ -551,7 +551,7 @@ def unarchive_project(project_id: str, db: Session = Depends(get_db)) -> Project
     """Reverse of archive: the project reappears in the default list."""
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if not project.archived:
         return project
     project.archived = False
@@ -569,7 +569,7 @@ async def delete_project(
 ) -> Response:
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if delete_remote and project.github_full_name:
         try:
             await github_client.delete_repo(project.github_full_name)
@@ -593,7 +593,7 @@ async def pull_project(project_id: str, db: Session = Depends(get_db)) -> dict:
     settings = get_settings()
     project = db.get(Project, project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
     if not project.local_path:
         raise HTTPException(409, "Kein lokales Repo vorhanden.")
     try:

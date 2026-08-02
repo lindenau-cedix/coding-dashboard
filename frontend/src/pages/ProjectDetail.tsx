@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Link, useParams } from "react-router-dom";
 import { api, commitUrl } from "../api";
 import { subscribe as subscribeCrossTab } from "../crossTab";
@@ -128,6 +129,7 @@ function runnerOptions(
 }
 
 export default function ProjectDetail() {
+  const { t } = useTranslation();
   const { id = "" } = useParams();
   const ctx = useProject();
   const [project, setProject] = useState<Project | null>(ctx.project);
@@ -143,7 +145,7 @@ export default function ProjectDetail() {
   const [prompt, setPrompt] = useState("");
   const [images, setImages] = useState<TaskImagePayload[]>([]);
   const [sessionStartArgs, setSessionStartArgs] = useState("");
-  // "Interaktiv" checkbox (Task/Goal only): run the prompt inside a live PTY
+  // "Interactive" checkbox (Task/Goal only): run the prompt inside a live PTY
   // session — auto-typed once, then interactive (answer questions, interrupt,
   // follow-up prompts). Requires the selected agent to support session mode.
   const [interactive, setInteractive] = useState(false);
@@ -189,9 +191,6 @@ export default function ProjectDetail() {
     [agents, agent],
   );
   const agentChoices = useMemo(() => buildAgentChoices(agents, mode), [agents, mode]);
-  // Runner dropdown options for the currently selected agent. When the array
-  // has a single "Container" entry, the Runner <select> is hidden entirely
-  // (the host option isn't available for this agent+mode).
   const currentRunnerOptions = useMemo(
     () => runnerOptions(currentAgent ?? undefined, agents, mode),
     [currentAgent, agents, mode],
@@ -209,23 +208,14 @@ export default function ProjectDetail() {
     if (!choice) return;
 
     setAgent(choice.agentKey);
-    // Agent dropdown no longer carries runner info; the user picks Container
-    // vs Host via SSH in the dedicated Runner <select> below. Honour the
-    // ``runner`` already encoded in the choice for hand-written configs
-    // that surface a host-only entry — for everything else, reset to "".
     setRunner(choice.runner);
-    // Drop selections the new agent does not offer ("" = agent default).
     const a = agents.find((x) => x.key === choice.agentKey);
     setModel((m) => (a?.model_choices?.includes(m) ? m : ""));
     setEffort((e) => (a?.effort_choices?.includes(e) ? e : ""));
-    // Env profiles apply to the Claude family, regardless of whether the
-    // selected execution target is its container or SSH sibling.
     setEnvProfileKey(baseAgentKey(choice.agentKey) === "claude" ? envProfileKey : "");
   }
 
   function changeRunnerChoice(next: Runner) {
-    // Force the runner back to Container if the user picks an agent whose
-    // host sibling isn't available for this mode.
     const opts = runnerOptions(currentAgent ?? undefined, agents, mode);
     if (!opts.some((o) => o.value === next)) {
       setRunner("");
@@ -255,12 +245,6 @@ export default function ProjectDetail() {
           setRunner(first.runner);
         }
       }
-      // Sessions DO support the host runner and env-profile overlays
-      // (SessionManager.start wires both — the sibling's host_staging
-      // flips the workdir to the host-staging copy and the env-overlay
-      // is merged onto _build_env before exec). Keeping the previously
-      // chosen values when switching into session mode matches the
-      // task-mode behaviour; the dropdowns below stay visible.
     }
   }
 
@@ -274,18 +258,18 @@ export default function ProjectDetail() {
     for (const file of files) {
       if (!file.type.startsWith("image/")) continue;
       if (next.length >= MAX_IMAGES) {
-        setError(`Maximal ${MAX_IMAGES} Bilder pro Aufgabe.`);
+        setError(`Maximum of ${MAX_IMAGES} images per task.`);
         break;
       }
       if (file.size > MAX_IMAGE_BYTES) {
-        setError(`"${file.name}" ist größer als ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`);
+        setError(`"${file.name}" is larger than ${MAX_IMAGE_BYTES / 1024 / 1024} MB.`);
         continue;
       }
       try {
         const data = await readAsDataUrl(file);
-        next.push({ name: file.name || `bild-${next.length + 1}.png`, data });
+        next.push({ name: file.name || `image-${next.length + 1}.png`, data });
       } catch {
-        setError(`"${file.name}" konnte nicht gelesen werden.`);
+        setError(`"${file.name}" could not be read.`);
       }
     }
     setImages(next);
@@ -319,14 +303,6 @@ export default function ProjectDetail() {
         ctx.setAgents(ag);
         setTasks(ts);
         setProfiles(profs);
-        // Pick the default agent from the SAME choice list the dropdown
-        // renders, not the raw agent array: buildAgentChoices yields one
-        // entry per base agent and a host-only fallback when a hand-written
-        // config registers `<base>-host` without its base. Using
-        // ``ag.find(a => a.enabled)`` here would default to whatever entry
-        // comes first — which can be ``claude-host`` — silently starting an
-        // SSH run on the very first submit even though the UI reads
-        // "Container". mode is still "task" at initial load.
         const firstChoice = buildAgentChoices(ag, "task").find((c) => !c.disabled);
         if (firstChoice) {
           setAgent(firstChoice.agentKey);
@@ -337,7 +313,7 @@ export default function ProjectDetail() {
           .map((t) => t.id);
         if (live.length) setActiveTaskIds(live);
       } catch (err) {
-        if (active) setError(err instanceof Error ? err.message : "Laden fehlgeschlagen");
+        if (active) setError(err instanceof Error ? err.message : "Load failed");
       } finally {
         if (active) setLoading(false);
       }
@@ -347,12 +323,6 @@ export default function ProjectDetail() {
     };
   }, [id]);
 
-  // Cross-tab fix: the popup SessionTerminalModal calls
-  // ``broadcast({type:"session-done", taskId, status})`` when the user ends
-  // the session from there. If the user opened the popup from here, this
-  // tab's cached ``tasks`` list still shows the session with ``status=
-  // "running"`` — refresh the list immediately so the history row + the
-  // git footer update without a manual reload (issue #5).
   useEffect(() => {
     const unsubscribe = subscribeCrossTab((event) => {
       if (event.type === "session-done" || event.type === "task-done") {
@@ -363,12 +333,6 @@ export default function ProjectDetail() {
     return unsubscribe;
   }, [id]);
 
-  // Clamp the runner whenever the selected agent+mode no longer supports
-  // the host variant. This catches config reloads (the host sibling
-  // disappeared), mode switches (the host sibling doesn't support
-  // session/goal), and direct agent changes. Without this guard, the
-  // Runner <select> would silently become inconsistent with its parent
-  // Agent.
   useEffect(() => {
     if (runner === "") return;
     const opts = runnerOptions(currentAgent ?? undefined, agents, mode);
@@ -377,10 +341,6 @@ export default function ProjectDetail() {
     }
   }, [currentAgent, agents, mode, runner]);
 
-  // The "Interaktiv" toggle only applies to Task/Goal with a session-capable
-  // agent. Clear it when the agent can't do sessions (or we're in session
-  // mode, where it's redundant) so a stale check can't route a submit into a
-  // session that would immediately 400.
   useEffect(() => {
     if (!interactive) return;
     if (mode === "session" || !currentAgent?.supports_session) {
@@ -388,10 +348,6 @@ export default function ProjectDetail() {
     }
   }, [interactive, mode, currentAgent]);
 
-  /** Resolve the actual agent key for the selected choice. The UI exposes
-   *  Container and Host via SSH through separate controls, but the backend
-   *  stores the underlying AgentSpec key (e.g. ``claude`` vs ``claude-host``)
-   *  so existing tasks can keep filtering on it directly. */
   function resolveSubmitAgentKey(): string {
     if (runner === "host") {
       const base = baseAgentKey(agent);
@@ -406,8 +362,6 @@ export default function ProjectDetail() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!agent || !prompt.trim()) return;
-    // "Interaktiv" runs the same prompt/goal inside a live PTY session instead
-    // of the one-shot console — seeded once, then interactive.
     if (interactive && mode !== "session") {
       await startInteractive();
       return;
@@ -431,14 +385,12 @@ export default function ProjectDetail() {
       setPrompt("");
       setImages([]);
       await refreshTasks();
-      // Also pin to the floating window so the user can keep watching while
-      // they create the next task or navigate elsewhere.
       openAgentWindow(
         toRunningTask(task, project),
         agentName[task.agent] ?? task.agent,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Task konnte nicht gestartet werden");
+      setError(err instanceof Error ? err.message : "Task could not be started");
     } finally {
       setSubmitting(false);
     }
@@ -461,9 +413,6 @@ export default function ProjectDetail() {
       );
       setSessionStartArgs("");
       await refreshTasks();
-      // Pin the new session to its own browser tab. Closing the tab does NOT
-      // end the session — the user can reopen it from the dashboard's tray
-      // tab or from the projects page history.
       const sessTask: Task = {
         id: task_id,
         project_id: id,
@@ -500,15 +449,12 @@ export default function ProjectDetail() {
         agentName[submitAgent] ?? submitAgent,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Session konnte nicht gestartet werden");
+      setError(err instanceof Error ? err.message : "Session could not be started");
     } finally {
       setSubmitting(false);
     }
   }
 
-  /** Interactive Task/Goal: start a PTY session seeded with the prompt and
-   *  open its terminal window. Mirrors ``startSession`` but carries the
-   *  Task/Goal mode + prompt so the backend auto-types it once. */
   async function startInteractive() {
     if (!agent || !prompt.trim()) return;
     setSubmitting(true);
@@ -566,13 +512,12 @@ export default function ProjectDetail() {
         agentName[submitAgent] ?? submitAgent,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Interaktive Session konnte nicht gestartet werden");
+      setError(err instanceof Error ? err.message : "Interactive session could not be started");
     } finally {
       setSubmitting(false);
     }
   }
 
-  /** Cast a Task to the RunningTask shape the WindowManager expects. */
   function toRunningTask(t: Task, p: Project | null): RunningTask {
     return {
       ...t,
@@ -583,11 +528,6 @@ export default function ProjectDetail() {
 
   async function toggleExpand(task: Task) {
     if (task.is_session || task.mode === "session") {
-      // Sessions live in their own browser tab — opening it from history is
-      // the same gesture as starting one: a single click pops the dedicated
-      // window (or pins to the floating tray if popups are blocked). The
-      // session itself keeps running until the user clicks "Session beenden"
-      // inside that window.
       openAgentWindow(toRunningTask(task, project), agentName[task.agent] ?? task.agent);
       return;
     }
@@ -601,7 +541,7 @@ export default function ProjectDetail() {
         const full = await api.getTask(task.id);
         setOutputs((o) => ({ ...o, [task.id]: full.output ?? "" }));
       } catch {
-        setOutputs((o) => ({ ...o, [task.id]: "(Ausgabe konnte nicht geladen werden)" }));
+        setOutputs((o) => ({ ...o, [task.id]: "(Output could not be loaded)" }));
       }
     }
   }
@@ -612,21 +552,19 @@ export default function ProjectDetail() {
     if (next && agentsMd === null) {
       try {
         const res = await api.agentsMd(id);
-        setAgentsMd(res.exists ? res.content : "(AGENTS.md existiert noch nicht)");
+        setAgentsMd(res.exists ? res.content : "(AGENTS.md does not yet exist)");
         agentsMdLoaded.current = true;
       } catch {
-        setAgentsMd("(AGENTS.md konnte nicht geladen werden)");
+        setAgentsMd("(AGENTS.md could not be loaded)");
       }
     }
   }
 
-  /** Re-fetch AGENTS.md after a run so the displayed context stays current.
-   *  Only refetches once it has been loaded at least once (panel opened). */
   async function reloadAgentsMd() {
     if (!agentsMdLoaded.current) return;
     try {
       const res = await api.agentsMd(id);
-      setAgentsMd(res.exists ? res.content : "(AGENTS.md existiert noch nicht)");
+      setAgentsMd(res.exists ? res.content : "(AGENTS.md does not yet exist)");
     } catch {
       /* keep previous content */
     }
@@ -641,16 +579,15 @@ export default function ProjectDetail() {
     setPulling(true);
     try {
       const res = await api.pullProject(id);
-      setPullDialog({ open: true, output: res.output || "Erfolgreich gepullt.", success: true });
+      setPullDialog({ open: true, output: res.output || "Pulled successfully.", success: true });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Pull fehlgeschlagen";
+      const msg = err instanceof Error ? err.message : "Pull failed";
       setPullDialog({ open: true, output: msg, success: false });
     } finally {
       setPulling(false);
     }
   }
 
-  /** Pull an archived project back into the active list from the detail page. */
   async function unarchive() {
     setUnarchiving(true);
     try {
@@ -658,7 +595,7 @@ export default function ProjectDetail() {
       setProject(updated);
       ctx.setProject(updated);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Wiederherstellen fehlgeschlagen");
+      setError(err instanceof Error ? err.message : "Restore failed");
     } finally {
       setUnarchiving(false);
     }
@@ -672,14 +609,14 @@ export default function ProjectDetail() {
     );
   }
   if (!project) {
-    return <ErrorText>{error || "Projekt nicht gefunden."}</ErrorText>;
+    return <ErrorText>{error || "Project not found."}</ErrorText>;
   }
 
   return (
     <div className="space-y-6">
       <div>
         <Link to="/" className="text-sm text-slate-400 hover:text-cyan-400">
-          ← Projekte
+          ← Projects
         </Link>
         <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
           <h1 className="text-2xl font-semibold text-slate-100">{project.name}</h1>
@@ -699,7 +636,7 @@ export default function ProjectDetail() {
             </span>
             {project.archived && (
               <span className="rounded bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300">
-                Archiviert
+                Archived
               </span>
             )}
             <button
@@ -713,10 +650,10 @@ export default function ProjectDetail() {
               <button
                 onClick={unarchive}
                 disabled={unarchiving}
-                title="Aus dem Archiv zurückholen"
+                title="Restore from archive"
                 className="rounded border border-cyan-700 bg-cyan-900/30 px-2.5 py-1 text-xs font-medium text-cyan-400 transition hover:bg-cyan-900/60 disabled:opacity-50"
               >
-                {unarchiving ? "Hole zurück…" : "↩ Wiederherstellen"}
+                {unarchiving ? "Restoring…" : "↩ Restore"}
               </button>
             )}
           </div>
@@ -734,10 +671,10 @@ export default function ProjectDetail() {
         className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900 p-5"
       >
         <h2 className="font-medium text-slate-200">
-          {mode === "goal" ? "Neues Ziel" : "Neue Aufgabe"}
+          {mode === "goal" ? "New goal" : "New task"}
         </h2>
         <div className="flex flex-wrap items-center gap-2">
-          <label className="text-sm text-slate-400">Modus:</label>
+          <label className="text-sm text-slate-400">Mode:</label>
           <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
             {modeOptions.map((m) => (
               <button
@@ -750,7 +687,7 @@ export default function ProjectDetail() {
                     : "bg-slate-800 text-slate-300 hover:bg-slate-700"
                 }`}
               >
-                {m === "goal" ? "Ziel" : m === "session" ? "Session" : "Aufgabe"}
+                {m === "goal" ? "Goal" : m === "session" ? "Session" : "Task"}
               </button>
             ))}
           </div>
@@ -766,7 +703,7 @@ export default function ProjectDetail() {
               {agentChoices.map((choice) => (
                 <option key={choice.value} value={choice.value} disabled={choice.disabled}>
                   {choice.label}
-                  {choice.disabled ? " (deaktiviert)" : ""}
+                  {choice.disabled ? " (disabled)" : ""}
                 </option>
               ))}
             </select>
@@ -778,7 +715,7 @@ export default function ProjectDetail() {
                 value={runner}
                 onChange={(e) => changeRunnerChoice(e.target.value as Runner)}
                 className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
-                title="Container läuft im Dashboard-Container; Host via SSH führt den Agent auf dem Host aus (geteilter Staging-Ordner)."
+                title="Container runs in the dashboard container; Host via SSH runs the agent on the host (shared staging folder)."
               >
                 {currentRunnerOptions.map((opt) => (
                   <option key={opt.value || "container"} value={opt.value}>
@@ -790,13 +727,13 @@ export default function ProjectDetail() {
           )}
           {mode !== "session" && (currentAgent?.model_choices?.length ?? 0) > 0 && (
             <span className="flex items-center gap-2">
-              <label className="text-sm text-slate-400">Modell:</label>
+              <label className="text-sm text-slate-400">Model:</label>
               <select
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
               >
-                <option value="">Standard</option>
+                <option value="">Default</option>
                 {currentAgent!.model_choices.map((m) => (
                   <option key={m} value={m}>
                     {m}
@@ -813,7 +750,7 @@ export default function ProjectDetail() {
                 onChange={(e) => setEffort(e.target.value)}
                 className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
               >
-                <option value="">Standard</option>
+                <option value="">Default</option>
                 {currentAgent!.effort_choices.map((ef) => (
                   <option key={ef} value={ef}>
                     {ef}
@@ -822,19 +759,15 @@ export default function ProjectDetail() {
               </select>
             </span>
           )}
-          {/* Env-profile overlay. For today only Claude supports it
-              (other agents ignore the field on the server). Available
-              in session mode too — SessionManager.start applies the
-              overlay onto _build_env before the PTY subprocess execs. */}
           {baseAgentKey(agent) === "claude" && profiles.length > 0 && (
             <span className="flex items-center gap-2">
-              <label className="text-sm text-slate-400">Env-Profil:</label>
+              <label className="text-sm text-slate-400">Env profile:</label>
               <select
                 value={envProfileKey}
                 onChange={(e) => setEnvProfileKey(e.target.value)}
                 className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 outline-none focus:border-cyan-500"
               >
-                <option value="">Standard (Anthropic)</option>
+                <option value="">Default (Anthropic)</option>
                 {profiles.map((p) => (
                   <option key={p.key} value={p.key}>
                     {p.name}
@@ -853,8 +786,8 @@ export default function ProjectDetail() {
             }`}
             title={
               currentAgent?.supports_session
-                ? "Führt den Prompt in einer echten TUI-Session aus – der Agent kann Rückfragen stellen, du kannst unterbrechen und weiterschreiben."
-                : "Dieser Agent unterstützt keinen Session-Modus."
+                ? "Runs the prompt in a real TUI session – the agent can ask questions, you can interrupt and keep typing."
+                : "This agent does not support session mode."
             }
           >
             <input
@@ -865,26 +798,26 @@ export default function ProjectDetail() {
               className="mt-0.5"
             />
             <span>
-              💬 Interaktiv – als Live-Session ausführen
+              💬 Interactive – run as live session
               <span className="ml-1 text-xs text-slate-500">
-                (Rückfragen beantworten, unterbrechen, weiter chatten)
+                (answer questions, interrupt, keep chatting)
               </span>
             </span>
           </label>
         )}
         {mode === "session" ? (
           <label className="block">
-            <span className="mb-1 block text-sm text-slate-400">Startparameter</span>
+            <span className="mb-1 block text-sm text-slate-400">Start parameters</span>
             <input
               value={sessionStartArgs}
               onChange={(e) => setSessionStartArgs(e.target.value)}
-              placeholder='z.B. --model opus, --resume "session-id" oder bei Codex: resume "session-id"'
+              placeholder='e.g. --model opus, --resume "session-id" or for Codex: resume "session-id"'
               className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
             />
             <span className="mt-1 block text-xs text-slate-500">
-              Eine beendete Session kann per Resume-Parameter fortgesetzt werden – sie
-              startet automatisch im ursprünglichen Ordner. Parallele Sessions im selben
-              Projekt laufen in einer isolierten Arbeitskopie.
+              A finished session can be resumed via the resume parameter – it
+              starts automatically in the original folder. Parallel sessions in the same
+              project run in an isolated working copy.
             </span>
           </label>
         ) : (
@@ -895,8 +828,8 @@ export default function ProjectDetail() {
             rows={4}
             placeholder={
               mode === "goal"
-                ? "Beschreibe das Ziel – der Agent arbeitet im /goal-Modus, bis es erreicht ist…"
-                : "Beschreibe die Aufgabe, die der Agent im Projekt erledigen soll…"
+                ? "Describe the goal – the agent works in /goal mode until it is reached…"
+                : "Describe the task the agent should perform in the project…"
             }
             className="w-full resize-y rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
           />
@@ -914,7 +847,7 @@ export default function ProjectDetail() {
                 <button
                   type="button"
                   onClick={() => setImages((arr) => arr.filter((_, j) => j !== i))}
-                  title="Bild entfernen"
+                  title="Remove image"
                   className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-slate-600 bg-slate-900 text-xs text-slate-300 hover:border-red-500 hover:text-red-400"
                 >
                   ×
@@ -943,12 +876,12 @@ export default function ProjectDetail() {
                 disabled={images.length >= MAX_IMAGES}
                 className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-300 transition hover:bg-slate-700 disabled:opacity-50"
               >
-                📎 Bilder anhängen
+                📎 Attach images
               </button>
               <span className="text-xs text-slate-500">
                 {images.length > 0
-                  ? `${images.length}/${MAX_IMAGES} Bild(er)`
-                  : "oder Bild in das Textfeld einfügen (Strg+V)"}
+                  ? `${images.length}/${MAX_IMAGES} image(s)`
+                  : "or paste image into the text field (Ctrl+V)"}
               </span>
             </div>
           ) : (
@@ -957,12 +890,12 @@ export default function ProjectDetail() {
           <div className="flex items-center gap-3">
             <p className="hidden text-xs text-slate-500 sm:block">
               {mode === "session"
-                ? "Interaktive TUI-Session. Nach dem Beenden werden Änderungen automatisch committet & gepusht."
+                ? "Interactive TUI session. After ending, changes are automatically committed & pushed."
                 : interactive
-                  ? "Öffnet eine Live-Session: der Prompt wird einmal automatisch gesendet, danach kannst du antworten & weiterarbeiten. Beim Beenden wird automatisch committet & gepusht."
+                  ? "Opens a live session: the prompt is sent once automatically, then you can answer & continue. On exit, changes are committed & pushed automatically."
                   : mode === "goal"
-                    ? "Der gesamte Verlauf bis zum Ziel zählt als ein Task. Änderungen werden danach automatisch committet & gepusht."
-                    : "Nach Abschluss werden Änderungen automatisch committet & gepusht."}
+                    ? "The entire history until the goal counts as one task. Changes are then automatically committed & pushed."
+                    : "After completion, changes are automatically committed & pushed."}
             </p>
             {mode === "session" ? (
               <Button
@@ -970,19 +903,19 @@ export default function ProjectDetail() {
                 onClick={() => void startSession()}
                 disabled={submitting || !agent || !currentAgent?.supports_session}
               >
-                {submitting ? "Startet…" : "Session starten"}
+                {submitting ? "Starting…" : "Start session"}
               </Button>
             ) : (
               <Button type="submit" disabled={submitting || !agent || !prompt.trim()}>
                 {submitting
-                  ? "Startet…"
+                  ? "Starting…"
                   : interactive
                     ? mode === "goal"
-                      ? "Ziel interaktiv starten"
-                      : "Interaktiv starten"
+                      ? "Start goal interactively"
+                      : "Start interactively"
                     : mode === "goal"
-                      ? "Ziel starten"
-                      : "Aufgabe starten"}
+                      ? "Start goal"
+                      : "Start task"}
               </Button>
             )}
           </div>
@@ -993,14 +926,14 @@ export default function ProjectDetail() {
       {activeTaskIds.length > 0 && (
         <div className="space-y-2">
           <h2 className="font-medium text-slate-200">
-            Live-Ausgabe{activeTaskIds.length > 1 ? ` (${activeTaskIds.length})` : ""}
+            Live output{activeTaskIds.length > 1 ? ` (${activeTaskIds.length})` : ""}
           </h2>
           <div className="space-y-3">
             {activeTaskIds.map((tid) => {
-              const t = tasks.find((x) => x.id === tid);
-              const label = t
-                ? `${agentName[t.agent] ?? t.agent}${t.mode === "goal" ? " · Ziel" : ""} — ${
-                    t.prompt ? t.prompt.slice(0, 80) : ""
+              const task = tasks.find((x) => x.id === tid);
+              const label = task
+                ? `${agentName[task.agent] ?? task.agent}${task.mode === "goal" ? " · Goal" : ""} — ${
+                    task.prompt ? task.prompt.slice(0, 80) : ""
                   }`
                 : undefined;
               return (
@@ -1025,12 +958,12 @@ export default function ProjectDetail() {
           onClick={toggleAgentsMd}
           className="flex w-full items-center justify-between px-5 py-3 text-left text-sm font-medium text-slate-200"
         >
-          <span>AGENTS.md (gemeinsamer Kontext für Agenten)</span>
+          <span>AGENTS.md (shared context for agents)</span>
           <span className="text-slate-500">{showAgentsMd ? "▲" : "▼"}</span>
         </button>
         {showAgentsMd && (
           <pre className="max-h-80 overflow-auto border-t border-slate-800 p-4 font-mono text-xs whitespace-pre-wrap text-slate-300">
-            {agentsMd ?? "Lädt…"}
+            {agentsMd ?? "Loading…"}
           </pre>
         )}
       </div>
@@ -1041,7 +974,7 @@ export default function ProjectDetail() {
           onClick={() => setShowFiles((v) => !v)}
           className="flex w-full items-center justify-between rounded-2xl border border-slate-800 bg-slate-900 px-5 py-3 text-left text-sm font-medium text-slate-200"
         >
-          <span>📂 Dateien durchsuchen</span>
+          <span>📂 Browse files</span>
           <span className="text-slate-500">{showFiles ? "▲" : "▼"}</span>
         </button>
         {showFiles && <FileBrowser projectId={id} />}
@@ -1049,200 +982,200 @@ export default function ProjectDetail() {
 
       {/* History */}
       <div className="space-y-2">
-        <h2 className="font-medium text-slate-200">Historie ({tasks.length})</h2>
+        <h2 className="font-medium text-slate-200">History ({tasks.length})</h2>
         {tasks.length === 0 ? (
-          <p className="text-sm text-slate-500">Noch keine Aufgaben.</p>
+          <p className="text-sm text-slate-500">No tasks yet.</p>
         ) : (
           <div className="space-y-2">
-            {tasks.map((t) => (
-              <div key={t.id} className="rounded-xl border border-slate-800 bg-slate-900">
+            {tasks.map((task) => (
+              <div key={task.id} className="rounded-xl border border-slate-800 bg-slate-900">
                 <button
-                  onClick={() => toggleExpand(t)}
+                  onClick={() => toggleExpand(task)}
                   className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-left"
                 >
-                  <StatusBadge status={t.status} />
+                  <StatusBadge status={task.status} />
                   <span className="text-sm font-medium text-slate-200">
-                    {agentName[t.agent] ?? t.agent}
+                    {agentName[task.agent] ?? task.agent}
                   </span>
-                  {t.mode === "goal" && (
+                  {task.mode === "goal" && (
                     <span className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-xs font-medium text-cyan-300">
-                      Ziel
+                      Goal
                     </span>
                   )}
-                  {t.mode === "session" && (
+                  {task.mode === "session" && (
                     <span className="rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-medium text-purple-300">
                       Session
                     </span>
                   )}
-                  {t.is_session && t.mode !== "session" && (
+                  {task.is_session && task.mode !== "session" && (
                     <span
                       className="rounded bg-purple-500/15 px-1.5 py-0.5 text-xs font-medium text-purple-300"
-                      title="Interaktive Live-Session (Prompt einmal automatisch gesendet)"
+                      title="Interactive live session (prompt sent once automatically)"
                     >
-                      💬 interaktiv
+                      💬 interactive
                     </span>
                   )}
-                  {t.merge_state === "conflict" && (
+                  {task.merge_state === "conflict" && (
                     <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300">
-                      Merge-Konflikt
+                      Merge conflict
                     </span>
                   )}
                   <span className="flex-1 truncate text-sm text-slate-400">
-                    {t.mode === "session"
-                      ? t.prompt
-                        ? `Start: ${t.prompt}`
-                        : "ohne Startparameter"
-                      : t.prompt}
+                    {task.mode === "session"
+                      ? task.prompt
+                        ? `Start: ${task.prompt}`
+                        : "without start parameters"
+                      : task.prompt}
                   </span>
-                  {t.heartbeat_spawned && (
+                  {task.heartbeat_spawned && (
                     <span
                       className="shrink-0 rounded bg-cyan-500/15 px-1.5 py-0.5 text-xs font-medium text-cyan-300"
-                      title={`Automatisch vom Heartbeat für GitHub-Issue #${t.heartbeat_issue_number ?? "?"} gestartet`}
+                      title={`Auto-started by the heartbeat for GitHub issue #${task.heartbeat_issue_number ?? "?"}`}
                     >
-                      🤖 Auto-Fix #{t.heartbeat_issue_number ?? "?"}
+                      🤖 Auto-Fix #{task.heartbeat_issue_number ?? "?"}
                     </span>
                   )}
-                  {t.runner === "host" && (
+                  {task.runner === "host" && (
                     <span
                       className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs font-medium text-emerald-300"
-                      title="Auf dem Host per SSH ausgefuehrt (CD_<AGENT>_SSH_USER)"
+                      title="Executed on the host via SSH (CD_<AGENT>_SSH_USER)"
                     >
                       🖥 host
                     </span>
                   )}
-                  {t.env_profile_key && (
+                  {task.env_profile_key && (
                     <span
                       className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs font-medium text-amber-300"
-                      title={`Env-Profil: ${t.env_profile_key}`}
+                      title={`Env profile: ${task.env_profile_key}`}
                     >
-                      🔑 {t.env_profile_key}
+                      🔑 {task.env_profile_key}
                     </span>
                   )}
-                  {t.heartbeat_commented_at && (
+                  {task.heartbeat_commented_at && (
                     <span
                       className="shrink-0 rounded bg-cyan-500/15 px-1.5 py-0.5 text-xs text-cyan-300"
-                      title={`Dashboard hat auf GitHub-Issue #${t.heartbeat_issue_number ?? "?"} kommentiert`}
+                      title={`Dashboard commented on GitHub issue #${task.heartbeat_issue_number ?? "?"}`}
                     >
-                      💬 kommentiert
+                      💬 commented
                     </span>
                   )}
-                  {t.heartbeat_closed_at && (
+                  {task.heartbeat_closed_at && (
                     <span
                       className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-xs text-emerald-300"
-                      title={`Dashboard hat GitHub-Issue #${t.heartbeat_issue_number ?? "?"} geschlossen`}
+                      title={`Dashboard closed GitHub issue #${task.heartbeat_issue_number ?? "?"}`}
                     >
-                      ✓ geschlossen
+                      ✓ closed
                     </span>
                   )}
-                  {(t.images?.length ?? 0) > 0 && (
-                    <span className="text-xs text-slate-500">📎 {t.images.length}</span>
+                  {(task.images?.length ?? 0) > 0 && (
+                    <span className="text-xs text-slate-500">📎 {task.images.length}</span>
                   )}
-                  <span className="text-xs text-slate-500">{formatDate(t.created_at)}</span>
-                  {t.commit_hash ? (
+                  <span className="text-xs text-slate-500">{formatDate(task.created_at)}</span>
+                  {task.commit_hash ? (
                     <span className="flex items-center gap-1 text-xs text-slate-500">
-                      {commitUrl(project, t.commit_hash) ? (
+                      {commitUrl(project, task.commit_hash) ? (
                         <a
-                          href={commitUrl(project, t.commit_hash)!}
+                          href={commitUrl(project, task.commit_hash)!}
                           target="_blank"
                           rel="noreferrer"
                           className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-300 hover:text-cyan-400"
-                          title={t.commit_hash}
+                          title={task.commit_hash}
                         >
-                          ⎇ {t.commit_hash.slice(0, 8)}
+                          ⎇ {task.commit_hash.slice(0, 8)}
                         </a>
                       ) : (
                         <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-slate-300">
-                          ⎇ {t.commit_hash.slice(0, 8)}
+                          ⎇ {task.commit_hash.slice(0, 8)}
                         </span>
                       )}
                       <span
-                        className={t.pushed ? "text-emerald-400" : "text-amber-400"}
-                        title={t.pushed ? "Erfolgreich gepusht" : "Nicht gepusht"}
+                        className={task.pushed ? "text-emerald-400" : "text-amber-400"}
+                        title={task.pushed ? "Pushed successfully" : "Not pushed"}
                       >
-                        {t.pushed ? "gepusht ✓" : "nicht gepusht"}
+                        {task.pushed ? "pushed ✓" : "not pushed"}
                       </span>
                     </span>
-                  ) : t.status === "running" || t.status === "queued" ? (
+                  ) : task.status === "running" || task.status === "queued" ? (
                     <span className="text-xs text-slate-600">—</span>
                   ) : null}
-                  <span className="text-slate-600">{expanded === t.id ? "▲" : "▼"}</span>
+                  <span className="text-slate-600">{expanded === task.id ? "▲" : "▼"}</span>
                 </button>
 
-                {expanded === t.id && (
+                {expanded === task.id && (
                   <div className="space-y-3 border-t border-slate-800 p-4">
                     <div>
                       <div className="text-xs uppercase tracking-wide text-slate-500">
-                        {t.mode === "goal" ? "Ziel" : "Aufgabe"}
+                        {task.mode === "goal" ? "Goal" : "Task"}
                       </div>
-                      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-300">{t.prompt}</p>
+                      <p className="mt-1 whitespace-pre-wrap text-sm text-slate-300">{task.prompt}</p>
                     </div>
 
-                    {(t.images?.length ?? 0) > 0 && (
+                    {(task.images?.length ?? 0) > 0 && (
                       <div>
                         <div className="text-xs uppercase tracking-wide text-slate-500">
-                          Bilder ({t.images.length})
+                          Images ({task.images.length})
                         </div>
                         <div className="mt-1">
-                          <TaskImages taskId={t.id} names={t.images} />
+                          <TaskImages taskId={task.id} names={task.images} />
                         </div>
                       </div>
                     )}
 
                     <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-                      {t.commit_hash ? (
-                        commitUrl(project, t.commit_hash) ? (
+                      {task.commit_hash ? (
+                        commitUrl(project, task.commit_hash) ? (
                           <a
-                            href={commitUrl(project, t.commit_hash)!}
+                            href={commitUrl(project, task.commit_hash)!}
                             target="_blank"
                             rel="noreferrer"
                             className="rounded bg-slate-800 px-2 py-0.5 font-mono text-slate-300 hover:text-cyan-400"
                           >
-                            ⎇ {t.commit_hash.slice(0, 8)}
+                            ⎇ {task.commit_hash.slice(0, 8)}
                           </a>
                         ) : (
-                          <span className="font-mono">⎇ {t.commit_hash.slice(0, 8)}</span>
+                          <span className="font-mono">⎇ {task.commit_hash.slice(0, 8)}</span>
                         )
                       ) : (
-                        <span>kein Commit</span>
+                        <span>no commit</span>
                       )}
-                      <span>{t.pushed ? "gepusht ✓" : "nicht gepusht"}</span>
-                      {t.merge_state === "merged" && (
-                        <span className="text-emerald-400">gemerged → {project.default_branch}</span>
+                      <span>{task.pushed ? "pushed ✓" : "not pushed"}</span>
+                      {task.merge_state === "merged" && (
+                        <span className="text-emerald-400">merged into {project.default_branch}</span>
                       )}
-                      {t.merge_state === "conflict" && (
-                        <span className="text-amber-400" title="Branch blieb erhalten für manuellen Merge">
-                          Merge-Konflikt · Branch {t.branch}
+                      {task.merge_state === "conflict" && (
+                        <span className="text-amber-400" title="Branch kept for manual merge">
+                          Merge conflict · branch {task.branch}
                         </span>
                       )}
-                      {t.exit_code !== null && <span>exit {t.exit_code}</span>}
-                      {t.model && (
+                      {task.exit_code !== null && <span>exit {task.exit_code}</span>}
+                      {task.model && (
                         <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-300">
-                          {t.model}
+                          {task.model}
                         </span>
                       )}
-                      {t.effort && (
+                      {task.effort && (
                         <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-300">
-                          Effort: {t.effort}
+                          Effort: {task.effort}
                         </span>
                       )}
                     </div>
 
-                    {t.error && (
+                    {task.error && (
                       <pre className="overflow-auto rounded-lg border border-red-500/30 bg-red-500/10 p-3 font-mono text-xs whitespace-pre-wrap text-red-300">
-                        {t.error}
+                        {task.error}
                       </pre>
                     )}
 
                     <div>
                       <div className="flex items-center justify-between">
                         <div className="text-xs uppercase tracking-wide text-slate-500">
-                          Ausgabe
+                          Output
                         </div>
-                        {outputs[t.id] !== undefined && (
+                        {outputs[task.id] !== undefined && (
                           <IconButton
-                            label="Vollbild"
+                            label="Fullscreen"
                             onClick={() =>
-                              setFsOutput({ task: t, text: outputs[t.id] ?? "" })
+                              setFsOutput({ task, text: outputs[task.id] ?? "" })
                             }
                           >
                             ⛶
@@ -1250,7 +1183,7 @@ export default function ProjectDetail() {
                         )}
                       </div>
                       <pre className="mt-1 max-h-96 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs whitespace-pre-wrap text-slate-300">
-                        {outputs[t.id] ?? "Lädt…"}
+                        {outputs[task.id] ?? "Loading…"}
                       </pre>
                     </div>
                   </div>
@@ -1264,7 +1197,7 @@ export default function ProjectDetail() {
       {/* Pull output dialog */}
       {pullDialog.open && (
         <Modal
-          title={pullDialog.success ? "Pull abgeschlossen" : "Pull fehlgeschlagen"}
+          title={pullDialog.success ? "Pull completed" : "Pull failed"}
           onClose={() => setPullDialog((d) => ({ ...d, open: false }))}
         >
           <pre className={`max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 font-mono text-xs whitespace-pre-wrap ${pullDialog.success ? "text-slate-300" : "text-red-300"}`}>
@@ -1272,7 +1205,7 @@ export default function ProjectDetail() {
           </pre>
           <div className="mt-4 flex justify-end">
             <Button onClick={() => setPullDialog((d) => ({ ...d, open: false }))}>
-              Schließen
+              Close
             </Button>
           </div>
         </Modal>
@@ -1289,7 +1222,7 @@ export default function ProjectDetail() {
           onClose={() => setFsOutput(null)}
         >
           <pre className="min-h-0 flex-1 overflow-auto rounded-lg bg-slate-950 p-4 font-mono text-sm leading-relaxed whitespace-pre-wrap text-slate-300">
-            {fsOutput.text || "(keine Ausgabe)"}
+            {fsOutput.text || "(no output)"}
           </pre>
         </FullscreenShell>
       )}

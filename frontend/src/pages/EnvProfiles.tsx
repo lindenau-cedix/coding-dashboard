@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { api, ApiError } from "../api";
 import { Button, ErrorText, Spinner } from "../components/ui";
 import type { EnvProfile } from "../types";
@@ -21,6 +22,7 @@ const EMPTY_DRAFT: DraftProfile = {
 };
 
 export default function EnvProfiles() {
+  const { t } = useTranslation();
   const [profiles, setProfiles] = useState<EnvProfile[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState<DraftProfile>(EMPTY_DRAFT);
@@ -72,11 +74,11 @@ export default function EnvProfiles() {
 
   function validate(d: DraftProfile): string | null {
     if (!KEY_RE.test(d.key)) {
-      return "Key muss mit [a-z0-9] beginnen, danach lowercase / digits / '-' (max 63 Zeichen).";
+      return t("envProfiles.validateKey");
     }
-    if (!d.name.trim()) return "Name darf nicht leer sein.";
+    if (!d.name.trim()) return t("envProfiles.validateName");
     if (d.baseUrl && !/^https?:\/\//.test(d.baseUrl)) {
-      return "Base-URL muss mit http:// oder https:// beginnen (oder leer lassen).";
+      return t("envProfiles.validateBaseUrl");
     }
     // Token is OPTIONAL on POST (token-only is the only writable field).
     // On PATCH empty == "leave unchanged" so we never need to validate it.
@@ -113,9 +115,7 @@ export default function EnvProfiles() {
         // the base URL). The server refuses a non-empty token when
         // encryption is unavailable (503).
         if (draft.token && !encryptionAvailable) {
-          setError(
-            "CD_SECRET_KEY ist noch der Default – Token-Speicherung ist deaktiviert. Setze die Variable in der Service-Env und starte neu.",
-          );
+          setError(t("envProfiles.encryptionWarningShort"));
           return;
         }
         await api.createEnvProfile({
@@ -139,7 +139,7 @@ export default function EnvProfiles() {
   }
 
   async function remove(key: string) {
-    if (!confirm(`Env-Profil '${key}' loeschen?`)) return;
+    if (!confirm(t("envProfiles.deleteConfirm", { name: key }))) return;
     setBusy(true);
     try {
       await api.deleteEnvProfile(key);
@@ -159,27 +159,23 @@ export default function EnvProfiles() {
     <div className="space-y-6">
       <header>
         <h1 className="text-xl font-semibold text-slate-100">
-          Env-Profile (ANTHROPIC_*)
+          {t("envProfiles.pageTitle")}
         </h1>
         <p className="mt-1 text-sm text-slate-400">
-          Benoannte ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN Buendel, die
-          du pro Aufgabe / Ziel / Session oder pro Projekt im Heartbeat
-          auswaehlen kannst. Der Auth-Token wird in der DB verschluesselt
-          (Fernet via CD_SECRET_KEY) und kann danach nicht mehr angezeigt
-          werden.
+          {t("envProfiles.pageIntro")}
         </p>
         {!encryptionAvailable && (
           <p className="mt-3 rounded-lg border border-amber-700 bg-amber-900/40 p-3 text-sm text-amber-200">
-            CD_SECRET_KEY ist noch der Default-Wert – das Speichern eines
-            Tokens ist deaktiviert. Bitte in der Env-Datei der Installation
-            setzen, Backend neu starten, dann erneut versuchen.
+            {t("envProfiles.encryptionWarning")}
           </p>
         )}
       </header>
 
       <section className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
         <h2 className="text-base font-medium text-slate-200">
-          {editing ? `Profil '${editing}' bearbeiten` : "Neues Profil anlegen"}
+          {editing
+            ? t("envProfiles.editTitle", { name: editing })
+            : t("envProfiles.newTitle")}
         </h2>
         <form
           className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2"
@@ -189,7 +185,7 @@ export default function EnvProfiles() {
           }}
         >
           <label className="block text-sm">
-            <span className="text-slate-300">Key</span>
+            <span className="text-slate-300">{t("envProfiles.key")}</span>
             <input
               type="text"
               className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
@@ -200,11 +196,11 @@ export default function EnvProfiles() {
               required
             />
             <span className="mt-1 block text-xs text-slate-500">
-              Stabiler Identifier (slug). Nach dem Anlegen nicht mehr aenderbar.
+              {t("envProfiles.keyHint")}
             </span>
           </label>
           <label className="block text-sm">
-            <span className="text-slate-300">Name</span>
+            <span className="text-slate-300">{t("envProfiles.name")}</span>
             <input
               type="text"
               className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
@@ -215,7 +211,7 @@ export default function EnvProfiles() {
             />
           </label>
           <label className="block text-sm sm:col-span-2">
-            <span className="text-slate-300">ANTHROPIC_BASE_URL</span>
+            <span className="text-slate-300">{t("envProfiles.baseUrlLabel")}</span>
             <input
               type="url"
               className="mt-1 block w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-slate-100 outline-none focus:border-cyan-500"
@@ -223,13 +219,13 @@ export default function EnvProfiles() {
               onChange={(e) =>
                 setDraft({ ...draft, baseUrl: e.target.value })
               }
-              placeholder="https://api.example.com  (leer = Standard)"
+              placeholder={t("envProfiles.baseUrlPlaceholder")}
             />
           </label>
           <label className="block text-sm sm:col-span-2">
             <span className="text-slate-300">
-              ANTHROPIC_AUTH_TOKEN{" "}
-              {editing && draft.token === "" ? "(unveraendert)" : ""}
+              {t("envProfiles.tokenLabel")}{" "}
+              {editing && draft.token === "" ? t("envProfiles.tokenUnchanged") : ""}
             </span>
             <input
               type="password"
@@ -239,27 +235,29 @@ export default function EnvProfiles() {
               onChange={(e) => setDraft({ ...draft, token: e.target.value })}
               placeholder={
                 editing
-                  ? "Leer lassen = bestehender Token bleibt"
-                  : "Leer lassen = nur Base-URL setzen"
+                  ? t("envProfiles.tokenUnchangedPlaceholder")
+                  : t("envProfiles.tokenBaseUrlOnlyPlaceholder")
               }
             />
             <span className="mt-1 block text-xs text-amber-300/80">
-              Wird beim Speichern mit Fernet + CD_SECRET_KEY verschluesselt
-              und kann danach NICHT mehr angezeigt werden. Zum Rotieren
-              neuen Token eingeben.
+              {t("envProfiles.tokenSaveHint")}
             </span>
           </label>
 
           <div className="mt-2 flex flex-wrap items-center gap-2 sm:col-span-2">
             <Button type="submit" disabled={busy}>
-              {busy ? "Speichert…" : editing ? "Aenderungen speichern" : "Anlegen"}
+              {busy
+                ? t("envProfiles.saving")
+                : editing
+                ? t("envProfiles.saveChanges")
+                : t("envProfiles.createSubmit")}
             </Button>
             <button
               type="button"
               onClick={startCreate}
               className="text-sm text-slate-300 underline-offset-2 hover:underline"
             >
-              Formular leeren
+              {t("envProfiles.resetForm")}
             </button>
           </div>
         </form>
@@ -268,11 +266,11 @@ export default function EnvProfiles() {
 
       <section>
         <h2 className="text-base font-medium text-slate-200">
-          Vorhandene Profile ({sorted.length})
+          {t("envProfiles.existingCount", { count: sorted.length })}
         </h2>
         {sorted.length === 0 ? (
           <p className="mt-2 text-sm text-slate-400">
-            Noch keine Profile angelegt.
+            {t("envProfiles.noneYet")}
           </p>
         ) : (
           <ul className="mt-3 divide-y divide-slate-800 rounded-xl border border-slate-800 bg-slate-900/40">
@@ -297,11 +295,13 @@ export default function EnvProfiles() {
                   <div className="text-xs">
                     {p.anthropic_auth_token_set ? (
                       <span className="text-emerald-400">
-                        🔐 Token gesetzt ({p.anthropic_auth_token_hint})
+                        {t("envProfiles.tokenSetWithHint", {
+                          hint: p.anthropic_auth_token_hint,
+                        })}
                       </span>
                     ) : (
                       <span className="text-slate-500">
-                        🔓 Kein Token (nur Base-URL)
+                        {t("envProfiles.noToken")}
                       </span>
                     )}
                   </div>
@@ -311,13 +311,13 @@ export default function EnvProfiles() {
                     onClick={() => startEdit(p)}
                     className="rounded-lg border border-slate-700 px-3 py-1.5 text-slate-200 hover:bg-slate-800"
                   >
-                    Bearbeiten
+                    {t("envProfiles.edit")}
                   </button>
                   <button
                     onClick={() => void remove(p.key)}
                     className="rounded-lg border border-rose-700 px-3 py-1.5 text-rose-200 hover:bg-rose-900/40"
                   >
-                    Loeschen
+                    {t("envProfiles.delete")}
                   </button>
                 </div>
               </li>

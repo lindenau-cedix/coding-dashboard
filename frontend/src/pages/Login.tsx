@@ -1,10 +1,12 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { getApiBase, setApiBase } from "../api";
 import { useAuth } from "../auth";
 import { Button, ErrorText } from "../components/ui";
 
 export default function Login() {
+  const { t } = useTranslation();
   const { login } = useAuth();
   const navigate = useNavigate();
   const [username, setUsername] = useState("admin");
@@ -24,7 +26,7 @@ export default function Login() {
       await login(username, password);
       navigate("/", { replace: true });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login fehlgeschlagen");
+      setError(err instanceof Error ? err.message : t("common.loginFailed"));
     } finally {
       setBusy(false);
     }
@@ -38,14 +40,14 @@ export default function Login() {
       >
         <div className="text-center">
           <div className="text-3xl text-cyan-400">⌘</div>
-          <h1 className="mt-2 text-xl font-semibold text-slate-100">Coding Dashboard</h1>
-          <p className="text-sm text-slate-400">Bitte anmelden</p>
+          <h1 className="mt-2 text-xl font-semibold text-slate-100">{t("login.title")}</h1>
+          <p className="text-sm text-slate-400">{t("login.subtitle")}</p>
         </div>
 
         <ErrorText>{error}</ErrorText>
 
         <div className="space-y-1">
-          <label className="text-sm text-slate-300">Benutzername</label>
+          <label className="text-sm text-slate-300">{t("common.username")}</label>
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
@@ -54,7 +56,7 @@ export default function Login() {
           />
         </div>
         <div className="space-y-1">
-          <label className="text-sm text-slate-300">Passwort</label>
+          <label className="text-sm text-slate-300">{t("common.password")}</label>
           <input
             type="password"
             value={password}
@@ -65,7 +67,7 @@ export default function Login() {
         </div>
 
         <Button type="submit" disabled={busy} className="w-full">
-          {busy ? "Anmelden…" : "Anmelden"}
+          {busy ? t("common.loggingIn") : t("common.login")}
         </Button>
 
         <button
@@ -73,12 +75,12 @@ export default function Login() {
           onClick={() => setShowServer((s) => !s)}
           className="w-full text-center text-xs text-slate-500 hover:text-slate-300"
         >
-          {showServer ? "▲ Server-Einstellungen" : "▼ Server-Einstellungen"}
+          {showServer ? t("common.hideServerSettings") : t("common.showServerSettings")}
         </button>
         {showServer && (
           <div className="space-y-1 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
             <label className="text-xs text-slate-400">
-              Backend-URL (leer = gleiche Herkunft wie diese Seite)
+              {t("common.serverSettingsHint")}
             </label>
             <input
               value={apiBase}
@@ -87,9 +89,7 @@ export default function Login() {
               className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-500"
             />
             <p className="text-xs text-slate-500">
-              In der Android-App hier die oeffentliche Adresse deines Servers eintragen.
-              Falls der APK-Build ein Cloudflare-Service-Token eingebettet hat, gilt
-              dieses nur fuer die beim Build konfigurierte URL.
+              {t("common.androidServerHint")}
             </p>
           </div>
         )}

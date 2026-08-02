@@ -448,7 +448,7 @@ class HeartbeatRunner:
         else:
             labels_str = str(labels)
 
-        body = (issue.get("body") or "").strip() or "(keine Beschreibung)"
+        body = (issue.get("body") or "").strip() or "(no description)"
         user = (issue.get("user") or {}).get("login") or "unknown"
         number = issue.get("number")
         title = issue.get("title") or ""
@@ -752,8 +752,8 @@ def format_comment_body(
         f"merged in `{task.merge_state or 'merged'}` branch `{branch}`"
     )
     if task.merge_state == "conflict":
-        merged = f"Konflikt — Branch `{branch}` bleibt für manuellen Merge"
-    push_label = "✓ gepusht" if task.pushed else "⚠ nicht gepusht"
+        merged = f"Conflict — branch `{branch}` kept for manual merge"
+    push_label = "✓ pushed" if task.pushed else "⚠ not pushed"
 
     base = _dashboard_base_url()
     task_url = (
@@ -766,7 +766,7 @@ def format_comment_body(
     )
 
     lines = [
-        f"🤖 [coding-dashboard] Heartbeat-Fix für Issue #{number} im Repo `{repo}`:",
+        f"🤖 [coding-dashboard] Heartbeat fix for issue #{number} in repo `{repo} `:",
         "",
         f"**Task:** <{task_url}>",
         f"**Ergebnis:** {_short(task.result_summary, 600) or '–'}",
@@ -776,9 +776,9 @@ def format_comment_body(
         lines.append(f"**Commit:** <{commit_url}>")
     lines += [
         "",
-        "Bitte den Branch / PR reviewen und das Issue manuell schließen,"
-        " falls die Untersuchung nicht passt. Der Dashboard-Heartbeat"
-        " meldet sich nicht nochmal zu diesem Issue.",
+        "Please review the branch / PR and close the issue manually,"
+        " if the investigation does not match. The dashboard heartbeat"
+        " will not re-comment on this issue.",
     ]
     return "\n".join(lines)
 
@@ -1042,7 +1042,7 @@ class HeartbeatFollowup:
             self._latest_task_snapshot, project.id, issue_number
         )
         if snapshot is None:
-            return {"error": "Kein passender Task gefunden."}
+            return {"error": "No matching task found."}
         task, _, seen = snapshot
         body = format_comment_body(task, project, seen.issue_url if seen else "")
         try:

@@ -24,7 +24,7 @@ async def ws_task(websocket: WebSocket, task_id: str, token: str = Query(default
         with session_scope() as db:
             task = db.get(Task, task_id)
             if task is None:
-                await websocket.send_json({"type": "error", "message": "Task nicht gefunden"})
+                await websocket.send_json({"type": "error", "message": "Task not found"})
                 await websocket.close()
                 return
             data = task_to_dict(task)

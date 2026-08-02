@@ -42,14 +42,14 @@ async def create_session(
     """
     project = db.get(Project, body.project_id)
     if project is None:
-        raise HTTPException(404, "Projekt nicht gefunden.")
+        raise HTTPException(404, "Project not found.")
 
     cfg = get_agents_config()
     spec = cfg.agents.get(body.agent)
     if spec is None or not spec.enabled:
         raise HTTPException(400, f"Unknown or disabled agent: {body.agent}")
     if not spec.session_command:
-        raise HTTPException(400, f"Agent {spec.display_name} unterstützt keinen Session-Modus.")
+        raise HTTPException(400, f"Agent {spec.display_name} does not support session mode.")
     if body.model and body.model not in (spec.model_choices or []):
         raise HTTPException(400, f"Model '{body.model}' not supported by {spec.display_name}.")
     if body.effort and body.effort not in (spec.effort_choices or []):
@@ -59,10 +59,10 @@ async def create_session(
     is_interactive = body.mode in ("task", "goal")
     initial_prompt = body.initial_prompt.strip()
     if is_interactive and not initial_prompt:
-        raise HTTPException(400, "Interaktive Session benötigt einen Prompt.")
+        raise HTTPException(400, "Interactive session requires a prompt.")
     if body.mode == "goal" and not spec.goal_command:
         raise HTTPException(
-            400, f"Agent {spec.display_name} unterstützt keinen Goal-Modus."
+            400, f"Agent {spec.display_name} does not support goal mode."
         )
     # Per-session "host" runner guard — same semantics as ``create_task``.
     if body.runner == "host":
@@ -78,9 +78,9 @@ async def create_session(
         if host_spec is None or not host_spec.enabled or not host_spec.session_command:
             raise HTTPException(
                 400,
-                f"Host-Runner fuer Agent '{base_agent}' nicht aktiviert. "
-                f"Setze CD_{base_agent.upper()}_SSH_USER in der Env-Datei "
-                f"und starte das Backend neu.",
+                f"Host runner for agent '{base_agent}' not enabled. "
+                f"Set CD_{base_agent.upper()}_SSH_USER in the env file "
+                f"and restart the backend.",
             )
     # Env-profile must exist when set; same semantics as ``create_task``.
     if body.env_profile_key:
@@ -92,13 +92,13 @@ async def create_session(
         if exists is None:
             raise HTTPException(
                 404,
-                f"Env-Profil '{body.env_profile_key}' nicht gefunden.",
+                f"Env profile '{body.env_profile_key}' not found.",
             )
     start_args = body.start_args.strip()
     try:
         shlex.split(start_args)
     except ValueError as exc:
-        raise HTTPException(400, f"Startparameter können nicht geparst werden: {exc}")
+        raise HTTPException(400, f"Start parameters cannot be parsed: {exc}")
 
     # For an interactive Task/Goal, ``Task.prompt`` holds the real prompt (good
     # commit subject + history text) and ``mode`` records task/goal; start_args
@@ -142,7 +142,7 @@ async def create_session(
                 t.finished_at = datetime.now(timezone.utc)
         raise HTTPException(400, str(exc))
     if not started:
-        raise HTTPException(500, "Session konnte nicht gestartet werden.")
+        raise HTTPException(500, "Session could not be started.")
 
     return {"task_id": task.id, "status": "running"}
 
@@ -156,9 +156,9 @@ async def get_session(
     """Return session task metadata including current chat_history."""
     task = db.get(Task, task_id)
     if task is None:
-        raise HTTPException(404, "Session nicht gefunden.")
+        raise HTTPException(404, "Session not found.")
     if not task.is_session:
-        raise HTTPException(400, "Task ist keine Session.")
+        raise HTTPException(400, "Task is not a session.")
     return {
         "id": task.id,
         "project_id": task.project_id,
@@ -189,9 +189,9 @@ async def end_session(
     with session_scope() as sdb:
         task = sdb.get(Task, task_id)
         if task is None:
-            raise HTTPException(404, "Session nicht gefunden.")
+            raise HTTPException(404, "Session not found.")
         if not task.is_session:
-            raise HTTPException(400, "Task ist keine Session.")
+            raise HTTPException(400, "Task is not a session.")
         project_id = task.project_id
 
     result = await session_manager.end_session(
@@ -243,7 +243,7 @@ async def ws_session(
         with session_scope() as db:
             task = db.get(Task, task_id)
             if task is None:
-                await websocket.send_json({"type": "error", "message": "Session nicht gefunden"})
+                await websocket.send_json({"type": "error", "message": "Session not found"})
                 await websocket.close()
                 return
             if task.output and offset < len(task.output):
